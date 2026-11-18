@@ -1,0 +1,41 @@
+{
+  "name": "beach-survival-pvp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Chibi cel-shaded multiplayer battle royale on a tropical island.",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n client,server -c cyan,magenta \"npm:dev:client\" \"npm:dev:server\"",
+    "dev:client": "vite",
+    "dev:server": "tsx watch server/index.ts",
+    "build": "tsc --noEmit -p . && vite build",
+    "preview": "vite preview",
+    "start": "NODE_ENV=production exec node --import tsx server/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "playwright test",
+    "test:e2e": "playwright test",
+    "e2e:local": "bash scripts/e2e-local.sh",
+    "typecheck": "tsc --noEmit -p .",
+    "setup:chromium-libs": "bash scripts/setup-chromium-libs.sh",
+    "size": "node scripts/check-bundle-size.mjs"
+  },
+  "dependencies": {
+    "three": "0.187.0",
+    "ws": "8.23.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "@types/node": "26.6.6",
+    "@types/three": "0.187.0",
+    "@types/ws": "8.18.2",
+    "concurrently": "10.0.7",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.8",
+    "vitest": "5.1.0"
+  }
+}
