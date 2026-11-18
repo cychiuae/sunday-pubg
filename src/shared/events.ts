@@ -9,19 +9,32 @@
  * - `isLocal*` flags are relative to the local player id (or false when there is none).
  * - Positions are world space; times are server-clock ms unless named otherwise.
  */
+import type { Balance, ZoneTheme } from './balance';
 import type {
   ActionFailReason,
+  AnyMapData,
+  DropRoute,
+  MapId,
+  MapPickVia,
+  MemberId,
+  RoomId,
+  ArmorHit,
   ConnectionStatus,
   DeathCause,
   FailedAction,
+  GrenadeContactSurface,
+  GrenadeId,
   GunId,
   HealId,
+  HeldId,
   ItemId,
   LootId,
   MatchPhase,
   PlayerId,
   ShotImpact,
+  SightType,
   SlotIndex,
+  Stance,
   Standing,
   Surface,
   Vec3,
@@ -51,20 +64,36 @@ export interface GameEvents {
     /** Victim's current position (for hit VFX / positional audio). */
     victimPos: Vec3;
     hpAfter: number;
-    armorAfter: number;
-    /** M1-fix (producer: ClientGame, copied from SimEvent damage.armorBefore). Absent = unknown. */
-    armorBefore?: number;
+    /**
+     * M2a (replaces armorAfter/armorBefore; copied from SimEvent damage). Vest hit = vest !== null; vest break =
+     * vest?.broken. Pitch the clink by vest.tier. Same for helmet (head hits only).
+     */
+    vest: ArmorHit | null;
+    helmet: ArmorHit | null;
     isLocalVictim: boolean;
     isLocalAttacker: boolean;
   };
-  /** The local player damaged someone (hit marker / hit sound). Emitted after the matching playerDamaged. */
-  localHitConfirmed: { victimId: PlayerId; amount: number; headshot: boolean; killed: boolean };
+  /**
+   * The local player damaged someone (hit marker / hit sound). Emitted after the matching playerDamaged.
+   * M2a: vest/helmet copied from the damage event, for the "armor hit" / "helmet hit" marker variants and the
+   * break flash. cause 'explosion' for grenade hits (no headshot).
+   */
+  localHitConfirmed: {
+    victimId: PlayerId;
+    amount: number;
+    headshot: boolean;
+    killed: boolean;
+    vest: ArmorHit | null;
+    helmet: ArmorHit | null;
+    cause: DeathCause;
+  };
   playerKilled: {
     killerId: PlayerId | null;
     killerName: string | null;
     victimId: PlayerId;
     victimName: string;
-    weapon: WeaponId | null;
+    /** M2a: 'grenade' for explosion kills (kill feed icon). */
+    weapon: HeldId | null;
     cause: DeathCause;
     victimPos: Vec3;
     placement: number;
@@ -74,7 +103,8 @@ export interface GameEvents {
     isLocalKiller: boolean;
   };
 
-  itemPickedUp: { playerId: PlayerId; item: ItemId; qty: number; pos: Vec3; isLocal: boolean };
+  /** M2a: `durability` for armor pickups (the worn piece's durability after equipping). */
+  itemPickedUp: { playerId: PlayerId; item: ItemId; qty: number; pos: Vec3; isLocal: boolean; durability?: number };
   reloadStarted: { playerId: PlayerId; weapon: GunId; durationMs: number; pos: Vec3; isLocal: boolean };
   /** completed = false when cancelled (switch weapon, death). */
   reloadFinished: { playerId: PlayerId; weapon: GunId; completed: boolean; pos: Vec3; isLocal: boolean };
@@ -82,13 +112,62 @@ export interface GameEvents {
   healFinished: { playerId: PlayerId; item: HealId; hpAfter: number; pos: Vec3; isLocal: boolean };
   healCancelled: { playerId: PlayerId; item: HealId; pos: Vec3; isLocal: boolean };
   /** M1-fix: `pos` (producer: ClientGame) = the player's current view position, like reload/heal events. */
-  weaponSwitched: { playerId: PlayerId; weapon: WeaponId; slot: SlotIndex; isLocal: boolean; pos?: Vec3 };
+  /** M2a: weapon 'grenade' with slot 3. */
+  weaponSwitched: { playerId: PlayerId; weapon: HeldId; slot: SlotIndex; isLocal: boolean; pos?: Vec3 };
   /**
    * M1-fix (producer: ClientGame, from SimEvent actionFailed; emitted only when isLocal in M1). Ui shows the
    * string from ARCHITECTURE.md §12 "Contract revision 1"; audio plays a refusal cue. Not emitted for `fire`
-   * (ClientGame's local `dryFire` already covers it).
+   * (ClientGame's local `dryFire` already covers it). M2a reasons: ARCHITECTURE.md §14 string table.
    */
   actionFailed: { playerId: PlayerId; action: FailedAction; reason: ActionFailReason; isLocal: boolean };
+
+  /**
+   * M2a: a stance transition started. Local player: emitted from PREDICTION (MovementStepResult.stanceChanged) on the
+   * step it starts; the server echo for the local id is ignored. Remotes: from SimEvent stanceChange.
+   * Consumers: audio (cloth rustle, prone thud after durationMs), render (splash when forced), ui (stance icon anim).
+   */
+  stanceChanged: {
+    playerId: PlayerId;
+    from: Stance;
+    to: Stance;
+    forced: boolean;
+    durationMs: number;
+    pos: Vec3;
+    isLocal: boolean;
+  };
+  /**
+   * M2a, local only, client-derived from prediction: ADS engaged (adsMs went 0 -> > 0) or ended (-> 0).
+   * Audio: ADS rustle, scope-in lens sound when `sight` is a scope.
+   */
+  localAdsChanged: { engaged: boolean; weapon: WeaponId; sight: SightType };
+  /** M2a: pin pulled (SimEvent grenadeCook). Audio: positional click (~10 m). */
+  grenadeCooked: { playerId: PlayerId; pos: Vec3; explodesAt: number; isLocal: boolean };
+  /** M2a: grenade entity created (SimEvent grenadeThrown). `dropped` = no throw whoosh. isLocal = local owner. */
+  grenadeThrown: {
+    id: GrenadeId;
+    ownerId: PlayerId;
+    pos: Vec3;
+    vel: Vec3;
+    explodesAt: number;
+    dropped: boolean;
+    isLocal: boolean;
+  };
+  /** M2a: SimEvent grenadeBounce. Audio clink pitched by speed; water plop when surface 'water'; render splash. */
+  grenadeBounced: { id: GrenadeId; pos: Vec3; surface: GrenadeContactSurface; speed: number };
+  /**
+   * M2a: SimEvent explosion (emitted on the bus BEFORE the playerDamaged events of the same blast).
+   * `localDistance`: 3D distance from the local player's predicted eye to `pos` (null when no live local player);
+   * render scales camera shake by it (none beyond 2 x radius), audio plays the muffled ring when <= radius.
+   */
+  explosion: {
+    id: GrenadeId;
+    ownerId: PlayerId;
+    pos: Vec3;
+    radius: number;
+    inHand: boolean;
+    isLocalOwner: boolean;
+    localDistance: number | null;
+  };
 
   /** Derived from snapshots: first zone, phaseIndex change, or shrinking flag change. */
   zoneChanged: { zone: ZoneState };
@@ -97,8 +176,13 @@ export interface GameEvents {
   /** Local player crossed the safe-zone edge. */
   localZoneStatusChanged: { outside: boolean };
 
-  /** Client-derived from movement (local predicted + interpolated remotes), cadence by speed. */
-  footstep: { playerId: PlayerId; pos: Vec3; surface: Surface; sprinting: boolean; isLocal: boolean };
+  /**
+   * Client-derived from movement (local predicted + interpolated remotes), cadence by speed.
+   * M2a addendum (producer: game-developer; consumer: audio crouch/crawl steps): `stance` = the player's target stance
+   * at the step (local: predicted MovementState.stance; remotes: interpolated PlayerState.stance). Optional until
+   * ClientGame and derived.ts fill it; absent = audio falls back to its last stanceChanged per player.
+   */
+  footstep: { playerId: PlayerId; pos: Vec3; surface: Surface; sprinting: boolean; isLocal: boolean; stance?: Stance };
   jump: { playerId: PlayerId; pos: Vec3; isLocal: boolean };
   /** fallSpeed: downward m/s at touchdown (>= 0). */
   land: { playerId: PlayerId; pos: Vec3; fallSpeed: number; surface: Surface; isLocal: boolean };
@@ -116,7 +200,51 @@ export interface GameEvents {
   };
 
   /** Nearest pickable loot within player.pickupRange changed. lootId null = nothing in range. */
-  interactPromptChanged: { lootId: LootId | null; item: ItemId | null; qty: number };
+  /**
+   * M2a: `durability` = the pickup's LootState.durability for armor ("[E] Vest (Lv 2) 31/55"), else null.
+   * `refusal` = the reason E would be refused right now, predicted from the latest snapshot.local (inventoryFull,
+   * betterArmor), else null, so the prompt can warn before the press.
+   */
+  interactPromptChanged: {
+    lootId: LootId | null;
+    item: ItemId | null;
+    qty: number;
+    durability: number | null;
+    /**
+     * M2a addendum (producer: game-developer derived.ts, from balance items.<id>.durability; consumer: Ui prompt
+     * "31/55"): fresh durability of the armor piece in the prompt, null for every other item. Optional until the
+     * producer fills it; absent = Ui uses its own cache.
+     */
+    maxDurability?: number | null;
+    refusal: ActionFailReason | null;
+  };
+  // ---- M2b (ADR 0005 / 0006). Producer: ClientGame. ----
+  /**
+   * The active map changed (first welcome, or a welcome for a different map). Emitted BEFORE the first frame that
+   * uses it. `balance` is the effective per-map balance (balanceForMap): render, audio and Ui must use it instead of
+   * their constructor balance for per-match numbers. Renderer rebuilds its scene (terrain or indoor floor, walls,
+   * props, water or rain curtain); Ui rebuilds the minimap; audio switches ambience, reverb and zone loops by theme.
+   */
+  mapChanged: { mapId: MapId; map: AnyMapData; balance: Balance; zoneTheme: ZoneTheme };
+  /** The carrier left its entry point (client-derived when serverNow passes route.startsAt). Engine loop, announcer. */
+  carrierDeparted: { route: DropRoute };
+  /** A player left the carrier (SimEvent dropJump; local from prediction). Hatch whoosh, announcer. */
+  playerJumped: { playerId: PlayerId; pos: Vec3; auto: boolean; isLocal: boolean };
+  /** A parachute opened (SimEvent chuteOpen; local from prediction). Pop sound, canopy model. */
+  parachuteOpened: { playerId: PlayerId; pos: Vec3; manual: boolean; isLocal: boolean };
+  /** You entered a room (create, join, or rejoin). */
+  roomJoined: { roomId: RoomId; code: string; asHost: boolean; spectating: boolean };
+  /** A join failed (reject). `code` = the code you tried, if any. */
+  roomJoinFailed: { reason: 'notFound' | 'full' | 'closed' | 'rateLimited' | 'badCode' | 'kicked'; code: string | null };
+  roomCreateFailed: { reason: 'roomLimit' | 'rateLimited' | 'badSettings' | 'busy' };
+  roomLeft: { reason: 'left' | 'kicked' | 'closed' };
+  roomHostChanged: { hostId: MemberId; hostName: string; isLocal: boolean };
+  roomMemberChanged: { memberId: MemberId; name: string; change: 'joined' | 'left' };
+  /** The host changed settings (waiting-room toast, non-hosts only). */
+  roomSettingsChanged: { byHost: true };
+  /** The match's map was decided (room lock). */
+  mapVoteLocked: { mapId: MapId; via: MapPickVia };
+
   /** Spectate camera target changed (local dead or not participating). null = not spectating. */
   spectateTargetChanged: { targetId: PlayerId | null; targetName: string | null };
   connectionStatus: { status: ConnectionStatus; reason?: string };

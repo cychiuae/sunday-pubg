@@ -12,6 +12,11 @@ export * from './chibi';
 export * from './props';
 export * from './weapons';
 export * from './loot';
+export * from './grenade';
+export * from './wearables';
+export * from './office';
+export * from './carrier';
+export * from './viewmodel';
 export { buildMerged, countTris, type Merged, type Piece } from './builder';
 
 export interface CharacterModel {

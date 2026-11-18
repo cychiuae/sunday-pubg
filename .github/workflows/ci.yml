@@ -33,8 +33,9 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Typecheck
-        run: npm run typecheck
+      - name: Typecheck (tsc must be clean)
+        # Fails the job on any type error (tsc exits non-zero).
+        run: npx tsc --noEmit -p .
 
       - name: Unit tests
         run: npx vitest run

@@ -89,7 +89,7 @@ test('last name is pre-filled after reload', async ({ browser }) => {
   const { ctx, page } = await newPlayer(browser, stack.baseURL);
   await openTitle(page);
   await join(page, '  Mango  ');
-  await expect(ui.lobby(page)).toBeVisible({ timeout: 15_000 });
+  await expect(ui.browser(page)).toBeVisible({ timeout: 15_000 });
   await page.reload();
   await expect(ui.title(page)).toBeVisible({ timeout: 30_000 });
   await expect(ui.nameInput(page)).toHaveValue('Mango');

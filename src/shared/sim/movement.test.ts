@@ -18,13 +18,20 @@ const mv = (over: Partial<MovementInput> = {}): MovementInput => ({
   sprint: false,
   speedMultiplier: 1,
   canSprint: true,
+  stanceToggle: null,
+  ads: false,
+  held: 'fists',
+  adsBlocked: false,
   ...over,
 });
+/** Settled standing, not aiming, no drop phase (a dropping state with dropPhase null is the M1 parachute-speed drop). */
+const STANCE0 = { stance: 'stand', stanceFrom: 'stand', stanceMs: 0, adsMs: 0, dropPhase: null, dropMs: 0 } as const;
 const grounded = (x: number, y: number, z: number): MovementState => ({
   pos: { x, y, z },
   vel: { x: 0, y: 0, z: 0 },
   grounded: true,
   dropping: false,
+  ...STANCE0,
 });
 function simulate(state: MovementState, inp: MovementInput | ((i: number) => MovementInput), n: number, ctx: MovementContext) {
   let s = state;
@@ -57,7 +64,7 @@ describe('movement', () => {
         sprint: rng.next() < 0.5,
       }),
     );
-    const start: MovementState = { pos: { x: 30, y: 40, z: 60 }, vel: { x: 0, y: 0, z: 0 }, grounded: false, dropping: true };
+    const start: MovementState = { pos: { x: 30, y: 40, z: 60 }, vel: { x: 0, y: 0, z: 0 }, grounded: false, dropping: true, ...STANCE0 };
     const frozen = JSON.stringify(start);
     const a = simulate(start, (i) => inputs[i]!, 600, ctx);
     const c = simulate(start, (i) => inputs[i]!, 600, ctx);
@@ -81,11 +88,11 @@ describe('movement', () => {
 
   it('toMovementInput: healing slows and blocks sprint, holding fire blocks sprint, dead = no movement', () => {
     const i = input({ moveForward: 1, sprint: true });
-    const heal = toMovementInput(i, { alive: true, healing: true, reloading: false }, b);
+    const heal = toMovementInput(i, { alive: true, healing: true, reloading: false, held: 'fists', swapping: false, fireSlowed: false }, b);
     expect(heal.speedMultiplier).toBe(b.movement.healMoveMultiplier);
     expect(heal.canSprint).toBe(false);
-    expect(toMovementInput({ ...i, fire: true }, { alive: true, healing: false, reloading: false }, b).canSprint).toBe(false);
-    expect(toMovementInput(i, { alive: false, healing: false, reloading: false }, b).speedMultiplier).toBe(0);
+    expect(toMovementInput({ ...i, fire: true }, { alive: true, healing: false, reloading: false, held: 'fists', swapping: false, fireSlowed: false }, b).canSprint).toBe(false);
+    expect(toMovementInput(i, { alive: false, healing: false, reloading: false, held: 'fists', swapping: false, fireSlowed: false }, b).speedMultiplier).toBe(0);
     const s = simulate(grounded(0, 2, 0), heal, 30, flat).s;
     expect(hspeed(s)).toBeCloseTo(b.movement.walkSpeed * b.movement.healMoveMultiplier, 5);
   });
@@ -165,7 +172,7 @@ describe('movement', () => {
   });
 
   it('drop phase: constant fall speed, steer speed, lands without dropping flag', () => {
-    const start: MovementState = { pos: { x: 0, y: 32, z: 0 }, vel: { x: 0, y: 0, z: 0 }, grounded: false, dropping: true };
+    const start: MovementState = { pos: { x: 0, y: 32, z: 0 }, vel: { x: 0, y: 0, z: 0 }, grounded: false, dropping: true, ...STANCE0 };
     const r1 = stepMovement(start, mv({ moveForward: 1 }), SIM_DT, flat);
     expect(r1.state.vel.y).toBe(-b.movement.dropFallSpeed);
     expect(hspeed(r1.state)).toBeCloseTo(b.movement.dropSteerSpeed, 9);
@@ -177,7 +184,7 @@ describe('movement', () => {
   });
 
   it('falling (not dropping) reports landing speed for fall damage, capped by terminal velocity', () => {
-    const start: MovementState = { pos: { x: 0, y: 200, z: 0 }, vel: { x: 0, y: 0, z: 0 }, grounded: false, dropping: false };
+    const start: MovementState = { pos: { x: 0, y: 200, z: 0 }, vel: { x: 0, y: 0, z: 0 }, grounded: false, dropping: false, ...STANCE0 };
     const r = simulate(start, mv(), 30 * 10, flat);
     expect(r.landingSpeed).toBeLessThanOrEqual(b.movement.terminalVelocity);
     expect(r.landingSpeed).toBeGreaterThan(b.movement.fallDamageMinSpeed);

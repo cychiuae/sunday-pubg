@@ -23,30 +23,70 @@ to the server.
 
 | Port | What |
 |---|---|
-| 5173 | Vite dev client (`npm run dev`, `npm run dev:client`) |
+| 5173 | Vite dev client (`npm run dev`, `npm run dev:client`). Override with `CLIENT_PORT` |
+| 5174 / 8798 | `npm run dev:office` client / server |
 | 8797 | Game server, HTTP + WebSocket on `/ws` (`npm run dev:server`, `npm start`). Override with `PORT` |
 | 4173 | `npm run preview` (built client only, no game server) |
 
 If you run the server on another port, start Vite with the same `PORT` so its proxy follows:
 `PORT=8790 npm run dev`.
 
-## Controls
+## How to play
+
+### Rooms
+
+1. Enter a name on the title screen and press Play. You land in the **Room browser**.
+2. **Create room**: pick a name, Public or Private, the map (Island, Office or Vote) and the max humans. You are the
+   host. Bots fill the empty slots.
+3. **Join**: click a public room in the list, or type its 5-character code in **Join by code** (not case-sensitive).
+   Private rooms can only be joined by code.
+4. **Deep link**: open `http://localhost:5173/?room=CODE`. After name entry, Play joins that room directly. The
+   waiting room shows the code with Copy and Link buttons. `?map=island01|office|random` pre-selects your map vote.
+5. In the **waiting room** the host presses Start (one human is enough). After the results you return to the same
+   room; Leave goes back to the browser. Joining a room mid-match lets you spectate until the next match.
+
+Each match starts aboard a carrier (a seaplane on the island, a delivery drone in the office) on a random route.
+Jump when you like; anyone still aboard is ejected near the edge of the map. Your parachute opens on its own.
+
+### Controls
 
 | Key | Action |
 |---|---|
 | WASD | Move |
 | Shift | Sprint |
-| Space | Jump (next castaway, while spectating) |
-| Mouse | Aim (click the game to lock the pointer) |
-| Left mouse button | Fire |
+| Mouse | Look (click the game to lock the pointer) |
+| Left mouse button | Fire. With a grenade: hold to cook, release to throw |
+| Right mouse button | Aim down sights (hold or toggle, see Settings) |
+| C | Crouch (toggle) |
+| Z | Lie down (toggle) |
+| Space | Jump; stand up from crouch or prone |
+| Space / F | Jump from the plane or drone |
 | R | Reload |
 | E | Pick up |
 | 1 / 2 / 3 | Switch weapon |
+| 4 / G | Grenade |
+| Mouse wheel | Cycle weapons |
 | Q | Heal |
-| Esc | Release the mouse |
+| V | Spectating: switch between first person and chase view |
+| Space | Spectating: next castaway |
+| Esc | Release the mouse (pause menu) |
 
-The in-game Controls panel (lobby and settings) is the source of truth; its text lives in
+The in-game Controls panel (pause menu and waiting room) is the source of truth; its text lives in
 `src/content/strings/en.json`.
+
+### First-person settings
+
+The camera is first person on foot and while falling; it is third person only aboard the carrier and on the death
+cam. Open Settings from the gear button:
+
+| Setting | Default | Notes |
+|---|---|---|
+| Field of view | 80 deg | 70 to 100, horizontal at 16:9 (wider screens see more to the sides) |
+| Head bob | on | Off by default while Reduce motion is on (OS setting or toggle); tick it to force it on |
+| Aim mode | Hold | Hold or Toggle for right-mouse ADS |
+| ADS sensitivity | 1.00 | Mouse sensitivity multiplier while aiming |
+
+The weapon viewmodel's FOV is fixed. Settings are saved in the browser.
 
 ## Scripts
 
@@ -55,6 +95,7 @@ The in-game Controls panel (lobby and settings) is the source of truth; its text
 | `npm run dev` | Client (Vite, :5173) + server (`tsx watch`, :8797) together |
 | `npm run dev:client` | Vite dev server only |
 | `npm run dev:server` | Game server only, restarts on change |
+| `npm run dev:office` | Same as `dev` with `MAP=office` (every room plays the office), on http://localhost:5174 with the server on 8798, so it can run next to `npm run dev` |
 | `npm run typecheck` | `tsc --noEmit` over `src/`, `server/`, `tests/` and root configs |
 | `npm run build` | Typecheck, then build the client to `dist/` |
 | `npm run size` | Bundle budget check on `dist/` (initial JS < 1.5 MB gzip, initial download < 15 MB). Run after `build` |
@@ -78,9 +119,15 @@ The server is configured only through environment variables. The full table is i
 | `NODE_ENV=production` | | Serve `dist/` (set by `npm start`) |
 | `BALANCE_OVERRIDE` | | Inline JSON or a file path, deep-merged over `docs/design/balance.json`, e.g. `'{"match":{"countdownSeconds":3}}'` |
 | `LATENCY_MS` / `JITTER_MS` | 0 | Simulated network lag |
-| `SEED` | random | World seed |
+| `SEED` | random | Base seed. When set, room seeds are deterministic (`SEED` mixed with the room's serial number) |
+| `MAX_ROOMS` | 8 | Rooms open at once. Creating one more fails with "max rooms" |
+| `MAX_CONNECTIONS` | `MAX_ROOMS` x `match.maxPlayers` + 32 (8 x 16 + 32 = 160) | Total WebSocket connections on the process |
+| `MAX_CONNS_PER_IP` | 128 | Connections per remote address (`0` = unlimited). High because a whole office can share one IP |
+| `MAP` | | `island01` or `office`. Pins every room to that map; the map vote and the host's map setting are ignored. An invalid value logs one warning and is ignored |
 | `ALLOWED_ORIGINS` | production: `self`; dev: `*` | WebSocket Origin policy: comma list of `*`, `self` and exact origins. Set it only when the client is served from another origin, e.g. `self,https://play.example.com` |
 | `TRUST_PROXY` | | `1` behind a reverse proxy: per-IP limit uses `X-Forwarded-For`, and `self` accepts `X-Forwarded-Host` |
+
+Example: `MAP=office SEED=42 MAX_ROOMS=2 npm run dev:server`.
 
 Never commit `.env*` files; they are gitignored.
 

@@ -112,3 +112,40 @@ export function createNoiseBank(ctx: BaseAudioContext): NoiseBank {
     get: (color) => (color === 'white' ? white : color === 'pink' ? pink : brown),
   };
 }
+
+/**
+ * M2b indoor reverb impulse: exponentially decaying noise (-60 dB at `seconds`) after a short pre-delay, low-passed
+ * progressively harder over time so the tail darkens like a big carpeted open-plan room. Pure; exported for tests.
+ */
+export function fillReverbIr(out: Float32Array, sampleRate: number, seconds: number, preDelayS: number, seed: number): void {
+  const rand = makeRand(seed);
+  const pre = Math.max(0, Math.floor(preDelayS * sampleRate));
+  const decay = Math.log(1000) / Math.max(0.05, seconds); // amplitude e^(-decay t) reaches -60 dB at `seconds`
+  let lp = 0;
+  let energy = 0;
+  for (let i = 0; i < out.length; i++) {
+    if (i < pre) {
+      out[i] = 0;
+      continue;
+    }
+    const t = (i - pre) / sampleRate;
+    // One-pole low-pass coefficient: bright at the start, dark at the end.
+    const k = 0.9 - 0.75 * Math.min(1, t / Math.max(0.05, seconds));
+    lp += (rand() * 2 - 1 - lp) * k;
+    const v = lp * Math.exp(-decay * t);
+    out[i] = v;
+    energy += v * v;
+  }
+  // Unit energy, so the send level alone sets how wet the room is.
+  const norm = energy > 0 ? 1 / Math.sqrt(energy) : 1;
+  for (let i = 0; i < out.length; i++) out[i] = (out[i] as number) * norm;
+}
+
+/** Stereo reverb impulse (decorrelated channels) for a ConvolverNode. */
+export function createReverbBuffer(ctx: BaseAudioContext, seconds: number, preDelayS: number): AudioBuffer {
+  const len = Math.max(2, Math.floor(ctx.sampleRate * (seconds + preDelayS)));
+  const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+  fillReverbIr(buf.getChannelData(0), ctx.sampleRate, seconds, preDelayS, 307);
+  fillReverbIr(buf.getChannelData(1), ctx.sampleRate, seconds, preDelayS + 0.007, 409);
+  return buf;
+}

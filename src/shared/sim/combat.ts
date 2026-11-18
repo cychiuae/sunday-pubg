@@ -2,23 +2,47 @@
  * Pure combat math (docs/design/systems/combat.md "Shot resolution"). The World wires these into the tick.
  */
 import type { Balance, WeaponBalance } from '../balance';
-import { DEG2RAD, type Rng } from '../math';
-import type { Vec3, WeaponId } from '../types';
+import { clamp, DEG2RAD, type Rng } from '../math';
+import type { ArmorPieceState, HeldId, MovementState, Stance, Vec3, WeaponId } from '../types';
+
+/** Shooter status for the spread cone (combat.md "Spread"). The M2a fields default to hip fire, standing, settled. */
+export interface SpreadStatus {
+  horizontalSpeed: number;
+  airborne: boolean;
+  /** adsProgressOf(...) in [0, 1]. Default 0. */
+  adsProgress?: number;
+  /** Default 'stand'. */
+  stance?: Stance;
+  /** S applies only while settled. Default true. */
+  stanceSettled?: boolean;
+}
 
 /**
- * Cone half-angle in degrees: spreadDeg x moveSpreadMultiplier (if horizontal speed > combat.moveSpreadSpeedThreshold)
- * x combat.airSpreadMultiplier (if airborne). ClientGame uses this for the crosshair.
+ * Cone half-angle in degrees: spreadDeg x A x S x M x J (combat.md "Spread"), no clamps.
+ * A = 1 + (adsSpreadMultiplier - 1) x adsProgress; S = combat.stanceSpreadMultiplier[stance] when settled, else 1;
+ * M = moveSpreadMultiplier when horizontal speed > combat.moveSpreadSpeedThreshold; J = combat.airSpreadMultiplier
+ * when airborne. ClientGame uses this for the crosshair.
  */
-export function effectiveSpreadDeg(
-  weapon: WeaponId,
-  balance: Balance,
-  status: { horizontalSpeed: number; airborne: boolean },
-): number {
+export function effectiveSpreadDeg(weapon: WeaponId, balance: Balance, status: SpreadStatus): number {
   const w = balance.weapons[weapon];
   let s = w.spreadDeg;
+  const ads = clamp(status.adsProgress ?? 0, 0, 1);
+  if (ads > 0) s *= 1 + (w.adsSpreadMultiplier - 1) * ads;
+  if (status.stanceSettled !== false) s *= balance.combat.stanceSpreadMultiplier[status.stance ?? 'stand'];
   if (status.horizontalSpeed > balance.combat.moveSpreadSpeedThreshold) s *= w.moveSpreadMultiplier;
   if (status.airborne) s *= balance.combat.airSpreadMultiplier;
   return s;
+}
+
+/**
+ * ADS progress in [0, 1] = adsMs / weapons[held].adsTimeMs (combat.md "ADS"). 0 for the grenade slot, sight 'none'
+ * and adsTimeMs <= 0 (only fists, which never engage).
+ */
+export function adsProgressOf(m: Pick<MovementState, 'adsMs'>, held: HeldId, b: Balance): number {
+  if (held === 'grenade') return 0;
+  const w = b.weapons[held];
+  if (w.sight === 'none' || !(w.adsTimeMs > 0) || !(m.adsMs > 0)) return 0;
+  return clamp(m.adsMs / w.adsTimeMs, 0, 1);
 }
 
 /** 1 at or below falloffStart, linear to minDamageFactor at falloffEnd, flat beyond. */
@@ -29,30 +53,35 @@ export function falloffFactor(w: WeaponBalance, dist: number): number {
   return 1 + (w.minDamageFactor - 1) * t;
 }
 
-/** Headshot if the hit is at or above feetY + height * (1 - headZoneFraction). */
-export function isHeadshot(hitY: number, feetY: number, balance: Balance): boolean {
-  const p = balance.player;
-  return hitY >= feetY + p.height * (1 - p.headZoneFraction) - 1e-9;
-}
-
 /** Damage of one pellet before armor. */
 export function pelletDamage(w: WeaponBalance, dist: number, headshot: boolean): number {
   return w.damage * (headshot ? w.headshotMultiplier : 1) * falloffFactor(w, dist);
 }
 
-export interface ArmorResult {
-  hp: number;
-  armor: number;
-  /** HP actually removed (after armor). */
-  hpTaken: number;
-  armorTaken: number;
+/** Destroyed below this durability (float accumulation; armor.md "piece.durability <= 1e-6"). */
+export const ARMOR_BREAK_EPSILON = 1e-6;
+
+export interface ArmorPieceResult {
+  /** The piece after the hit; null when it was destroyed (or there was none). */
+  piece: ArmorPieceState | null;
+  /** Durability removed. */
+  absorbed: number;
+  /** The piece reached 0 this hit. */
+  broken: boolean;
+  /** HP lost = dmg - absorbed. */
+  hpLoss: number;
 }
 
-/** `a = min(armor, dmg * absorbFraction)`; armor -= a; hp -= dmg - a. With ignoreArmor the whole amount hits hp. */
-export function applyDamage(hp: number, armor: number, dmg: number, absorbFraction: number, ignoreArmor = false): ArmorResult {
-  const a = ignoreArmor ? 0 : Math.min(armor, dmg * absorbFraction);
-  const hpTaken = dmg - a;
-  return { hp: hp - hpTaken, armor: armor - a, hpTaken, armorTaken: a };
+/**
+ * One armor piece takes `dmg` (armor.md "Damage application"): a = min(durability, dmg x absorbFraction);
+ * durability -= a; hp loss = dmg - a; destroyed at 0. With no piece the whole amount is HP loss.
+ */
+export function applyArmorPiece(piece: ArmorPieceState | null, dmg: number, absorbFraction: number): ArmorPieceResult {
+  if (!piece || !(dmg > 0)) return { piece, absorbed: 0, broken: false, hpLoss: Math.max(0, dmg) };
+  const a = Math.min(piece.durability, dmg * absorbFraction);
+  const left = piece.durability - a;
+  const broken = left <= ARMOR_BREAK_EPSILON;
+  return { piece: broken ? null : { tier: piece.tier, durability: left }, absorbed: a, broken, hpLoss: dmg - a };
 }
 
 /** Uniform random direction inside a cone of half-angle `halfAngleRad` around unit `dir`. */
@@ -137,10 +166,13 @@ export function rayCylinder(
   return { t, y: o.y + d.y * t };
 }
 
-/** Sum of all pellets' damage at a given distance, body hits (for bot weapon choice). */
-export function expectedBodyDps(w: WeaponBalance, dist: number, targetRadius: number): number {
+/**
+ * Sum of all pellets' damage per second at a distance, body hits (bot weapon choice). `spreadDeg` overrides the cone
+ * (bots pass the ADS cone when they will aim at that distance).
+ */
+export function expectedBodyDps(w: WeaponBalance, dist: number, targetRadius: number, spreadDeg = w.spreadDeg): number {
   if (dist > w.range) return 0;
-  const half = Math.max(spreadRad(w.spreadDeg), 1e-4);
+  const half = Math.max(spreadRad(spreadDeg), 1e-4);
   // Rough fraction of pellets landing on a target of this radius at this distance.
   const hitFrac = Math.min(1, targetRadius / Math.max(1e-3, dist * Math.tan(half)));
   return (w.damage * w.pellets * falloffFactor(w, dist) * hitFrac * 1000) / Math.max(1, w.fireIntervalMs);

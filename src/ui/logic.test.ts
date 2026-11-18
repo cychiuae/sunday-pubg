@@ -1,10 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { hasKey, t } from '../content/strings';
-import type { HudZoneView } from '../shared/contracts';
+import { hasKey, keysWithPrefix, t } from '../content/strings';
+import type { AdsView, HudArmorView, HudZoneView } from '../shared/contracts';
 import { MAX_NAME_LENGTH } from '../shared/constants';
 import {
   actionFailedKey,
+  adsReticle,
   aliveAnnouncement,
+  armorPromptDetail,
+  armorRefused,
+  cookView,
+  dangerPlacement,
+  dangerScale,
+  deathCauseKey,
+  gearView,
+  hitVariant,
+  isGrenadeFeedPrefix,
+  isSelfGrenadeKill,
+  stanceView,
   connectionErrorKey,
   fitProjection,
   formatClock,
@@ -14,8 +26,10 @@ import {
   isLowHp,
   itemCategory,
   killFeedPrefix,
+  layoutMapLabels,
   LOW_HP_THRESHOLD,
   lowHpThresholdOf,
+  minimapPoiLabel,
   MessageQueue,
   minimapArrowRotation,
   pickupPromptChoice,
@@ -30,6 +44,7 @@ import {
   tidePhaseNumbers,
   tideStatus,
   validateName,
+  wrapLabel,
   type ScreenInputs,
 } from './logic';
 
@@ -174,6 +189,15 @@ describe('kill feed', () => {
     expect(killFeedPrefix({ ...k, cause: 'fall' }, false)).toBe('feed.fall');
     expect(killFeedPrefix({ ...k, killerName: null }, false)).toBe('feed.generic');
     expect(killFeedPrefix({ ...k, weapon: null }, false)).toBe('feed.generic');
+    // M2a grenades
+    expect(killFeedPrefix({ ...k, weapon: 'grenade', cause: 'explosion' }, false)).toBe('feed.grenade');
+    expect(killFeedPrefix({ ...k, weapon: 'grenade', cause: 'explosion', self: true }, false)).toBe('feed.grenadeSelf');
+    expect(killFeedPrefix({ ...k, killerName: null, weapon: 'grenade', cause: 'explosion', self: true }, false)).toBe(
+      'feed.grenadeSelf',
+    );
+    expect(isGrenadeFeedPrefix('feed.grenade') && isGrenadeFeedPrefix('feed.grenadeSelf')).toBe(true);
+    expect(isGrenadeFeedPrefix('feed.kill')).toBe(false);
+    for (const p of ['feed.grenade', 'feed.grenadeSelf']) expect(keysWithPrefix(p).length).toBeGreaterThan(0);
   });
 
   it('every group used by the feed has at least one string', () => {
@@ -210,38 +234,92 @@ describe('kill feed', () => {
   });
 });
 
+describe('M2a: self-grenade kills and the death card', () => {
+  it('detects the victim\'s own grenade even when an enemy gets the credit', () => {
+    expect(isSelfGrenadeKill('explosion', null, 5, undefined)).toBe(true);
+    expect(isSelfGrenadeKill('explosion', 5, 5, undefined)).toBe(true);
+    expect(isSelfGrenadeKill('explosion', 7, 5, 5)).toBe(true); // credit to the last enemy, blast was self
+    expect(isSelfGrenadeKill('explosion', 7, 5, 7)).toBe(false);
+    expect(isSelfGrenadeKill('weapon', null, 5, 5)).toBe(false);
+  });
+
+  it('death cause line', () => {
+    expect(deathCauseKey('explosion', 'Pat', true)).toBe('death.eliminatedBySelf');
+    expect(deathCauseKey('explosion', 'Pat', false)).toBe('death.eliminatedBy');
+    expect(deathCauseKey('zone', null, false)).toBe('death.eliminatedByTide');
+    expect(deathCauseKey('fall', 'Pat', false)).toBe('death.eliminatedByFall');
+    expect(deathCauseKey('weapon', null, false)).toBeNull();
+    expect(hasKey('death.eliminatedBySelf')).toBe(true);
+  });
+});
+
 describe('pickup prompt', () => {
-  const empty = { weapon: null, mag: null };
-  const local = (full: boolean, armor = 0) => ({
+  const empty = { weapon: null, mag: null, count: null };
+  const piece = (id: HudArmorView['id'], tier: 1 | 2 | 3, durability: number, maxDurability = 50): HudArmorView => ({
+    id,
+    tier,
+    durability,
+    maxDurability,
+  });
+  const local = (full: boolean, extra: { vest?: HudArmorView | null; helmet?: HudArmorView | null } = {}) => ({
     heals: { bandage: 0, medkit: 0 },
     reserve: null,
     slots: [
-      { slot: 0 as const, ...(full ? { weapon: 'pistol' as const, mag: 3 } : empty) },
-      { slot: 1 as const, ...(full ? { weapon: 'smg' as const, mag: 3 } : empty) },
-      { slot: 2 as const, weapon: 'fists' as const, mag: null },
-    ] as [never, never, never],
-    armor,
-    maxArmor: 50,
+      { slot: 0 as const, ...(full ? { weapon: 'pistol' as const, mag: 3, count: null } : empty) },
+      { slot: 1 as const, ...(full ? { weapon: 'smg' as const, mag: 3, count: null } : empty) },
+      { slot: 2 as const, weapon: 'fists' as const, mag: null, count: null },
+      { slot: 3 as const, weapon: 'grenade' as const, mag: null, count: 0 },
+    ] as [never, never, never, never],
+    vest: extra.vest ?? null,
+    helmet: extra.helmet ?? null,
+    grenades: 0,
+    grenadeMax: 3,
   });
 
-  it('categorises items', () => {
+  it('categorises every item id', () => {
     expect(itemCategory('rifle')).toBe('gun');
+    expect(itemCategory('sniper')).toBe('gun');
+    expect(itemCategory('lmg')).toBe('gun');
+    expect(itemCategory('dmr')).toBe('gun');
     expect(itemCategory('ammo_shell')).toBe('ammo');
+    expect(itemCategory('ammo_sniper')).toBe('ammo');
     expect(itemCategory('medkit')).toBe('heal');
-    expect(itemCategory('vest')).toBe('armor');
+    expect(itemCategory('vest_2')).toBe('armor');
+    expect(itemCategory('helmet_3')).toBe('armor');
+    expect(itemCategory('grenade')).toBe('throwable');
   });
 
   it('chooses pick up / swap / grab', () => {
     expect(pickupPromptChoice('rifle', 1, local(false)).key).toBe('hud.pickup');
-    expect(pickupPromptChoice('rifle', 1, local(true)).key).toBe('hud.pickup.swap');
+    expect(pickupPromptChoice('sniper', 1, local(true)).key).toBe('hud.pickup.swap');
     expect(pickupPromptChoice('ammo_light', 30, local(false))).toEqual({ key: 'hud.pickup.ammo', usesCount: true, blocked: false });
     expect(pickupPromptChoice('bandage', 3, local(false)).key).toBe('hud.pickup.ammo');
     expect(pickupPromptChoice('bandage', 1, local(false)).key).toBe('hud.pickup');
+    expect(pickupPromptChoice('grenade', 2, local(false)).key).toBe('hud.pickup.ammo');
+    expect(pickupPromptChoice('grenade', 1, local(false)).key).toBe('hud.pickup');
   });
 
-  it('blocks a vest at full armor', () => {
-    expect(pickupPromptChoice('vest', 1, local(false, 50))).toEqual({ key: 'hud.armor.better', usesCount: false, blocked: true });
-    expect(pickupPromptChoice('vest', 1, local(false, 20)).blocked).toBe(false);
+  it('armor: pick up into an empty slot, upgrade a lower tier, refuse same-or-lower by slot', () => {
+    expect(pickupPromptChoice('vest_1', 1, local(false)).key).toBe('hud.pickup');
+    const worn = local(false, { vest: piece('vest_2', 2, 30), helmet: piece('helmet_1', 1, 10) });
+    expect(pickupPromptChoice('vest_3', 1, worn)).toEqual({ key: 'hud.pickup.upgrade', usesCount: false, blocked: false });
+    expect(pickupPromptChoice('vest_2', 1, worn)).toEqual({ key: 'hud.vest.better', usesCount: false, blocked: true });
+    expect(pickupPromptChoice('vest_1', 1, worn).key).toBe('hud.vest.better');
+    expect(pickupPromptChoice('helmet_1', 1, worn)).toEqual({ key: 'hud.helmet.better', usesCount: false, blocked: true });
+    expect(pickupPromptChoice('helmet_2', 1, worn).key).toBe('hud.pickup.upgrade');
+    expect(armorRefused('vest_2', worn)).toBe(true);
+    expect(armorRefused('helmet_3', worn)).toBe(false);
+    expect(armorRefused('rifle', worn)).toBe(false);
+  });
+
+  it('trusts the predicted refusal from interactPromptChanged', () => {
+    expect(pickupPromptChoice('vest_3', 1, local(false), 'betterArmor')).toEqual({
+      key: 'hud.vest.better',
+      usesCount: false,
+      blocked: true,
+    });
+    expect(pickupPromptChoice('grenade', 1, local(false), 'inventoryFull').key).toBe('hud.grenade.full');
+    expect(pickupPromptChoice('ammo_heavy', 30, local(false), 'inventoryFull').key).toBe('hud.inventory.full');
   });
 
   it('warns before the press when that item is at its carry limit', () => {
@@ -260,26 +338,177 @@ describe('pickup prompt', () => {
     expect(pickupPromptChoice('ammo_light', 30, full).key).toBe('hud.inventory.full');
     expect(pickupPromptChoice('ammo_heavy', 30, full).key).toBe('hud.pickup.ammo');
     expect(pickupPromptChoice('ammo_light', 30, { ...full, reserve: 60 }).blocked).toBe(false);
+    // Grenades at maxCarry.
+    expect(pickupPromptChoice('grenade', 1, { ...base, grenades: 3 })).toEqual({
+      key: 'hud.grenade.full',
+      usesCount: false,
+      blocked: true,
+    });
+    expect(pickupPromptChoice('grenade', 1, { ...base, grenades: 2 }).blocked).toBe(false);
+  });
+
+  it('armor detail shows the tier and "current/max" durability', () => {
+    expect(armorPromptDetail('vest_2', 30.2, 55)).toEqual({ tier: 2, tierKey: 'gear.tier.2', durability: '31/55' });
+    expect(armorPromptDetail('helmet_3', 12, null)).toEqual({ tier: 3, tierKey: 'gear.tier.3', durability: '12' });
+    expect(armorPromptDetail('helmet_1', null, 30)?.durability).toBeNull();
+    expect(armorPromptDetail('rifle', 10, 10)).toBeNull();
+    expect(hasKey('gear.tier.1') && hasKey('gear.tier.2') && hasKey('gear.tier.3')).toBe(true);
   });
 
   it('every key it can return exists', () => {
-    for (const key of ['hud.pickup', 'hud.pickup.swap', 'hud.pickup.ammo', 'hud.armor.better', 'hud.inventory.full']) {
+    for (const key of [
+      'hud.pickup',
+      'hud.pickup.swap',
+      'hud.pickup.ammo',
+      'hud.pickup.upgrade',
+      'hud.armor.better',
+      'hud.vest.better',
+      'hud.helmet.better',
+      'hud.inventory.full',
+      'hud.grenade.full',
+    ]) {
       expect(hasKey(key)).toBe(true);
     }
   });
 });
 
 describe('actionFailed toast', () => {
-  it('maps every reason to the ARCHITECTURE §12 key, and stays silent for fire', () => {
+  it('maps every reason to the ARCHITECTURE §12/§14 key, and stays silent for fire', () => {
     expect(actionFailedKey('heal', 'noHeals')).toBe('hud.heal.none');
     expect(actionFailedKey('heal', 'fullHp')).toBe('hud.heal.full');
     expect(actionFailedKey('pickup', 'inventoryFull')).toBe('hud.inventory.full');
     expect(actionFailedKey('pickup', 'betterArmor')).toBe('hud.armor.better');
     expect(actionFailedKey('reload', 'noAmmo')).toBe('hud.ammo.empty');
     expect(actionFailedKey('fire', 'noAmmo')).toBeNull();
-    for (const r of ['noHeals', 'fullHp', 'inventoryFull', 'betterArmor', 'noAmmo'] as const) {
-      expect(hasKey(actionFailedKey('heal', r) ?? '')).toBe(true);
-    }
+    expect(actionFailedKey('swap', 'noGrenades')).toBe('hud.grenade.none');
+    expect(actionFailedKey('stance', 'noHeadroom')).toBe('hud.stance.noRoom');
+    expect(actionFailedKey('stance', 'tooDeep')).toBe('hud.stance.tooDeep');
+    const reasons = ['noHeals', 'fullHp', 'inventoryFull', 'betterArmor', 'noAmmo', 'noGrenades', 'tooDeep', 'noHeadroom'] as const;
+    for (const r of reasons) expect(hasKey(actionFailedKey('heal', r) ?? '')).toBe(true);
+  });
+
+  it('picks the vest / helmet / grenade variants from the prompt item', () => {
+    expect(actionFailedKey('pickup', 'betterArmor', 'vest_2')).toBe('hud.vest.better');
+    expect(actionFailedKey('pickup', 'betterArmor', 'helmet_1')).toBe('hud.helmet.better');
+    expect(actionFailedKey('pickup', 'inventoryFull', 'grenade')).toBe('hud.grenade.full');
+    expect(actionFailedKey('pickup', 'inventoryFull', 'bandage')).toBe('hud.inventory.full');
+  });
+
+  it('falls back to hud.stance.proneWater while hud.stance.tooDeep is missing', () => {
+    expect(actionFailedKey('stance', 'tooDeep', null, () => false)).toBe('hud.stance.proneWater');
+    expect(hasKey('hud.stance.proneWater')).toBe(true);
+  });
+});
+
+describe('M2a: ADS reticle', () => {
+  const ads = (sight: AdsView['sight'], cameraBlend: number, scoped = false): AdsView => ({
+    sight,
+    progress: cameraBlend,
+    cameraBlend,
+    zoom: 1,
+    scoped,
+  });
+
+  it('hip crosshair without ADS or without a sight', () => {
+    expect(adsReticle(null)).toEqual({ hip: 1, gapScale: 1, dot: null, dotOpacity: 0, scope: null });
+    expect(adsReticle(ads('none', 1)).hip).toBe(1);
+  });
+
+  it('iron / red dot: the crosshair closes into the dot as cameraBlend rises', () => {
+    const half = adsReticle(ads('iron', 0.5));
+    expect(half).toEqual({ hip: 0.5, gapScale: 0.5, dot: 'iron', dotOpacity: 0.5, scope: null });
+    const full = adsReticle(ads('red_dot', 1));
+    expect(full.hip).toBe(0);
+    expect(full.dot).toBe('red_dot');
+    expect(full.dotOpacity).toBe(1);
+    expect(adsReticle(ads('red_dot', 0)).dot).toBeNull();
+  });
+
+  it('scopes: a small dot while zooming in, then the full-screen frame (hip crosshair hidden)', () => {
+    expect(adsReticle(ads('scope_4x', 0.6)).dot).toBe('iron');
+    expect(adsReticle(ads('scope_4x', 0.6)).scope).toBeNull();
+    expect(adsReticle(ads('scope_4x', 1, true))).toEqual({ hip: 0, gapScale: 0, dot: null, dotOpacity: 0, scope: 'scope_4x' });
+    expect(adsReticle(ads('scope_8x', 1, true)).scope).toBe('scope_8x');
+  });
+
+  it('quantises so the DOM is not rewritten every frame', () => {
+    expect(adsReticle(ads('iron', 0.501)).dotOpacity).toBe(adsReticle(ads('iron', 0.5)).dotOpacity);
+    expect(adsReticle(ads('iron', Number.NaN)).hip).toBe(1);
+  });
+});
+
+describe('M2a: armor pieces', () => {
+  it('worn / low / broken / none', () => {
+    const worn = gearView({ id: 'vest_2', tier: 2, durability: 30.2, maxDurability: 55 });
+    expect(worn).toMatchObject({ state: 'worn', tier: 2, text: t('hud.gear.durability', { current: 31, max: 55 }), low: false });
+    expect(worn.ratio).toBeCloseTo(0.55, 2);
+    expect(gearView({ id: 'helmet_1', tier: 1, durability: 5, maxDurability: 30 }).low).toBe(true);
+    expect(gearView(null, 3)).toEqual({ state: 'broken', tier: 3, ratio: 0, text: t('hud.gear.broken'), low: false });
+    expect(gearView(null)).toEqual({ state: 'none', tier: 0, ratio: 0, text: '', low: false });
+  });
+});
+
+describe('M2a: stance', () => {
+  it('shows the target stance and animates only during a transition', () => {
+    expect(stanceView('stand', 'stand', 1)).toEqual({ stance: 'stand', moving: false, progress: 1, labelKey: 'hud.stance.stand' });
+    expect(stanceView('prone', 'crouch', 0.4)).toMatchObject({ stance: 'prone', moving: true, progress: 0.4 });
+    expect(stanceView('crouch', 'stand', 1).moving).toBe(false);
+    for (const s of ['stand', 'crouch', 'prone']) expect(hasKey(`hud.stance.${s}`)).toBe(true);
+  });
+});
+
+describe('M2a: cook ring', () => {
+  it('empties over the fuse and turns urgent in the last second', () => {
+    expect(cookView(null)).toBeNull();
+    expect(cookView({ fuseRemainingMs: 3000, fuseMs: 4000 })).toEqual({ ratio: 0.75, urgent: false, seconds: 3 });
+    expect(cookView({ fuseRemainingMs: 1000, fuseMs: 4000 })?.urgent).toBe(true);
+    expect(cookView({ fuseRemainingMs: 1001, fuseMs: 4000 })?.urgent).toBe(false);
+    expect(cookView({ fuseRemainingMs: 1, fuseMs: 4000 })?.seconds).toBe(0.1);
+    expect(cookView({ fuseRemainingMs: -50, fuseMs: 4000 })).toEqual({ ratio: 0, urgent: true, seconds: 0 });
+  });
+});
+
+describe('M2a: grenade danger', () => {
+  it('draws ahead on screen, sides and behind at the edge', () => {
+    const ahead = dangerPlacement(0, 70, 1280, 720, 64);
+    expect(ahead.edge).toBe(false);
+    expect(ahead.x).toBe(0);
+    expect(ahead.y).toBe(0);
+    expect(dangerPlacement(0.3, 70, 1280, 720, 64).x).toBeGreaterThan(0);
+    const right = dangerPlacement(Math.PI / 2, 70, 1280, 720, 64);
+    expect(right).toMatchObject({ edge: true, x: 1280 / 2 - 64, y: 0, arrowDeg: 90 });
+    const behind = dangerPlacement(Math.PI, 70, 1280, 720, 64);
+    expect(behind.edge).toBe(true);
+    expect(behind.y).toBe(720 / 2 - 64);
+    // No FOV: always pinned to the edge.
+    expect(dangerPlacement(0, undefined, 1280, 720, 64)).toMatchObject({ edge: true, x: 0, y: -(720 / 2 - 64) });
+  });
+
+  it('keeps edge icons inside the 2.2:1 HUD box on ultrawide', () => {
+    const p = dangerPlacement(Math.PI / 2, 70, 3440, 1000, 64);
+    expect(p.x).toBe(2200 / 2 - 64);
+  });
+
+  it('grows as the grenade gets closer', () => {
+    expect(dangerScale(10)).toBe(1);
+    expect(dangerScale(0)).toBeCloseTo(1.35);
+    expect(dangerScale(3)).toBeGreaterThan(1);
+  });
+});
+
+describe('M2a: hit marker variants', () => {
+  it('vest / helmet / break, with the kill marker winning', () => {
+    const base = { headshot: false, killed: false, vest: null, helmet: null };
+    expect(hitVariant(base)).toEqual({ head: false, kill: false, vest: false, helmet: false, broke: false });
+    expect(hitVariant({ ...base, vest: { broken: false } })).toMatchObject({ vest: true, broke: false });
+    expect(hitVariant({ ...base, headshot: true, helmet: { broken: true } })).toMatchObject({ head: true, helmet: true, broke: true });
+    expect(hitVariant({ ...base, killed: true, vest: { broken: true } })).toEqual({
+      head: false,
+      kill: true,
+      vest: false,
+      helmet: false,
+      broke: false,
+    });
   });
 });
 
@@ -402,5 +631,56 @@ describe('graphics status', () => {
     expect(graphicsStatusView('failed')).toEqual({ blocking: true, note: false });
     expect(graphicsStatusView('restoring')).toEqual({ blocking: false, note: true });
     expect(graphicsStatusView('ok')).toEqual({ blocking: false, note: false });
+  });
+});
+
+describe('minimap labels', () => {
+  const inside = (b: { x: number; y: number; w: number; h: number }, size: number, pad: number): boolean =>
+    b.x >= pad - 1e-9 && b.y >= pad - 1e-9 && b.x + b.w <= size - pad + 1e-9 && b.y + b.h <= size - pad + 1e-9;
+
+  it('keeps rim labels fully inside the map (BUG-004)', () => {
+    const items = [
+      { px: 8, py: 40, w: 90, h: 12 }, // west rim
+      { px: 160, py: 80, w: 70, h: 12 }, // east rim
+      { px: 80, py: 4, w: 60, h: 12 }, // north rim
+    ];
+    const placed = layoutMapLabels(items, 168, 6);
+    expect(placed).toHaveLength(3);
+    for (const p of placed) expect(inside(p.box, 168, 6)).toBe(true);
+  });
+
+  it('never overlaps labels or other dots, and drops what does not fit', () => {
+    const items = [
+      { px: 84, py: 84, w: 60, h: 12 },
+      { px: 86, py: 86, w: 60, h: 12 },
+      { px: 84, py: 84, w: 500, h: 12 }, // wider than the map
+    ];
+    const placed = layoutMapLabels(items, 168, 6);
+    expect(placed.map((p) => p.index)).not.toContain(2);
+    for (let i = 0; i < placed.length; i++) {
+      for (let j = i + 1; j < placed.length; j++) {
+        const a = placed[i]!.box;
+        const b = placed[j]!.box;
+        expect(a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h).toBe(false);
+      }
+    }
+  });
+
+  it('wraps long names into two balanced lines', () => {
+    const measure = (s: string): number => s.length * 6;
+    expect(wrapLabel('Rickety Dock', 100, measure)).toEqual(['Rickety Dock']);
+    const two = wrapLabel('Sunny Seconds Wreck', 80, measure);
+    expect(two).toHaveLength(2);
+    expect(two.join(' ')).toBe('Sunny Seconds Wreck');
+    for (const line of two) expect(measure(line)).toBeLessThanOrEqual(80);
+    expect(wrapLabel('Supercalifragilistic', 50, measure)).toEqual(['Supercalifragilistic']);
+  });
+});
+
+describe('minimap POI names', () => {
+  it('uses the short label when present, else the full name', () => {
+    expect(minimapPoiLabel('poi.wreck')).toBe(t('poi.wreck.short'));
+    expect(minimapPoiLabel('poi.wreck').length).toBeLessThan(t('poi.wreck').length);
+    expect(minimapPoiLabel('map.island01.name')).toBe(t('map.island01.name'));
   });
 });

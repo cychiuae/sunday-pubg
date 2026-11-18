@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PITCH_MAX, PITCH_MIN } from '../../shared/constants';
-import { cycleSlot, InputState } from './InputState';
+import { ADS_BUTTON, cycleSlot, DEFAULT_KEY_BINDINGS, InputState } from './InputState';
 
 const DT = 1 / 30;
 
@@ -171,5 +171,172 @@ describe('cycleSlot', () => {
     expect(cycleSlot(0, [true, true], 1)).toBe(1);
     expect(cycleSlot(0, [true, true], -1)).toBe(2);
     expect(cycleSlot(2, [false, false], 1)).toBe(-1);
+  });
+
+  it('M2a: cycles 0 -> 1 -> 2 -> 3 -> 0, with slot 3 only while carrying grenades', () => {
+    expect(cycleSlot(2, [true, true], 1, true)).toBe(3);
+    expect(cycleSlot(3, [true, true], 1, true)).toBe(0);
+    expect(cycleSlot(0, [true, true], -1, true)).toBe(3);
+    expect(cycleSlot(2, [true, true], 1, false)).toBe(0);
+    expect(cycleSlot(2, [false, false], 1, true)).toBe(3);
+    expect(cycleSlot(3, [false, false], 1, false)).toBe(2);
+  });
+});
+
+describe('M2a input mapping', () => {
+  it('keys 4 and G (and numpad 4) select slot 3', () => {
+    for (const code of ['Digit4', 'KeyG', 'Numpad4']) {
+      const s = new InputState(0.002);
+      s.keyDown(code);
+      expect(s.sample(1, DT).input.selectSlot, code).toBe(3);
+    }
+  });
+
+  it('C sends stanceToggle crouch and Z prone for exactly one input; the later press wins', () => {
+    const s = new InputState(0.002);
+    s.keyDown('KeyC');
+    expect(s.sample(1, DT).input.stanceToggle).toBe('crouch');
+    expect(s.sample(2, DT).input.stanceToggle).toBeNull();
+    s.keyDown('KeyZ');
+    expect(s.sample(3, DT).input.stanceToggle).toBe('prone');
+    s.keyDown('KeyC');
+    s.keyUp('KeyC');
+    s.keyUp('KeyZ');
+    s.keyDown('KeyZ');
+    s.keyDown('KeyC');
+    expect(s.sample(4, DT).input.stanceToggle).toBe('crouch');
+    s.keyDown('KeyZ', true); // OS repeat: no new edge
+    expect(s.sample(5, DT).input.stanceToggle).toBeNull();
+  });
+
+  it('Space stays the jump edge (the movement step turns it into a stance change when crouched or prone)', () => {
+    const s = new InputState(0.002);
+    s.keyDown('Space');
+    expect(s.sample(1, DT).input).toMatchObject({ jump: true, stanceToggle: null });
+  });
+
+  it('Ctrl is never bound (Ctrl+W closes the tab)', () => {
+    expect(DEFAULT_KEY_BINDINGS['ControlLeft']).toBeUndefined();
+    expect(DEFAULT_KEY_BINDINGS['ControlRight']).toBeUndefined();
+    expect(new InputState(0.002).keyDown('ControlLeft')).toBe(false);
+  });
+
+  it('hold mode: ads follows RMB; RMB never fires or cycles spectate', () => {
+    const s = new InputState(0.002);
+    expect(s.sample(1, DT).input.ads).toBe(false);
+    s.buttonDown(ADS_BUTTON);
+    expect(s.sample(2, DT).input).toMatchObject({ ads: true, fire: false });
+    expect(s.sample(3, DT).input.ads).toBe(true);
+    expect(s.consumeSpectateNext()).toBe(false);
+    s.buttonUp(ADS_BUTTON);
+    expect(s.sample(4, DT).input.ads).toBe(false);
+  });
+
+  it('toggle mode: each press flips the latch; it clears on slot keys, wheel changes, sprint, releaseAll and death', () => {
+    const s = new InputState(0.002);
+    s.setAdsMode('toggle');
+    const click = (): void => {
+      s.buttonDown(ADS_BUTTON);
+      s.buttonUp(ADS_BUTTON);
+    };
+    click();
+    expect(s.sample(1, DT).input.ads).toBe(true);
+    expect(s.sample(2, DT).input.ads).toBe(true);
+    click();
+    expect(s.sample(3, DT).input.ads).toBe(false);
+
+    click();
+    s.keyDown('Digit2');
+    expect(s.sample(4, DT).input.ads).toBe(false);
+
+    click();
+    s.wheel(120);
+    expect(s.sample(5, DT, () => 1).input.ads).toBe(false);
+    click();
+    s.wheel(120);
+    expect(s.sample(6, DT, () => -1).input.ads).toBe(true); // no slot change: latch kept
+
+    s.keyDown('ShiftLeft');
+    expect(s.sample(7, DT).input.ads).toBe(false);
+    s.keyUp('ShiftLeft');
+
+    click();
+    s.releaseAll();
+    expect(s.sample(8, DT).input.ads).toBe(false);
+
+    click();
+    s.clearAdsToggle();
+    expect(s.sample(9, DT).input.ads).toBe(false);
+  });
+
+  it('toggle mode: a press while ADS is not allowed (fists, grenade) does not latch; switching mode drops it', () => {
+    const s = new InputState(0.002);
+    s.setAdsMode('toggle');
+    s.setAdsAllowed(false);
+    s.buttonDown(ADS_BUTTON);
+    s.buttonUp(ADS_BUTTON);
+    expect(s.sample(1, DT).input.ads).toBe(false);
+    s.setAdsAllowed(true);
+    s.buttonDown(ADS_BUTTON);
+    s.buttonUp(ADS_BUTTON);
+    expect(s.sample(2, DT).input.ads).toBe(true);
+    s.setAdsMode('hold');
+    expect(s.sample(3, DT).input.ads).toBe(false);
+  });
+
+  it('look scale multiplies the look speed (ADS zoom and sensitivity); invalid values reset it to 1', () => {
+    const s = new InputState(0.01);
+    s.setLookScale(0.25);
+    s.look(10, 0);
+    expect(s.yaw).toBeCloseTo(-0.025);
+    s.setLookScale(Number.NaN);
+    expect(s.currentLookScale).toBe(1);
+    s.setLookScale(0);
+    expect(s.currentLookScale).toBe(1);
+  });
+});
+
+describe('M2b input mapping', () => {
+  const DT = 1 / 30;
+
+  it('F is the jump edge only while enabled (aboard or dropping); Space always is', () => {
+    const s = new InputState(0.002);
+    s.keyDown('KeyF');
+    expect(s.sample(1, DT).input.jump).toBe(false);
+    s.keyUp('KeyF');
+    s.setAltJumpEnabled(true);
+    s.keyDown('KeyF');
+    expect(s.sample(2, DT).input.jump).toBe(true);
+    expect(s.sample(3, DT).input.jump).toBe(false);
+    // F never cycles spectate targets.
+    expect(s.consumeSpectateNext()).toBe(false);
+  });
+
+  it('V latches the spectate view toggle once per press', () => {
+    const s = new InputState(0.002);
+    s.keyDown('KeyV');
+    s.keyDown('KeyV', true);
+    expect(s.consumeViewToggle()).toBe(true);
+    expect(s.consumeViewToggle()).toBe(false);
+  });
+
+  it('pitch limits: look stays inside; an out-of-range pitch only moves inward and eases in', () => {
+    const s = new InputState(0.01);
+    s.setLook(0, 1.2);
+    s.setPitchLimits(-0.5, 0.8);
+    s.look(0, -10); // look up: would go further out -> held
+    expect(s.pitch).toBeCloseTo(1.2);
+    s.look(0, 5); // look down by 0.05: allowed
+    expect(s.pitch).toBeCloseTo(1.15);
+    s.easePitchIntoLimits(0.5);
+    expect(s.pitch).toBeCloseTo(0.975);
+    s.easePitchIntoLimits(1);
+    expect(s.pitch).toBeCloseTo(0.8);
+    s.look(0, -1000);
+    expect(s.pitch).toBeCloseTo(0.8);
+    s.look(0, 1000);
+    expect(s.pitch).toBeCloseTo(-0.5);
+    s.setPitchLimits(-10, 10);
+    expect(s.pitchLimits.max).toBeLessThan(10);
   });
 });

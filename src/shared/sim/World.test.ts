@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { BALANCE, type BotPacingBalance } from '../balance';
 import { MAX_INPUT_REPEAT_TICKS, MAX_QUEUED_INPUTS, SIM_DT } from '../constants';
-import type { SimEvent } from '../types';
+import { carrierPosAt } from '../maps';
+import type { PlayerDropFields, PlayerState, SimEvent } from '../types';
 import { ISLAND } from '../../game/levels/island';
 import { heightAt } from './terrain';
+import { initialMovementState } from './movement';
 import { BOT_AI, BOT_TUNING_DEFAULTS, botAi, botEngageRange, botFireRange, botTuning } from './bots';
 import { createDebugWorld, createWorld } from './World';
 import { balanceWith, flatMap, input, land, noSpreadBalance, playingWorld, run } from './testkit';
@@ -44,13 +46,17 @@ describe('World: match lifecycle', () => {
     expect(snap.local?.id).toBe(h);
     expect(snap.zone?.phaseIndex).toBe(0);
     expect(snap.loot.length).toBeGreaterThan(30);
+    // M2b carrier drop (drop.md AT4): everyone starts aboard at the carrier position.
+    const route = w.getMatch().route!;
+    expect(route).not.toBeNull();
+    const c = carrierPosAt(route, w.timeMs);
     for (const s of spawns) {
-      expect(s.pos.y).toBeCloseTo(heightAt(s.pos.x, s.pos.z, ISLAND) + b.match.dropHeight, 6);
-      const p = snap.players.find((q) => q.id === s.playerId)!;
+      expect(s.pos).toEqual({ x: c.x, y: route.altitude, z: c.z });
+      const p = snap.players.find((q) => q.id === s.playerId)! as PlayerState & PlayerDropFields;
       expect(p.anim.dropping).toBe(true);
+      expect(p.aboard).toBe(true);
     }
-    // Spawn spacing: every (24 / N)-th spawn -> nobody within ~40 m of another (12 players, 52 m apart nominally).
-    for (const a of spawns) for (const c of spawns) if (a !== c) expect(Math.hypot(a.pos.x - c.pos.x, a.pos.z - c.pos.z)).toBeGreaterThan(40);
+    expect(w.getMatch().aboardCount).toBe(b.match.targetPlayers);
 
     // A late joiner spectates and is queued for the next match.
     const late = w.addPlayer('Late')!;
@@ -78,6 +84,23 @@ describe('World: match lifecycle', () => {
     expect(w.snapshotFor(h).players).toEqual([]);
   });
 
+  it('drop: false keeps the M1 spawn: spread over playerSpawns at dropHeight, dropping', () => {
+    const b = balanceWith(() => {});
+    const w = createDebugWorld({ map: ISLAND, balance: b, seed: 9, botNames: BOT_NAMES, drop: false });
+    w.addPlayer('Alice');
+    const ev: SimEvent[] = [];
+    while (w.getMatch().phase !== 'playing') ev.push(...w.step(SIM_DT));
+    const spawns = ofType(ev, 'spawn');
+    expect(spawns.length).toBe(b.match.targetPlayers);
+    expect(w.getMatch().route).toBeNull();
+    for (const s of spawns) {
+      expect(s.pos.y).toBeCloseTo(heightAt(s.pos.x, s.pos.z, ISLAND) + b.match.dropHeight!, 6);
+      expect(w.debugPlayer(s.playerId)!.move.dropping).toBe(true);
+    }
+    // Spawn spacing: every (24 / N)-th spawn -> nobody within ~40 m of another (12 players, 52 m apart nominally).
+    for (const a of spawns) for (const c of spawns) if (a !== c) expect(Math.hypot(a.pos.x - c.pos.x, a.pos.z - c.pos.z)).toBeGreaterThan(40);
+  });
+
   it('countdown falls back to lobby when queued humans drop below the minimum', () => {
     const w = createWorld({ map: ISLAND, balance: BALANCE, seed: 1, botNames: BOT_NAMES });
     const h = w.addPlayer('A')!;
@@ -94,15 +117,16 @@ describe('World: match lifecycle', () => {
     expect(w.addPlayer('extra')).toBeNull();
   });
 
-  it('no humans alive: resolves lastHumanDeathDelaySeconds later, bots ranked by hp + armor', () => {
+  it('no humans alive: resolves lastHumanDeathDelaySeconds later, bots ranked by hp + armor durability', () => {
     const b = balanceWith(() => {});
     const w = createDebugWorld({ map: ISLAND, balance: b, seed: 4, botNames: BOT_NAMES });
     const h = w.addPlayer('A')!;
     while (w.getMatch().phase !== 'playing') w.step(SIM_DT);
     const hp = w.debugPlayer(h)!;
+    hp.aboard = false;
     // Out at sea near the world edge (taken from map data): always outside the first circle's damage area.
     const seaZ = -(ISLAND.worldRadius - 2);
-    hp.move = { pos: { x: 0, y: heightAt(0, seaZ, ISLAND), z: seaZ }, vel: { x: 0, y: 0, z: 0 }, grounded: true, dropping: false };
+    hp.move = initialMovementState({ x: 0, y: heightAt(0, seaZ, ISLAND), z: seaZ }, false);
     hp.hp = 0.5;
     const ev: SimEvent[] = [];
     let deathAt = -1;
@@ -213,11 +237,13 @@ describe('World: combat (combat.md acceptance)', () => {
     return { w, s, t, sp, tp: w.debugPlayer(t)!, eyeY, bodyPitch: pitchTo(eyeY, 2 + 0.5, dist), headPitch: pitchTo(eyeY, 2 + 1.0, dist) };
   }
 
-  it('AT1: rifle body 22 at 10 m, 15.4 at 110 m, miss at 151 m', () => {
+  it('AT1: rifle body 19 at 10 m, 15.675 at 60 m, 12.35 at 90/120 m, miss at 151 m', () => {
     // Distance is measured along the ray to the hit point on the cylinder surface (target centre at dist + radius).
     for (const [dist, dmg] of [
-      [10, 22],
-      [110, 15.4],
+      [10, 19],
+      [60, 15.675],
+      [90, 12.35],
+      [120, 12.35],
       [151, null],
     ] as const) {
       const d = duel(dist + BALANCE.player.radius, 'rifle');
@@ -233,20 +259,23 @@ describe('World: combat (combat.md acceptance)', () => {
     }
   });
 
-  it('AT2: rifle headshot at y = 1.0 deals 38.5', () => {
+  it('AT2: rifle headshot at y = 1.0 deals 34.2', () => {
     const d = duel(10, 'rifle');
     const ev = run(d.w, 1, { [d.s]: () => ({ fire: true, pitch: d.headPitch }) });
     expect(ofType(ev, 'damage')[0]).toMatchObject({ headshot: true });
-    expect(ofType(ev, 'damage')[0]!.amount).toBeCloseTo(38.5, 6);
+    expect(ofType(ev, 'damage')[0]!.amount).toBeCloseTo(34.2, 6);
     expect(ofType(ev, 'shot')[0]!.impacts[0]).toMatchObject({ surface: 'player', playerId: d.t, headshot: true });
   });
 
-  it('AT3 (in world): armor absorbs half', () => {
+  it('armor.md AT1 (in world): vest_2 absorbs 40% of a body hit; the event reports the vest hit', () => {
     const d = duel(10, 'rifle');
-    d.tp.armor = 50;
-    run(d.w, 1, { [d.s]: () => ({ fire: true, pitch: d.bodyPitch }) });
-    expect(d.tp.hp).toBeCloseTo(89, 6);
-    expect(d.tp.armor).toBeCloseTo(39, 6);
+    d.tp.vest = { tier: 2, durability: 55 };
+    d.tp.helmet = { tier: 3, durability: 75 };
+    const ev = run(d.w, 1, { [d.s]: () => ({ fire: true, pitch: d.bodyPitch }) });
+    expect(d.tp.hp).toBeCloseTo(100 - 19 * 0.6, 6);
+    expect(d.tp.vest!.durability).toBeCloseTo(55 - 19 * 0.4, 6);
+    expect(d.tp.helmet).toEqual({ tier: 3, durability: 75 }); // armor.md AT2: body hits never touch the helmet
+    expect(ofType(ev, 'damage')[0]).toMatchObject({ amount: 19, vest: { tier: 2, broken: false }, helmet: null });
   });
 
   it('AT4: shotgun point-blank 0 spread leaves 1 HP; second shot kills (one damage event per shot)', () => {
@@ -377,7 +406,7 @@ describe('World: combat (combat.md acceptance)', () => {
     d.sp.inv.slots[1] = { weapon: 'smg', mag: 7 };
     d.sp.inv.activeSlot = 1;
     const loot = d.w.debugLoot();
-    loot.push({ id: 900, item: 'rifle', qty: 1, mag: 20, pos: { x: 0.5, y: 2, z: 0 }, tier: 'epic' });
+    loot.push({ id: 900, item: 'rifle', qty: 1, mag: 20, pos: { x: 0.5, y: 2, z: 0 }, tier: 'epic', durability: null });
     const ev = run(d.w, 1, { [d.s]: () => ({ interact: true }) });
     expect(ofType(ev, 'pickup')[0]).toMatchObject({ item: 'rifle', qty: 1, lootId: 900 });
     expect(d.sp.inv.slots[1]).toEqual({ weapon: 'rifle', mag: 20 });
@@ -387,7 +416,7 @@ describe('World: combat (combat.md acceptance)', () => {
 
     dropped.pos = { x: 50, y: 2, z: 50 }; // move it away
     d.sp.inv.ammo.ammo_light = 170;
-    d.w.debugLoot().push({ id: 901, item: 'ammo_light', qty: 30, mag: null, pos: { x: 0, y: 2, z: 1 }, tier: 'common' });
+    d.w.debugLoot().push({ id: 901, item: 'ammo_light', qty: 30, mag: null, pos: { x: 0, y: 2, z: 1 }, tier: 'common', durability: null });
     const ev2 = run(d.w, 1, { [d.s]: () => ({ interact: true }) });
     expect(ofType(ev2, 'pickup')[0]).toMatchObject({ qty: 10 });
     expect(d.w.debugLoot().find((l) => l.id === 901)!.qty).toBe(20);
@@ -425,24 +454,27 @@ describe('World: combat (combat.md acceptance)', () => {
     expect(ofType(ev, 'shot')[0]!.weapon).toBe('fists');
   });
 
-  it('death drops inventory within deathDropScatter; armor is not dropped', () => {
+  it('death drops inventory, grenades and worn armor within deathDropScatter (armor.md AT8)', () => {
     const d = duel(5, 'shotgun');
     d.tp.inv.slots[0] = { weapon: 'smg', mag: 12 };
     d.tp.inv.heals.bandage = 2;
-    d.tp.armor = 0;
-    d.tp.hp = 5;
+    d.tp.inv.grenades = 1;
+    d.tp.helmet = { tier: 1, durability: 30 };
+    d.tp.hp = 1;
     run(d.w, 1, { [d.s]: () => ({ fire: true, pitch: d.bodyPitch }) });
     const items = d.w.debugLoot().filter((l) => Math.hypot(l.pos.x, l.pos.z + 5) <= BALANCE.combat.deathDropScatter + 1e-9);
-    expect(items.map((l) => l.item).sort()).toEqual(['bandage', 'smg']);
+    expect(items.map((l) => l.item).sort()).toEqual(['bandage', 'grenade', 'helmet_1', 'smg']);
+    expect(items.find((l) => l.item === 'helmet_1')!.durability).toBe(30);
+    expect(d.tp.helmet).toBeNull();
   });
 
   it('fall damage outside the drop; drop landing deals none', () => {
     const { w, ids } = playingWorld(3);
     const [a, c] = ids as [number, number];
     const pa = w.debugPlayer(a)!;
-    pa.move = { pos: { x: 0, y: 30, z: 0 }, vel: { x: 0, y: 0, z: 0 }, grounded: false, dropping: false };
+    pa.move = { ...initialMovementState({ x: 0, y: 30, z: 0 }, false), grounded: false };
     const pc = w.debugPlayer(c)!;
-    pc.move = { pos: { x: 20, y: 30, z: 0 }, vel: { x: 0, y: 0, z: 0 }, grounded: false, dropping: true };
+    pc.move = initialMovementState({ x: 20, y: 30, z: 0 }, true);
     const ev = run(w, 30 * 5);
     const fall = ofType(ev, 'damage').filter((e) => e.cause === 'fall');
     expect(fall.length).toBe(1);
@@ -465,7 +497,7 @@ describe('World: combat (combat.md acceptance)', () => {
     expect(kills.length).toBe(2);
     expect(kills.find((k) => k.victimId === c)!.placement).toBe(2);
     expect(kills.find((k) => k.victimId === a)).toMatchObject({ placement: 3, killerId: e, cause: 'zone' });
-    expect(ofType(ev, 'damage').every((d) => d.cause !== 'zone' || d.armorAfter === 0)).toBe(true);
+    expect(ofType(ev, 'damage').every((d) => d.cause !== 'zone' || (d.vest === null && d.helmet === null))).toBe(true);
     expect(ofType(ev, 'matchEnded')[0]!.winnerId).toBe(e);
   });
 
@@ -477,11 +509,13 @@ describe('World: combat (combat.md acceptance)', () => {
     // Fast-forward to phase index 2 by stepping the clock (players parked inside meanwhile).
     while (z.state.phaseIndex < 2) run(w, 30);
     land(w, a, 0, 290);
-    pa.armor = 40;
+    pa.vest = { tier: 2, durability: 40 };
+    pa.helmet = { tier: 1, durability: 20 };
     const hp0 = pa.hp;
     run(w, 30 * 3);
     expect(hp0 - pa.hp).toBeCloseTo(3 * 4, 6);
-    expect(pa.armor).toBe(40);
+    expect(pa.vest).toEqual({ tier: 2, durability: 40 });
+    expect(pa.helmet).toEqual({ tier: 1, durability: 20 });
   });
 });
 
@@ -495,16 +529,19 @@ describe('World: contract revision 1 fields', () => {
   }
   const eyeY = 2 + BALANCE.player.eyeHeight;
 
-  it('damage carries armorBefore; a lethal headshot sets kill.headshot; zone/fall kills are not headshots', () => {
+  it('damage carries the helmet hit; a lethal headshot sets kill.headshot; zone/fall kills are not headshots', () => {
     const d = pair();
     d.pa.inv.slots[0] = { weapon: 'rifle', mag: 25 };
     d.pa.inv.activeSlot = 0;
-    d.pc.armor = 20;
+    d.pc.helmet = { tier: 1, durability: 20 };
+    d.pc.vest = { tier: 1, durability: 20 };
     const head = pitchTo(eyeY, 2 + 1.0, 10);
     let ev = run(d.w, 1, { [d.a]: () => ({ fire: true, pitch: head }) });
     const dmg = ofType(ev, 'damage')[0]!;
-    expect(dmg.armorBefore).toBe(20);
-    expect(dmg.armorAfter).toBeLessThan(20);
+    expect(dmg.helmet).toMatchObject({ tier: 1, broken: false });
+    expect(dmg.helmet!.absorbed).toBeCloseTo(34.2 * 0.3, 6);
+    expect(dmg.vest).toBeNull();
+    expect(d.pc.vest).toEqual({ tier: 1, durability: 20 });
     d.pc.hp = 1;
     ev = run(d.w, ticks(BALANCE.weapons.rifle.fireIntervalMs) + 1, { [d.a]: () => ({ fire: true, pitch: head }) });
     const kill = ofType(ev, 'kill')[0]!;
@@ -512,9 +549,9 @@ describe('World: contract revision 1 fields', () => {
     expect(kill.headshot).toBe(true);
   });
 
-  it('loot snapshots carry the spawn tier; death and swap drops are common', () => {
+  it('loot snapshots carry the spawn tier; drops use the fixed per-item table (pistol = common)', () => {
     const d = pair();
-    d.w.debugLoot().push({ id: 950, item: 'smg', qty: 1, mag: 30, pos: { x: 0, y: 2, z: 0.5 }, tier: 'epic' });
+    d.w.debugLoot().push({ id: 950, item: 'smg', qty: 1, mag: 30, pos: { x: 0, y: 2, z: 0.5 }, tier: 'epic', durability: null });
     expect(d.w.snapshotFor(d.a).loot.find((l) => l.id === 950)!.tier).toBe('epic');
     d.pc.inv.slots[0] = { weapon: 'pistol', mag: 5 };
     d.pc.dying = { killerId: d.a, weapon: 'pistol', cause: 'weapon' };
@@ -531,12 +568,12 @@ describe('World: contract revision 1 fields', () => {
     d.pa.inv.heals.bandage = 2;
     expect(failed(run(d.w, 1, { [d.a]: () => ({ useHeal: true }) }))).toEqual([`${d.a}:heal:fullHp`]);
     // Pickups that would not change anything.
-    d.pa.armor = BALANCE.items.vest.armor;
-    d.w.debugLoot().push({ id: 960, item: 'vest', qty: 1, mag: null, pos: { x: 0, y: 2, z: 0.3 }, tier: 'common' });
+    d.pa.vest = { tier: 2, durability: 3 };
+    d.w.debugLoot().push({ id: 960, item: 'vest_2', qty: 1, mag: null, pos: { x: 0, y: 2, z: 0.3 }, tier: 'common', durability: 55 });
     expect(failed(run(d.w, 1, { [d.a]: () => ({ interact: true }) }))).toEqual([`${d.a}:pickup:betterArmor`]);
     d.w.debugLoot().length = 0;
     d.pa.inv.heals.bandage = BALANCE.items.bandage.maxStack;
-    d.w.debugLoot().push({ id: 961, item: 'bandage', qty: 3, mag: null, pos: { x: 0, y: 2, z: 0.3 }, tier: 'common' });
+    d.w.debugLoot().push({ id: 961, item: 'bandage', qty: 3, mag: null, pos: { x: 0, y: 2, z: 0.3 }, tier: 'common', durability: null });
     expect(failed(run(d.w, 1, { [d.a]: () => ({ interact: true }) }))).toEqual([`${d.a}:pickup:inventoryFull`]);
     // Reload with a partly empty mag and no reserve; a full mag is not a failure.
     d.pa.inv.slots[0] = { weapon: 'pistol', mag: 3 };
@@ -662,7 +699,7 @@ describe('World: bots', () => {
     const bot = w.snapshotFor(h).players.find((p) => p.isBot)!;
     land(w, h, 150, 0);
     land(w, bot.id, 0, 0);
-    w.debugLoot().push({ id: 999, item: 'smg', qty: 1, mag: 30, pos: { x: 8, y: 2, z: 3 }, tier: 'rare' });
+    w.debugLoot().push({ id: 999, item: 'smg', qty: 1, mag: 30, pos: { x: 8, y: 2, z: 3 }, tier: 'rare', durability: null });
     let picked = false;
     for (let i = 0; i < ticks(8000) && !picked; i++) {
       picked = ofType(w.step(SIM_DT), 'pickup').some((p) => p.playerId === bot.id && p.item === 'smg');

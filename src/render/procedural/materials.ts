@@ -83,22 +83,47 @@ export const palette = {
   smg: 0x2ec4b6,
   shotgun: 0xe94f37,
   rifle: 0x3e9b5a,
+  dmr: 0x5b8def, // cornflower
+  sniper: 0x34497a, // deep lagoon navy (accents in ammoSniper pink)
+  lmg: 0xff8a3d, // tangerine
   gunDark: 0x3d3a4b,
   gunWood: 0xb9783f,
   gunTip: 0xfff3d6,
+
+  // Sights (M2a)
+  lensGlass: 0x9fe8f0,
+  redDot: 0xff3b5c,
 
   // Ammo families
   ammoLight: 0xffc43d,
   ammoShell: 0xe94f37,
   ammoHeavy: 0x3e9b5a,
+  ammoSniper: 0xff6fa8, // bubblegum pink
   brass: 0xe8b84a,
+
+  // Grenade (pineapple frag, M2a)
+  grenade: 0xff9f1c,
+  grenadeDark: 0xd97a12,
+  grenadeLeaf: 0x4cbb4a,
+  grenadePin: 0xff3b5c,
+
+  // Armor tiers (M2a). Tier 1 soft cloth, tier 2 padded sporty, tier 3 hard shell + tropical accent.
+  armor1: 0x7fa8c8, // faded denim
+  armor1Trim: 0xd9b26f, // tan canvas
+  armor2: 0x3a6fd8, // cobalt
+  armor2Dark: 0x2b55b0,
+  armor2Trim: 0xf4f7fb, // sporty white
+  armor3: 0x3d4a5c, // slate shell
+  armor3Dark: 0x2a3342,
+  armor3Accent: 0xff5c8a, // hibiscus pink
+  armor3Accent2: 0xffc43d, // mango
 
   // Heals / armor
   bandage: 0xfff8ee,
   bandageStripe: 0xff8fb1,
   medkit: 0xffffff,
   medkitCross: 0x2fb36b,
-  vest: 0x4f6f9f,
+  vest: 0x4f6f9f, // legacy M1 vest colour (unused since M2a armor tiers; kept for compatibility)
   vestStrap: 0xd9b26f,
 
   // Loot tiers (paired with shape coding, see loot.ts)

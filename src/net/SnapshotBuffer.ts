@@ -1,6 +1,8 @@
 /**
  * Snapshot ring for remote-entity interpolation (ARCHITECTURE.md §6 "Remote interpolation").
  * Positions lerp, yaw/pitch take the shortest arc, discrete fields come from the newer snapshot.
+ * M2a: `stanceProgress` lerps within one transition (see `interpStanceProgress`). Grenades are not interpolated:
+ * ClientGame extrapolates them from `latestSnapshot().grenades` (ADR 0004 §3).
  * Clamps to the oldest/newest snapshot (no extrapolation, per INetClient.getInterpolated).
  */
 import type { InterpolatedWorld } from '../shared/contracts';
@@ -16,6 +18,19 @@ export const BUFFER_KEEP_MS = 1000;
  */
 export const TELEPORT_DIST = 8;
 
+/**
+ * M2a: stance transition progress at `t` between two snapshots (contracts.ts `InterpolatedWorld`).
+ * Lerped only while both snapshots show the same transition (same `stance` and `stanceFrom`) and progress did not
+ * go backwards (a new transition with the same endpoints started in between). Otherwise the newer value is used, so a
+ * remote never shows a blend between two different transitions.
+ */
+export function interpStanceProgress(a: PlayerState, b: PlayerState, t: number): number {
+  if (a.stance !== b.stance || a.stanceFrom !== b.stanceFrom || b.stanceProgress < a.stanceProgress) {
+    return b.stanceProgress;
+  }
+  return lerp(a.stanceProgress, b.stanceProgress, t);
+}
+
 export function interpolatePlayer(a: PlayerState, b: PlayerState, t: number): PlayerState {
   const dx = b.pos.x - a.pos.x;
   const dy = b.pos.y - a.pos.y;
@@ -27,6 +42,7 @@ export function interpolatePlayer(a: PlayerState, b: PlayerState, t: number): Pl
     velY: lerp(a.velY, b.velY, t),
     yaw: lerpAngle(a.yaw, b.yaw, t),
     pitch: lerpAngle(a.pitch, b.pitch, t),
+    stanceProgress: interpStanceProgress(a, b, t),
   };
 }
 

@@ -104,3 +104,17 @@ export function retrigger(el: Element, cls: string): void {
   el.classList.remove(cls);
   requestAnimationFrame(() => el.classList.add(cls));
 }
+
+/** Diffed `data-*` attribute write (for CSS attribute selectors). */
+export class DataSlot {
+  private value: string | null = null;
+  constructor(
+    readonly el: HTMLElement,
+    readonly key: string,
+  ) {}
+  set(v: string): void {
+    if (v === this.value) return;
+    this.value = v;
+    this.el.dataset[this.key] = v;
+  }
+}

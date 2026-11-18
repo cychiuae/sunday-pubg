@@ -4,7 +4,7 @@ import { createRng } from '../math';
 import { GUN_IDS, type ItemId } from '../types';
 import { ISLAND } from '../../game/levels/island';
 import { isAmmo, isGun } from './inventory';
-import { rollTier, spawnMatchLoot } from './loot';
+import { dropTierOf, rollTier, spawnMatchLoot, spawnQuantity, toLootState } from './loot';
 import { balanceWith } from './testkit';
 
 describe('loot', () => {
@@ -46,12 +46,64 @@ describe('loot', () => {
     }
   });
 
-  it('epic table never yields pistol or ammo (AT4)', () => {
+  it('epic never yields pistol, light/heavy/shell ammo, vest_1 or helmet_1 (AT4); tier-3 armor only from epic (AT5)', () => {
     const rng = createRng(12);
-    for (let i = 0; i < 5000; i++) {
-      const it = rollTier(BALANCE, 'epic', rng)!;
-      expect(it).not.toBe('pistol');
-      expect(isAmmo(it)).toBe(false);
+    const banned: ItemId[] = ['pistol', 'ammo_light', 'ammo_heavy', 'ammo_shell', 'vest_1', 'helmet_1'];
+    for (let i = 0; i < 10000; i++) expect(banned).not.toContain(rollTier(BALANCE, 'epic', rng));
+    for (const tier of ['common', 'rare'] as const) {
+      for (let i = 0; i < 10000; i++) {
+        const it = rollTier(BALANCE, tier, rng);
+        expect(it === 'vest_3' || it === 'helmet_3').toBe(false);
+      }
     }
+  });
+
+  it('rare and epic frequencies match weights within 2% (AT2)', () => {
+    for (const tier of ['rare', 'epic'] as const) {
+      const rng = createRng(13);
+      const counts = new Map<ItemId, number>();
+      const N = 10000;
+      for (let i = 0; i < N; i++) {
+        const it = rollTier(BALANCE, tier, rng)!;
+        counts.set(it, (counts.get(it) ?? 0) + 1);
+      }
+      const table = BALANCE.loot.tiers[tier];
+      const total = Object.values(table).reduce((a, v) => a + (v ?? 0), 0);
+      for (const [item, w] of Object.entries(table)) {
+        expect(Math.abs((counts.get(item as ItemId) ?? 0) / N - (w ?? 0) / total)).toBeLessThan(0.02);
+      }
+    }
+  });
+
+  it('spawn quantities: armor at full durability, grenades spawnQty, sniper/lmg mags (AT3, AT6)', () => {
+    expect(spawnQuantity('vest_2', BALANCE)).toEqual({ qty: 1, mag: null, durability: 55 });
+    expect(spawnQuantity('helmet_3', BALANCE)).toEqual({ qty: 1, mag: null, durability: 75 });
+    expect(spawnQuantity('grenade', BALANCE)).toEqual({ qty: 2, mag: null, durability: null });
+    expect(spawnQuantity('sniper', BALANCE).mag).toBe(5);
+    expect(spawnQuantity('lmg', BALANCE).mag).toBe(60);
+    expect(spawnQuantity('rifle', BALANCE).mag).toBe(25);
+  });
+
+  it('a sniper spawn carries 2 stacks of 5 ammo_sniper within extraAmmoScatter (AT3)', () => {
+    const b = balanceWith((x) => {
+      x.loot.spawnChance = 1;
+      x.loot.tiers.epic = { sniper: 1 };
+    });
+    let id = 1;
+    const map = { ...ISLAND, lootSpawns: [{ x: 0, z: 0, tier: 'epic' as const }] };
+    const loot = spawnMatchLoot(map, b, createRng(1), () => id++, () => 0);
+    expect(loot.map((l) => [l.item, l.qty])).toEqual([
+      ['sniper', 1],
+      ['ammo_sniper', 5],
+      ['ammo_sniper', 5],
+    ]);
+    expect(toLootState(loot[0]!).durability).toBeUndefined();
+  });
+
+  it('no table contains the M1 id vest (AT7); drops use the fixed rarity table', () => {
+    for (const tier of ['common', 'rare', 'epic'] as const) expect('vest' in BALANCE.loot.tiers[tier]).toBe(false);
+    expect(dropTierOf('sniper')).toBe('epic');
+    expect(dropTierOf('rifle')).toBe('rare');
+    expect(dropTierOf('grenade')).toBe('common');
   });
 });

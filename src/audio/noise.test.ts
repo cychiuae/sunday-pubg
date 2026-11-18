@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fillLoopNoise, fillNoise } from './noise';
+import { fillLoopNoise, fillNoise, fillReverbIr } from './noise';
 
 describe('noise generation', () => {
   for (const color of ['white', 'pink', 'brown'] as const) {
@@ -46,5 +46,28 @@ describe('noise generation', () => {
     for (let i = 1; i < buf.length; i++) maxStep = Math.max(maxStep, Math.abs((buf[i] as number) - (buf[i - 1] as number)));
     const wrap = Math.abs((buf[0] as number) - (buf[buf.length - 1] as number));
     expect(wrap).toBeLessThanOrEqual(maxStep * 1.5);
+  });
+});
+
+describe('M2b reverb impulse', () => {
+  it('is silent during the pre-delay, unit energy, finite, and decays toward the end', () => {
+    const rate = 8000;
+    const buf = new Float32Array(Math.floor(rate * 2.42));
+    fillReverbIr(buf, rate, 2.4, 0.02, 7);
+    for (let i = 0; i < 160; i++) expect(buf[i]).toBe(0);
+    let energy = 0;
+    for (const v of buf) {
+      expect(Number.isFinite(v)).toBe(true);
+      energy += v * v;
+    }
+    expect(energy).toBeCloseTo(1, 5);
+    const rms = (from: number, to: number): number => {
+      let e = 0;
+      for (let i = from; i < to; i++) e += (buf[i] as number) ** 2;
+      return Math.sqrt(e / (to - from));
+    };
+    const early = rms(200, 1000);
+    const late = rms(buf.length - 800, buf.length);
+    expect(late).toBeLessThan(early / 100); // about -60 dB by the end
   });
 });

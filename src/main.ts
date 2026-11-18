@@ -3,6 +3,7 @@
  * Frame order (docs/tech/ARCHITECTURE.md "Client frame loop"): game.update -> renderer.render -> audio -> ui.
  */
 import { AudioEngine } from './audio/AudioEngine';
+import { t } from './content/strings';
 import { ClientGame } from './game/ClientGame';
 import { DEFAULT_MAP_ID, getMap } from './game/levels';
 import { NetClient } from './net/NetClient';
@@ -21,6 +22,7 @@ import {
   type Settings,
 } from './shared/contracts';
 import { EventBus, type GameEvents } from './shared/events';
+import type { MapData } from './shared/types';
 import { Ui } from './ui/Ui';
 
 function mustGet(id: string): HTMLElement {
@@ -30,22 +32,28 @@ function mustGet(id: string): HTMLElement {
 }
 
 const serverUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${WS_PATH}`;
-const initialMap = getMap(DEFAULT_MAP_ID);
+// M2b: the title-screen map. Later maps arrive with each welcome; ClientGame emits mapChanged (ADR 0005 §5).
+const initialMap: MapData = getMap(DEFAULT_MAP_ID);
 
 const bus = new EventBus<GameEvents>();
 const renderer: IRenderer = new Renderer(mustGet('app'), initialMap, bus, BALANCE);
 // Low-health heartbeat uses the same balance number as the HUD stripes (ADR 0003). undefined = audio's default.
-const audio: IAudio = new AudioEngine(bus, { lowHealthHp: BALANCE.player.lowHpThreshold });
+// M2a/M2b: balance is injected so audio needs no BALANCE fallback (REVIEW-M2a M5); per-map values come in mapChanged.
+const audio: IAudio = new AudioEngine(bus, { lowHealthHp: BALANCE.player.lowHpThreshold, balance: BALANCE });
 const net: INetClient = new NetClient();
-const game: IClientGame = new ClientGame({
-  bus,
-  net,
-  inputTarget: renderer.canvas,
-  balance: BALANCE,
-  getMap,
-  initialMap,
-  serverUrl,
-});
+const game: IClientGame = new ClientGame(
+  {
+    bus,
+    net,
+    inputTarget: renderer.canvas,
+    balance: BALANCE,
+    getMap,
+    initialMap,
+    serverUrl,
+  },
+  // ADR 0006 §6 (Q5): a room with name null shows "{name}'s room", rendered on the client.
+  { defaultRoomName: (name) => t('room.create.nameDefault', { name }) },
+);
 
 let appliedQuality: QualityLevel | null = null;
 const applySettings = (s: Settings): void => {
@@ -64,7 +72,19 @@ const ui: IUi = new Ui(mustGet('ui-root'), bus, {
   onSettingsChanged: applySettings,
   onPlayAgain: () => game.playAgain(),
   onResume: () => game.requestPointerLock(),
+  onSpectate: () => game.requestSpectate?.(), // BUG-001: death card "Spectate" starts spectating now
   playUiSound: (id) => audio.playUi?.(id), // M1-fix: UI sounds without document listeners in src/audio
+  // M2b rooms (ADR 0006 §7): Ui intents go straight to ClientGame, which validates them against its state.
+  onRefreshRooms: () => game.refreshRooms(),
+  onCreateRoom: (settings) => game.createRoom(settings),
+  onJoinRoom: (target) => game.joinRoom(target),
+  onLeaveRoom: () => game.leaveRoom(),
+  onSetRoomSettings: (patch) => game.setRoomSettings(patch),
+  onStartMatch: () => game.startMatch(),
+  onCancelCountdown: () => game.cancelCountdown(),
+  onSetReady: (ready) => game.setReady(ready),
+  onVote: (option) => game.vote(option),
+  onKick: (memberId) => game.kick(memberId),
 });
 applySettings(ui.getSettings());
 
@@ -100,6 +120,7 @@ function frame(now: number): void {
     syncGraphicsStatus();
     const listener = renderer.getListenerPose(); // 3. audio follows the camera
     audio.setListener(listener.pos, listener.yaw);
+    audio.setGrenades?.(view.grenades, view.serverTime); // ADR 0004 A2: fuse tick of nearby grenades
     audio.update(dt);
     ui.update(hud); // 4. DOM last
   } catch (err) {

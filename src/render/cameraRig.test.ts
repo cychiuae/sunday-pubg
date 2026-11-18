@@ -1,15 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import type { CameraView } from '../shared/contracts';
 import { aimDirection, rightFromYaw } from '../shared/math';
-import { CameraObstacles, CameraRig, desiredCameraPosition } from './cameraRig';
+import { CameraObstacles, CameraRig, desiredCameraPosition, slideAlongFloor } from './cameraRig';
 
 const view = (over: Partial<CameraView> = {}): CameraView => ({
+  view: 'chase',
+  subjectId: null,
+  roll: 0,
   mode: 'follow',
   target: { x: 0, y: 2, z: 0 },
   yaw: 0,
   pitch: 0,
   distance: 3,
   shoulderOffset: 0.5,
+  firstPerson: false,
   fovDeg: 70,
   ...over,
 });
@@ -103,5 +107,42 @@ describe('CameraRig orbit', () => {
     const p = rig.update(view({ mode: 'orbit', target: { x: 0, y: 0, z: 0 }, pitch: -0.4, distance: 120, shoulderOffset: 0 }), 1 / 60, false);
     expect(Math.hypot(p.x, p.z)).toBeGreaterThan(100);
     expect(p.y).toBeGreaterThan(10);
+  });
+});
+
+describe('BUG-003: looking up', () => {
+  // Flat sand at y = 0, pivot at eye height 1.05, boom 3.2 m (balance clientFeel defaults).
+  const flat = (): CameraObstacles => new CameraObstacles(() => 0, [], 50);
+  const up = (deg: number): CameraView =>
+    view({ target: { x: 0, y: 1.05, z: 0 }, pitch: (deg * Math.PI) / 180, distance: 3.2, shoulderOffset: 0.5 });
+
+  it('keeps the camera above the ground and a full boom behind the head at every pitch up to 80 degrees', () => {
+    for (const deg of [20, 35, 45, 60, 70, 80]) {
+      const rig = new CameraRig(flat());
+      const p = rig.update(up(deg), 1 / 60);
+      expect(p.y).toBeGreaterThanOrEqual(0.3);
+      // Before the fix: 0.37-0.49 m above the feet and well under 1 m from the pivot at 60-80 degrees.
+      expect(rig.actualDistance).toBeGreaterThan(3.0);
+      // Still behind the player (yaw 0 looks toward -Z, so behind is +Z).
+      expect(p.z).toBeGreaterThan(1.5);
+    }
+  });
+
+  it('is continuous where the boom end first touches the floor', () => {
+    let prev: { x: number; y: number; z: number } | null = null;
+    for (let deg = 0; deg <= 80; deg += 0.5) {
+      const rig = new CameraRig(flat());
+      const p = { ...rig.update(up(deg), 1 / 60) };
+      if (prev) expect(Math.hypot(p.x - prev.x, p.y - prev.y, p.z - prev.z)).toBeLessThan(0.1);
+      prev = p;
+    }
+  });
+
+  it('leaves the boom alone when it does not reach the floor', () => {
+    const cam = up(10);
+    const d = desiredCameraPosition(cam, { x: 0, y: 0, z: 0 });
+    const before = { ...d };
+    slideAlongFloor(cam, d, flat());
+    expect(d).toEqual(before);
   });
 });

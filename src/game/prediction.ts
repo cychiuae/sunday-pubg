@@ -11,28 +11,44 @@
  * - renderPosition(alpha): lerp between the last two fixed steps plus the visual offset.
  */
 import { cloneVec3, lerpVec3, vec3 } from '../shared/math';
-import type { MovementState, MovementStepResult, PlayerInput, Vec3 } from '../shared/types';
+import type { HeldId, MovementState, MovementStepResult, PlayerInput, Vec3 } from '../shared/types';
 
+/**
+ * Per-input status the movement step cannot see (structurally the sim's `MovementStatus`, passed to
+ * `toMovementInput`). M2a adds the item in hand (sight, ADS time, ADS move multiplier), swapping (blocks ADS) and
+ * the LMG fire slow-down window (approximated on the client, ADR 0004 Consequences).
+ */
 export interface PredictStatus {
   alive: boolean;
   healing: boolean;
   reloading: boolean;
+  held: HeldId;
+  swapping: boolean;
+  fireSlowed: boolean;
 }
 
 export type PredictStep = (state: MovementState, input: PlayerInput, status: PredictStatus) => MovementStepResult;
 
 /**
- * Per-input movement status. `step` advances the action state `A` by one input (edges and timers, before the
- * movement step) and returns the status that input's movement step must use. `before` = movement state before it.
+ * Per-input movement status, in the World's tick order (M2a, stance.md "Per-tick order"):
+ * - `step` runs BEFORE the movement step: it advances the action state `A` (timers) and returns the status that
+ *   input's movement step must use. `before` = movement state before it.
+ * - `after` (optional) runs AFTER the movement step with the new movement state: it applies the input's edges
+ *   (slot select, reload, heal, fire, grenade). `endAds` = an edge ended ADS (swap, reload or heal start), so the
+ *   predicted adsMs is reset to 0 exactly like the server does.
  */
 export interface StatusModel<A> {
   step(actions: A, input: PlayerInput, before: MovementState): { actions: A; status: PredictStatus };
+  after?(actions: A, input: PlayerInput, after: MovementState): { actions: A; endAds: boolean };
 }
 
 /** A model whose status never changes (tests, or a caller that has no action state). */
 export function fixedStatus(status: PredictStatus): StatusModel<null> {
   return { step: () => ({ actions: null, status }) };
 }
+
+/** Visual correction offsets below this (m) snap to 0 while decaying (no denormal tail). */
+export const OFFSET_SNAP_M = 1e-6;
 
 export interface PredictorOptions {
   snapDistance: number;
@@ -47,15 +63,17 @@ export interface ReconcileResult {
   replayed: number;
 }
 
+/** Copies every field (M2b: including the drop fields dropPhase / dropMs, on MovementState after the C-gate). */
 export const cloneMovementState = (s: MovementState): MovementState => ({
+  ...s,
   pos: cloneVec3(s.pos),
   vel: cloneVec3(s.vel),
-  grounded: s.grounded,
-  dropping: s.dropping,
 });
 
 export class Predictor<A> {
   private pending: PlayerInput[] = [];
+  /** Action state after each pending input (same order as `pending`). */
+  private history: A[] = [];
   private prev: MovementState | null = null;
   private cur: MovementState | null = null;
   /** Action state after the last applied/replayed input (null when inactive). */
@@ -97,13 +115,34 @@ export class Predictor<A> {
     return this.pending;
   }
 
+  /**
+   * Predicted action state right after input `seq` (null if it is not pending any more). Call before reconcile()
+   * to carry state the snapshot does not include (fire timers, trigger latch) over to the reconciliation base.
+   */
+  actionsAfter(seq: number): A | null {
+    const i = this.pending.findIndex((p) => p.seq === seq);
+    return i === -1 ? null : (this.history[i] ?? null);
+  }
+
   get visualOffset(): Vec3 {
     return this.offset;
+  }
+
+  /**
+   * M2b: inputs already sent while not predicting (aboard the carrier) that the server may still process as movement
+   * (the auto-eject happens on a server tick). Only while inactive: the next reconcile() keeps those newer than its
+   * acknowledged seq and replays them, so starting prediction mid-flight needs no correction.
+   */
+  seedPending(inputs: readonly PlayerInput[]): void {
+    if (this.cur) return;
+    this.pending = inputs.slice(-this.opts.maxPending);
+    this.history = [];
   }
 
   /** Stop predicting (dead, not a participant, disconnected). */
   reset(): void {
     this.pending = [];
+    this.history = [];
     this.prev = null;
     this.cur = null;
     this.actions = null;
@@ -114,14 +153,18 @@ export class Predictor<A> {
   /** Apply one local input. Returns null when inactive (the input is not kept). */
   apply(input: PlayerInput): MovementStepResult | null {
     if (!this.cur || this.actions === null) return null;
-    const { actions, status } = this.model.step(this.actions.value, input, this.cur);
-    const result = this.step(this.cur, input, status);
+    const { actions, status, result } = this.runOne(this.cur, this.actions.value, input);
     this.actions = { value: actions };
     this.lastStatus = status;
     this.prev = this.cur;
     this.cur = cloneMovementState(result.state);
     this.pending.push(input);
-    if (this.pending.length > this.opts.maxPending) this.pending.splice(0, this.pending.length - this.opts.maxPending);
+    this.history.push(actions);
+    if (this.pending.length > this.opts.maxPending) {
+      const drop = this.pending.length - this.opts.maxPending;
+      this.pending.splice(0, drop);
+      this.history.splice(0, drop);
+    }
     return result;
   }
 
@@ -131,14 +174,16 @@ export class Predictor<A> {
    */
   reconcile(server: MovementState, lastProcessedSeq: number, serverActions: A): ReconcileResult {
     this.pending = this.pending.filter((i) => i.seq > lastProcessedSeq);
+    this.history = [];
     let next = cloneMovementState(server);
     let actions = serverActions;
     let status: PredictStatus | null = null;
     for (const input of this.pending) {
-      const s = this.model.step(actions, input, next);
-      actions = s.actions;
-      status = s.status;
-      next = cloneMovementState(this.step(next, input, s.status).state);
+      const r = this.runOne(next, actions, input);
+      actions = r.actions;
+      status = r.status;
+      this.history.push(actions);
+      next = cloneMovementState(r.result.state);
     }
     this.actions = { value: actions };
     this.lastStatus = status;
@@ -173,6 +218,19 @@ export class Predictor<A> {
     return { correction, snapped, replayed: this.pending.length };
   }
 
+  /** One input: status model (timers) -> movement step -> status model edges (may end ADS). */
+  private runOne(state: MovementState, actions: A, input: PlayerInput): { actions: A; status: PredictStatus; result: MovementStepResult } {
+    const pre = this.model.step(actions, input, state);
+    let result = this.step(state, input, pre.status);
+    let next = pre.actions;
+    if (this.model.after) {
+      const post = this.model.after(pre.actions, input, result.state);
+      next = post.actions;
+      if (post.endAds && result.state.adsMs !== 0) result = { ...result, state: { ...result.state, adsMs: 0 } };
+    }
+    return { actions: next, status: pre.status, result };
+  }
+
   /** Decay the visual correction offset; call once per frame. */
   decay(dt: number): void {
     if (this.opts.decayMs <= 0) {
@@ -180,7 +238,9 @@ export class Predictor<A> {
       return;
     }
     const k = Math.exp((-dt * 1000) / this.opts.decayMs);
-    this.offset = { x: this.offset.x * k, y: this.offset.y * k, z: this.offset.z * k };
+    // Snap the tail to exactly 0 (sub-micrometre offsets are invisible), so it never decays into denormals.
+    const snap = (v: number): number => (Math.abs(v * k) < OFFSET_SNAP_M ? 0 : v * k);
+    this.offset = { x: snap(this.offset.x), y: snap(this.offset.y), z: snap(this.offset.z) };
   }
 
   /** Rendered feet position: lerp(prev step, current step, alpha) + visual offset. Null when inactive. */

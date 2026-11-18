@@ -11,6 +11,7 @@ import * as THREE from 'three';
 import type { PlayerView } from '../shared/contracts';
 import type { PlayerId } from '../shared/types';
 import { palette } from './procedural';
+import { isAboard } from './PlayerViews';
 
 const ATLAS_W = 512;
 const ROW_H = 40;
@@ -97,6 +98,8 @@ export class NameTags {
   private readonly releaseList: PlayerId[] = [];
   private frame = 0;
   private enabled = true;
+  /** M2a: per-player body height (stance); defaults to the standing height. */
+  private heightOf: ((id: PlayerId, standing: number) => number) | null = null;
 
   constructor(private readonly playerHeight: number) {
     const canvas: HTMLCanvasElement | OffscreenCanvas =
@@ -156,6 +159,11 @@ export class NameTags {
     this.material.uniforms.uScale.value = SCREEN_HEIGHT_FRAC * 2 * Math.tan(THREE.MathUtils.degToRad(fovDeg) * 0.5);
   }
 
+  /** M2a: tags follow the visual stance height (crouch / prone). */
+  setHeightFn(fn: (id: PlayerId, standing: number) => number): void {
+    this.heightOf = fn;
+  }
+
   setEnabled(on: boolean): void {
     this.enabled = on;
     this.mesh.visible = on;
@@ -168,18 +176,18 @@ export class NameTags {
       const pos = this.pos.array as Float32Array;
       const rect = this.rect.array as Float32Array;
       const aa = this.aspectAlpha.array as Float32Array;
-      const y = this.playerHeight + HEAD_CLEARANCE;
+      const standing = this.playerHeight;
       for (let i = 0; i < players.length && n < SLOTS; i++) {
         const p = players[i];
         const s = p.state;
-        if (p.isLocal || p.isSpectateTarget || !s.alive || !s.name) continue;
+        if (p.isLocal || p.isSpectateTarget || !s.alive || !s.name || isAboard(s)) continue; // M2b: aboard = inside the carrier
         const d = Math.hypot(s.pos.x - cam.x, s.pos.y - cam.y, s.pos.z - cam.z);
         if (d >= FADE_END) continue;
         const slot = this.slotFor(s.id, s.name);
         if (!slot) continue;
         slot.seen = this.frame;
         pos[n * 3] = s.pos.x;
-        pos[n * 3 + 1] = s.pos.y + y;
+        pos[n * 3 + 1] = s.pos.y + (this.heightOf ? this.heightOf(s.id, standing) : standing) + HEAD_CLEARANCE;
         pos[n * 3 + 2] = s.pos.z;
         tagRect(slot.row, slot.widthPx, rect, n * 4);
         aa[n * 2] = slot.widthPx / ROW_H;

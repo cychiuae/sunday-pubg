@@ -6,7 +6,7 @@
  */
 import * as THREE from 'three';
 import type { Balance } from '../shared/balance';
-import type { ItemId, LootId, LootState, LootTier, MapData } from '../shared/types';
+import type { ItemId, LootId, LootState, LootTier, MapBase } from '../shared/types';
 import { ITEM_IDS } from '../shared/types';
 import { anchorRestMatrix, extractParts, makeInstancedMesh, type TemplatePart } from './instancing';
 import { createLootModel, palette } from './procedural';
@@ -31,7 +31,7 @@ interface PartRef {
  * Fallback only (LootState.tier absent): the nearest map loot spawn within `radius` decides the tier ring. Dropped or
  * scattered loot away from spawns shows as common. Pure; exported for tests.
  */
-export function tierForPosition(spawns: MapData['lootSpawns'], x: number, z: number, radius: number): LootTier {
+export function tierForPosition(spawns: MapBase['lootSpawns'], x: number, z: number, radius: number): LootTier {
   let best: LootTier = 'common';
   let bestD = radius * radius;
   for (const s of spawns) {
@@ -45,7 +45,7 @@ export function tierForPosition(spawns: MapData['lootSpawns'], x: number, z: num
 }
 
 /** Tier ring for one loot item: the sim's `tier` when present (Contract revision 1 #1), else nearest-spawn inference. */
-export function lootTierOf(l: LootState, spawns: MapData['lootSpawns'], radius: number): LootTier {
+export function lootTierOf(l: LootState, spawns: MapBase['lootSpawns'], radius: number): LootTier {
   return l.tier ?? tierForPosition(spawns, l.pos.x, l.pos.z, radius);
 }
 
@@ -69,7 +69,7 @@ export class LootLayer {
   private readonly sphere = new THREE.Sphere();
 
   constructor(
-    private readonly map: MapData,
+    private map: Pick<MapBase, 'lootSpawns'>,
     balance: Balance,
   ) {
     this.group.name = 'loot';
@@ -142,6 +142,12 @@ export class LootLayer {
     this.mOut.multiplyMatrices(world, ref.local);
     this.mOut.toArray(b.mesh.instanceMatrix.array as Float32Array, b.cursor * 16);
     b.cursor++;
+  }
+
+  /** M2b map change: tier inference uses the new map's loot spawns. */
+  setMap(map: Pick<MapBase, 'lootSpawns'>): void {
+    this.map = map;
+    this.tierCache.clear();
   }
 
   update(

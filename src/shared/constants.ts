@@ -13,7 +13,12 @@ export const INTERP_DELAY_MS = BALANCE.net.interpolationDelayMs; // 100
 
 /** WebSocket path. Dev: Vite proxies it to the server; prod: same origin. */
 export const WS_PATH = '/ws';
-export const PROTOCOL_VERSION = 1;
+/**
+ * M2a (ADR 0004 §6): 2. New PlayerInput fields (ads, stanceToggle, selectSlot 3), PlayerState stance/armor tiers,
+ * grenades in snapshots and new SimEvents. Client and server must match; mismatches get `error bad_version`.
+ * M2b (ADR 0006 §6, C-gate): 3. `hello` replaces `join`, room messages, drop fields, 'glass' surfaces.
+ */
+export const PROTOCOL_VERSION = 3;
 export const PING_INTERVAL_MS = 1000;
 
 /** Server keeps at most this many queued inputs per player; older ones are dropped. */
@@ -29,6 +34,12 @@ export const MAX_INPUT_REPEAT_TICKS = 6;
  * webglcontextrestored has not fired within this many ms (ADR 0003 §5).
  */
 export const CONTEXT_RESTORE_TIMEOUT_MS = 5000;
+/**
+ * M2a (ADR 0004 §3; consumer: ClientGame grenade view). Client-side grenade extrapolation from the latest snapshot
+ * (or grenadeThrown event) runs the shared stepGrenade forward to serverNow(), but never more than this many ms
+ * past the source sample. Beyond it the grenade holds still until fresher data arrives.
+ */
+export const GRENADE_EXTRAPOLATION_MAX_MS = 250;
 /** Client runs at most this many local fixed steps per frame (spiral-of-death guard). */
 export const MAX_STEPS_PER_FRAME = 5;
 

@@ -2,39 +2,54 @@
  * Renderer facade (IRenderer). Owner: graphics-engineer. Pipeline and budgets: docs/tech/RENDERING.md.
  *
  * Reads FrameView every frame and bus events for VFX; never mutates simulation state and never emits on the bus.
- * Scene: sky dome + clouds, terrain (polar grid on heightAt), toon water (one mesh to the horizon), instanced props
- * and loot, pooled chibis, tide wall, pooled particles and tracers. One shadow-casting sun whose tight frustum
- * follows the camera target.
+ * M2b: the static world is a swappable MapScene (IslandScene: sky, terrain, sea, tide wall, island props; IndoorScene:
+ * floor, walls, glass, merged kit props, ceiling, rain curtain), rebuilt on `mapChanged` and disposed without leaks
+ * (ADR 0005 §5). Map-independent layers stay: pooled chibis (freefall / parachute poses), loot, grenades, VFX, the
+ * carrier (seaplane / drone on the DropRoute) and the first-person viewmodel pass (ViewmodelPass.ts, drawn after the
+ * world with a depth clear). One shadow-casting key light whose tight frustum follows the camera target.
+ * Camera by CameraView.view: first person = exactly at the eye (roll, near 0.05, no boom, subject hidden); the 3P
+ * cases (carrier, chase, death, results) use the collision rig plus the indoor ceiling / bounds clamps and the
+ * cut-away of anything between the camera and the subject.
  */
 import * as THREE from 'three';
-import type { Balance } from '../shared/balance';
+import type { Balance, ZoneTheme } from '../shared/balance';
 import { CONTEXT_RESTORE_TIMEOUT_MS } from '../shared/constants';
-import type { FrameView, GraphicsStatus, IRenderer, ListenerPose, QualityLevel } from '../shared/contracts';
+import type { CameraCase, CameraView, FrameView, GraphicsStatus, IRenderer, ListenerPose, QualityLevel } from '../shared/contracts';
 import type { EventBus, GameEvents } from '../shared/events';
-import type { MapData, Surface } from '../shared/types';
-import { heightAt as simHeightAt, surfaceAt as simSurfaceAt } from '../shared/sim/terrain';
-import { CameraObstacles, CameraRig } from './cameraRig';
+import { isIndoor } from '../shared/maps';
+import type { AnyMapData, CarrierModel, PlayerId } from '../shared/types';
+import { CameraRig } from './cameraRig';
+import { CarrierLayer } from './CarrierLayer';
 import { disposeSkinCache } from './chibiSkin';
-import { bakeHeightField, type HeightField } from './heightField';
 import { ContextHealth } from './contextHealth';
+import { GrenadeLayer } from './GrenadeLayer';
+import { IndoorScene } from './IndoorScene';
+import { INDOOR_FX, resetIndoorFx } from './indoorFx';
+import { IslandScene } from './IslandScene';
 import { LootLayer } from './LootLayer';
+import type { MapScene, MapSceneFrame } from './mapScene';
 import { NameTags } from './NameTags';
-import { PlayerViews } from './PlayerViews';
+import { dropPhaseOf, PlayerViews, type PlayerViewsFrame } from './PlayerViews';
 import { palette } from './procedural';
-import { PropLayer } from './PropLayer';
 import { DEFAULT_QUALITY, QUALITY_PRESETS, type QualityPreset, type QualitySettings } from './quality';
-import { LIGHTING, Sky, SUN_DIRECTION, SunRig } from './Sky';
-import { buildTerrain } from './TerrainMesh';
-import { TideWall } from './TideWall';
+import { SunRig } from './Sky';
+import { SpeedLines } from './SpeedLines';
+import { ViewmodelPass } from './ViewmodelPass';
+import { Markers } from './vfx/Markers';
 import { Vfx } from './vfx/Vfx';
-import { visualHeight } from './visualTerrain';
-import { Water } from './Water';
 
-/** Terrain / height-field coverage beyond the world boundary (m). */
-const TERRAIN_MARGIN = 45;
-const HORIZON_RADIUS = 2400;
-const CAMERA_FAR = 2600;
 const FRAME_SAMPLES = 240;
+/** Camera shake at amount 1 (explosion at the eye): position jitter (m) and roll/pitch jitter (rad), decay (1/s). */
+const SHAKE_POS = 0.12;
+const SHAKE_ROT = 0.012;
+const SHAKE_DECAY = 7;
+/** Draw / LOD distances grow with zoom so scoped targets keep outlines and loot, capped for cost. */
+const MAX_LOD_ZOOM = 4;
+const DEFAULT_FOV = 70;
+const MARKER_CAPACITY = 512;
+/** Near plane (m): first person sits at the eye 0.3-0.4 m from a wall (ARCHITECTURE §15.7: <= 0.05). */
+const NEAR_FP = 0.05;
+const NEAR_3P = 0.1;
 
 export interface RenderStats {
   fps: number;
@@ -53,30 +68,51 @@ export interface RenderStats {
   contextLost: boolean;
   /** Number of context losses this session. */
   contextLosses: number;
+  /** M2b: id and kind of the map scene on screen. */
+  mapId: string;
+  mapKind: 'island' | 'indoor';
+}
+
+/** The camera case of a CameraView (pre-gate producers may omit `view`). Pure; exported for tests. */
+export function cameraCaseOf(cam: CameraView): CameraCase {
+  if (cam.view) return cam.view;
+  if (cam.mode === 'follow') return cam.firstPerson ? 'firstPerson' : 'chase';
+  return 'title';
 }
 
 export class Renderer implements IRenderer {
   readonly canvas: HTMLCanvasElement;
   private readonly gl: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
+  private readonly fog: THREE.Fog;
   private readonly camera: THREE.PerspectiveCamera;
-  private readonly balance: Balance;
-  private readonly heightField: HeightField;
-  private readonly terrain: THREE.Mesh;
-  private readonly water: Water;
-  private readonly sky: Sky;
+  private balance: Balance;
+  private world: MapScene;
+  private map: AnyMapData;
   private readonly sunRig: SunRig;
-  private readonly props: PropLayer;
   private readonly loot: LootLayer;
   private readonly players: PlayerViews;
-  private readonly tide: TideWall;
   private readonly tags: NameTags;
   private readonly vfx: Vfx;
+  private readonly markers: Markers;
+  private readonly grenades: GrenadeLayer;
+  private readonly carrier: CarrierLayer;
+  private readonly speedLines: SpeedLines;
+  private readonly viewmodel: ViewmodelPass;
   private readonly rig: CameraRig;
+  private baseFov: number;
+  private zoneTheme: ZoneTheme;
+  private shakeAmount = 0;
+  private readonly drawSize = new THREE.Vector2();
+  private readonly playersFrame: PlayerViewsFrame = {
+    time: 0, dt: 0, serverTime: 0, cam: new THREE.Vector3(), follow: false, hideId: null, localAds: 0,
+  };
+  private readonly sceneFrame: MapSceneFrame;
   private readonly frustum = new THREE.Frustum();
   private readonly projScreen = new THREE.Matrix4();
   private readonly focus = new THREE.Vector3();
   private readonly listener: ListenerPose = { pos: { x: 0, y: 0, z: 0 }, yaw: 0 };
+  private readonly unsubs: (() => void)[] = [];
   private quality: QualitySettings;
   private qualityName: QualityPreset;
   private lastMode: 'follow' | 'orbit' | null = null;
@@ -101,14 +137,20 @@ export class Renderer implements IRenderer {
   };
   private readonly onContextRestored = (): void => this.restoreGpuState();
 
+  /**
+   * @param map the map shown before the first `mapChanged` (title screen); ClientGame's mapChanged switches it.
+   * @param balance the base balance; per-match values arrive with mapChanged.balance.
+   */
   constructor(
     private readonly container: HTMLElement,
-    private readonly map: MapData,
+    map: AnyMapData,
     bus: EventBus<GameEvents>,
     balance: Balance,
   ) {
     // Contract revision 1 #10: the composition root (main.ts) injects balance; render never imports BALANCE.
     this.balance = balance;
+    this.map = map;
+    this.zoneTheme = isIndoor(map) ? 'sprinklers' : 'tide';
     this.qualityName = DEFAULT_QUALITY;
     this.quality = QUALITY_PRESETS[this.qualityName];
 
@@ -129,51 +171,27 @@ export class Renderer implements IRenderer {
     container.appendChild(this.canvas);
     this.readPointSizeRange();
 
-    this.camera = new THREE.PerspectiveCamera(70, 1, 0.1, CAMERA_FAR);
+    this.camera = new THREE.PerspectiveCamera(70, 1, NEAR_3P, 2600);
     this.camera.rotation.order = 'YXZ';
-    this.scene.fog = new THREE.Fog(palette.fog, LIGHTING.fogNear, LIGHTING.fogFar);
+    this.fog = new THREE.Fog(palette.fog, 140, 900);
+    this.scene.fog = this.fog;
     this.scene.background = new THREE.Color(palette.fog);
 
-    const terrainRadius = map.worldRadius + TERRAIN_MARGIN;
-    const vh = (x: number, z: number): number => visualHeight(x, z, map);
-    const simH = (x: number, z: number): number => simHeightAt(x, z, map);
-    const surf = (x: number, z: number): Surface => simSurfaceAt(x, z, map);
-
-    // Height texture for water depth / foam and the tide wall skirt.
-    const dryR = Math.max(0, map.islandRadius - map.shoreNoise.amplitude - map.beachWidth);
-    this.heightField = bakeHeightField(vh, terrainRadius + 5, 512, dryR);
-
-    this.sky = new Sky();
-    this.scene.add(this.sky.group);
     this.sunRig = new SunRig();
     this.scene.add(this.sunRig.sun, this.sunRig.sun.target, this.sunRig.hemi);
-
-    this.terrain = buildTerrain(map, vh, surf, terrainRadius).mesh;
-    this.scene.add(this.terrain);
-
-    this.water = new Water(map, this.heightField, SUN_DIRECTION, {
-      detail: this.quality.waterDetail,
-      denseRadius: terrainRadius,
-      horizonRadius: HORIZON_RADIUS,
-    });
-    this.scene.add(this.water.mesh);
-
-    this.props = new PropLayer(map, simH);
-    this.scene.add(this.props.group);
 
     this.loot = new LootLayer(map, this.balance);
     this.scene.add(this.loot.group);
 
-    this.players = new PlayerViews(this.balance, { onPoof: (x, y, z) => this.vfx.poof(x, y, z) });
+    this.players = new PlayerViews(this.balance, {
+      onPoof: (x, y, z) => this.vfx.poof(x, y, z),
+      onFuseSpark: (x, y, z) => this.vfx.fuseSpark(x, y, z),
+    });
     this.scene.add(this.players.group);
-
-    this.tide = new TideWall(this.heightField, simH);
-    this.scene.add(this.tide.group);
+    this.baseFov = this.balance.clientFeel?.cameraFovDeg ?? DEFAULT_FOV;
 
     this.tags = new NameTags(this.balance.player.height);
     this.scene.add(this.tags.mesh);
-
-    this.rig = new CameraRig(new CameraObstacles(simH, this.props.colliders, terrainRadius));
 
     const cameraPosition = this.camera.position;
     this.vfx = new Vfx(
@@ -184,17 +202,130 @@ export class Renderer implements IRenderer {
         onShot: (id) => this.players.onShot(id),
         onDamaged: (id) => this.players.onDamaged(id),
         onKilled: (id) => this.players.onKilled(id),
-        surfaceAt: surf,
-        pulseTide: () => this.tide.pulseNow(),
+        // The current map scene (swapped on mapChanged).
+        surfaceAt: (x, z) => this.world.surfaceAt(x, z),
+        pulseTide: () => this.world.pulseZone(),
         playerHeight: this.balance.player.height,
+        heightAt: (x, z) => this.world.heightAt(x, z),
+        onThrow: (id) => this.players.onThrow(id),
+        onCooked: (id, at) => this.players.onCooked(id, at),
+        onExploded: (id) => this.grenades.onExploded(id),
+        shake: (amount) => {
+          this.shakeAmount = Math.max(this.shakeAmount, Math.min(1, amount));
+        },
       },
       this.quality.maxParticles,
     );
-    this.scene.add(this.vfx.particles.points, this.vfx.tracers.mesh);
+    this.scene.add(this.vfx.particles.points, this.vfx.tracers.mesh, this.vfx.decals.group);
+
+    this.markers = new Markers(MARKER_CAPACITY, palette.ink);
+    this.scene.add(this.markers.points);
+    this.players.setMarkers(this.markers);
+    this.grenades = new GrenadeLayer(
+      this.markers,
+      { fuseSpark: (x, y, z) => this.vfx.fuseSpark(x, y, z), trailPuff: (x, y, z) => this.vfx.trailPuff(x, y, z) },
+      (x, z) => this.world.visualHeight(x, z),
+    );
+    this.scene.add(this.grenades.group);
+    this.tags.setHeightFn((id, fallback) => {
+      const b = this.players.getStanceBlend(id);
+      const st = this.balance.movement.stances;
+      if (!b || !st) return fallback;
+      const hc = fallback + (st.crouch.height - fallback) * b.crouch;
+      return hc + (st.prone.height - hc) * b.prone;
+    });
+
+    this.carrier = new CarrierLayer();
+    this.scene.add(this.carrier.group);
+    this.speedLines = new SpeedLines();
+    this.scene.add(this.speedLines.mesh);
+
+    // M2b first-person viewmodel pass (ViewmodelPass.ts, viewmodel graphics-engineer): own scene + depth clear.
+    this.viewmodel = new ViewmodelPass(this.balance);
+    this.viewmodel.init(this.gl);
+    this.viewmodel.setLights(this.sunRig.sun, this.sunRig.hemi);
+    this.scene.add(this.viewmodel.worldGroup);
+
+    this.world = this.buildWorld(map);
+    this.rig = new CameraRig(this.world.obstacles);
+    this.sceneFrame = {
+      time: 0, dt: 0, serverTime: 0, camera: this.camera, view: null as unknown as CameraView, frustum: this.frustum,
+      quality: this.quality, lod: 1, zone: null, firstPerson: false, carrier: null,
+    };
+    this.applyWorld();
+
+    this.unsubs.push(
+      bus.on('mapChanged', (e) => this.setMap(e.map, e.balance, e.zoneTheme)),
+      bus.on('carrierDeparted', (e) => this.carrier.setRoute(e.route)),
+    );
 
     this.applyQuality();
     this.resize();
     this.installDevHook();
+  }
+
+  // ------------------------------------------------------------------------------------------------
+  // Map switching (ADR 0005 §5)
+  // ------------------------------------------------------------------------------------------------
+  private buildWorld(map: AnyMapData): MapScene {
+    if (isIndoor(map)) {
+      return new IndoorScene(map, this.quality, {
+        zoneTheme: this.zoneTheme,
+        preset: this.qualityName,
+        splash: (x, y, z) => this.vfx.rainSplash(x, y, z),
+      });
+    }
+    resetIndoorFx();
+    return new IslandScene(map, this.quality);
+  }
+
+  /** Light, fog, camera limits and the carrier model for the current world. */
+  private applyWorld(): void {
+    const w = this.world;
+    this.scene.add(w.group);
+    const look = w.look;
+    this.sunRig.setLook(look);
+    this.fog.color.setHex(look.fogColor);
+    this.fog.near = look.fogNear;
+    this.fog.far = look.fogFar;
+    (this.scene.background as THREE.Color).setHex(look.background);
+    this.gl.setClearColor(look.background, 1);
+    this.camera.far = w.cameraFar;
+    this.camera.updateProjectionMatrix();
+    this.rig.setObstacles(w.obstacles);
+    this.rig.reset();
+    const kind: CarrierModel = this.map.carrier ?? (isIndoor(this.map) ? 'drone' : 'seaplane');
+    this.carrier.setMap(kind, isIndoor(this.map) ? this.map.floor : null);
+    this.loot.setMap(this.map);
+    this.viewmodel.setLights(this.sunRig.sun, this.sunRig.hemi);
+    // Re-add the FP canopy group in case a caller cleared the scene.
+    if (this.viewmodel.worldGroup.parent !== this.scene) this.scene.add(this.viewmodel.worldGroup);
+    this.lastMode = null; // re-apply the per-mode shadow frustum next frame
+  }
+
+  /**
+   * mapChanged: dispose the old map's world and build the new one. The same id keeps the scene (ADR 0005 §5) but takes
+   * the new per-match balance.
+   */
+  setMap(map: AnyMapData, balance: Balance, zoneTheme: ZoneTheme): void {
+    if (this.disposed) return;
+    this.balance = balance;
+    this.players.setBalance(balance);
+    this.viewmodel.reset();
+    this.viewmodel.setBalance(balance);
+    this.baseFov = balance.clientFeel?.cameraFovDeg ?? DEFAULT_FOV;
+    if (map.id === this.world.mapId && zoneTheme === this.zoneTheme) {
+      this.map = map;
+      this.carrier.setRoute(null);
+      return;
+    }
+    this.scene.remove(this.world.group);
+    this.world.dispose();
+    this.vfx.clear();
+    this.map = map;
+    this.zoneTheme = zoneTheme;
+    this.world = this.buildWorld(map);
+    this.applyWorld();
   }
 
   // ------------------------------------------------------------------------------------------------
@@ -205,6 +336,8 @@ export class Renderer implements IRenderer {
     const t0 = performance.now();
     const time = view.time;
     const cam = view.camera;
+    const camCase = cameraCaseOf(cam);
+    const firstPerson = cam.mode === 'follow' && cam.firstPerson === true;
 
     if (cam.mode !== this.lastMode) {
       this.lastMode = cam.mode;
@@ -212,20 +345,40 @@ export class Renderer implements IRenderer {
       this.sunRig.configure(
         this.quality.shadows,
         this.quality.shadowMapSize,
-        cam.mode === 'orbit' ? this.map.islandRadius + 15 : this.quality.shadowHalfExtent,
+        cam.mode === 'orbit' ? this.world.orbitShadowExtent : this.quality.shadowHalfExtent,
       );
     }
-    if (cam.fovDeg !== this.lastFov) {
+    const near = firstPerson ? NEAR_FP : NEAR_3P;
+    if (cam.fovDeg !== this.lastFov || this.camera.near !== near) {
       this.lastFov = cam.fovDeg;
       this.camera.fov = cam.fovDeg;
+      this.camera.near = near;
       this.camera.updateProjectionMatrix();
       this.updatePointProjection();
       this.tags.setFov(cam.fovDeg);
     }
 
-    const p = this.rig.update(cam, dt, cam.mode === 'follow');
-    this.camera.position.set(p.x, p.y, p.z);
-    this.camera.rotation.set(cam.pitch, cam.yaw, 0);
+    // First person (M2b every FP case; M2a scope): exactly at the eye, no boom, no collision.
+    if (firstPerson) {
+      this.camera.position.set(cam.target.x, cam.target.y, cam.target.z);
+    } else {
+      const p = this.rig.update(cam, dt, cam.mode === 'follow' || camCase === 'carrier');
+      this.camera.position.set(p.x, p.y, p.z);
+    }
+    let shakeX = 0, shakeZ = 0;
+    if (this.shakeAmount > 0.001 && !view.reducedMotion) {
+      const a = this.shakeAmount;
+      const t = time * 47;
+      this.camera.position.x += Math.sin(t * 1.3) * SHAKE_POS * a;
+      this.camera.position.y += Math.sin(t * 1.7 + 1.1) * SHAKE_POS * a;
+      this.camera.position.z += Math.sin(t * 1.1 + 2.3) * SHAKE_POS * a;
+      shakeX = Math.sin(t * 1.9 + 0.4) * SHAKE_ROT * a;
+      shakeZ = Math.sin(t * 1.5 + 2.9) * SHAKE_ROT * a;
+      this.shakeAmount *= Math.exp(-dt * SHAKE_DECAY);
+    } else {
+      this.shakeAmount = 0;
+    }
+    this.camera.rotation.set(cam.pitch + shakeX, cam.yaw, (cam.roll ?? 0) + shakeZ);
     this.camera.updateMatrixWorld();
     this.projScreen.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
     this.frustum.setFromProjectionMatrix(this.projScreen);
@@ -235,18 +388,51 @@ export class Renderer implements IRenderer {
     this.sunRig.follow(this.focus);
 
     const cp = this.camera.position;
+    // Indoor 3P cut-away: anything between the camera and the subject dithers away (title orbit excluded).
+    const cut = this.world.kind === 'indoor' && !firstPerson && camCase !== 'title';
+    INDOOR_FX.uCutOn.value = cut ? 1 : 0;
+    if (cut) {
+      INDOOR_FX.uCutA.value.copy(cp);
+      INDOOR_FX.uCutB.value.set(cam.target.x, cam.target.y, cam.target.z);
+    }
+
     const q = this.quality;
-    this.props.update(this.frustum, cp, time, q.propDrawDistance, q.outlineDistance);
-    this.loot.update(view.loot, view.highlightLootId, time, this.frustum, cp, q.lootDrawDistance);
-    const hideLocal = cam.mode === 'follow' && this.rig.actualDistance < 0.55;
-    this.players.update(view.players, time, dt, cp, hideLocal);
+    const lod = lodZoom(this.baseFov, cam.fovDeg);
+    this.carrier.update(view.serverTime, cam, time);
+    const sf = this.sceneFrame;
+    sf.time = time;
+    sf.dt = dt;
+    sf.serverTime = view.serverTime;
+    sf.view = cam;
+    sf.quality = q;
+    sf.lod = lod;
+    sf.zone = view.zone;
+    sf.firstPerson = firstPerson;
+    sf.carrier = this.carrier.visible ? this.carrier.position : null;
+    this.world.update(sf);
+
+    this.loot.update(view.loot, view.highlightLootId, time, this.frustum, cp, q.lootDrawDistance * lod);
+    this.players.setOutlineDistance(q.characterOutlineDistance * lod);
+    this.markers.begin();
+    const pf = this.playersFrame;
+    pf.time = time;
+    pf.dt = dt;
+    pf.serverTime = view.serverTime;
+    pf.cam.copy(cp);
+    pf.follow = cam.mode === 'follow' && !firstPerson;
+    const subject: PlayerId | null = firstPerson ? (cam.subjectId ?? view.localId) : null;
+    pf.hideId = subject;
+    pf.localAds = view.ads?.cameraBlend ?? 0;
+    this.players.update(view.players, pf);
+    this.grenades.update(view.grenades, view.grenadeArc, view.serverTime, dt, time);
+    this.markers.end();
     this.tags.update(view.players, cp);
-    this.tide.update(view.zone, time, dt);
-    this.water.update(time);
-    this.sky.update(this.camera, time);
+    this.speedLines.update(firstPerson && this.subjectInFreefall(view, subject), cp, time, dt, this.balance.drop?.freefallSpeed ?? 20);
     this.vfx.update(dt);
+    this.viewmodel.update(view, dt);
 
     this.gl.render(this.scene, this.camera);
+    this.viewmodel.render(this.gl, this.camera);
 
     this.listener.pos.x = cp.x;
     this.listener.pos.y = cp.y;
@@ -257,6 +443,15 @@ export class Renderer implements IRenderer {
     this.cpuMs[this.frameIdx] = performance.now() - t0;
     this.frameIdx = (this.frameIdx + 1) % FRAME_SAMPLES;
     this.frameCount++;
+  }
+
+  private subjectInFreefall(view: FrameView, id: PlayerId | null): boolean {
+    if (id === null || view.reducedMotion) return false;
+    for (let i = 0; i < view.players.length; i++) {
+      const s = view.players[i].state;
+      if (s.id === id) return dropPhaseOf(s) === 'freefall';
+    }
+    return false;
   }
 
   resize(): void {
@@ -279,17 +474,20 @@ export class Renderer implements IRenderer {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    for (const u of this.unsubs) u();
+    this.unsubs.length = 0;
+    this.viewmodel.dispose();
     this.vfx.dispose();
+    this.markers.dispose();
+    this.grenades.dispose();
     this.tags.dispose();
     this.players.dispose();
     disposeSkinCache();
     this.loot.dispose();
-    this.props.dispose();
-    this.tide.dispose();
-    this.water.dispose();
-    this.sky.dispose();
-    this.terrain.geometry.dispose();
-    this.heightField.texture.dispose();
+    this.carrier.dispose();
+    this.speedLines.dispose();
+    this.world.dispose();
+    resetIndoorFx();
     this.sunRig.sun.shadow.map?.dispose();
     this.scene.clear();
     this.canvas.removeEventListener('webglcontextlost', this.onContextLost);
@@ -352,6 +550,8 @@ export class Renderer implements IRenderer {
       quality: this.qualityName,
       contextLost: this.health.isLost,
       contextLosses: this.health.lossCount,
+      mapId: this.world.mapId,
+      mapKind: this.world.kind,
     };
   }
 
@@ -384,15 +584,16 @@ export class Renderer implements IRenderer {
     this.sunRig.configure(
       q.shadows,
       q.shadowMapSize,
-      this.lastMode === 'orbit' ? this.map.islandRadius + 15 : q.shadowHalfExtent,
+      this.lastMode === 'orbit' ? this.world.orbitShadowExtent : q.shadowHalfExtent,
     );
-    this.water.setDetail(q.waterDetail);
+    this.world.setQuality(q);
     this.players.setOutlineDistance(q.characterOutlineDistance);
   }
 
   private updatePointProjection(): void {
-    const h = this.gl.getDrawingBufferSize(new THREE.Vector2()).y;
+    const h = this.gl.getDrawingBufferSize(this.drawSize).y;
     this.vfx.particles.setProjection(h, this.camera.fov, this.maxPointPx);
+    this.markers.setProjection(h, this.camera.fov, this.maxPointPx);
   }
 
   private installDevHook(): void {
@@ -405,6 +606,18 @@ export class Renderer implements IRenderer {
       stats: () => this.getStats(),
       setQuality: (p: QualityPreset) => this.setQuality(p),
       presets: QUALITY_PRESETS,
+      world: () => this.world,
     };
   }
+}
+
+/**
+ * LOD distance multiplier for a zoomed camera: tan(base/2) / tan(fov/2), clamped to [1, MAX_LOD_ZOOM]. A target
+ * seen through a 4x scope keeps the outline and loot it would have at a quarter of the distance. Pure; exported
+ * for tests.
+ */
+export function lodZoom(baseFovDeg: number, fovDeg: number): number {
+  if (!(fovDeg > 0) || !(baseFovDeg > 0)) return 1;
+  const z = Math.tan((baseFovDeg * Math.PI) / 360) / Math.tan((fovDeg * Math.PI) / 360);
+  return z < 1 ? 1 : z > MAX_LOD_ZOOM ? MAX_LOD_ZOOM : z;
 }

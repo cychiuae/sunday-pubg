@@ -3,20 +3,25 @@
  * input sequence: seeded Rng streams, world time only, no globals.
  */
 import type { Balance } from '../balance';
-import { ammoFor } from '../balance';
-import { MAX_INPUT_REPEAT_TICKS, MAX_QUEUED_INPUTS, PITCH_MAX, PITCH_MIN, SIM_DT } from '../constants';
+import { armorBalance } from '../balance';
+import { MAX_INPUT_REPEAT_TICKS, MAX_QUEUED_INPUTS, SIM_DT } from '../constants';
+import { carrierHeading, carrierPosAt } from '../maps';
 import { aimDirection, clamp, createRng, type Rng, wrapAngle } from '../math';
 import type {
   ActionFailedSimEvent,
   ActionFailReason,
+  AnyMapData,
   Appearance,
+  ArmorHit,
+  ArmorPieceState,
   DeathCause,
+  DropRoute,
   FailedAction,
-  GunId,
-  HealId,
+  GrenadeId,
+  GrenadeState,
+  HeldId,
   LocalPlayerState,
   LootId,
-  MapData,
   MatchPhase,
   MatchState,
   PlayerId,
@@ -24,53 +29,86 @@ import type {
   PlayerState,
   ShotImpact,
   SimEvent,
-  SlotIndex,
   Standing,
+  Vec2,
   Vec3,
   WeaponId,
   WorldSnapshot,
 } from '../types';
-import { botThink, createBotBrain, rollPersonality, type RecentShot } from './bots';
-import { raycastStatic } from './colliders';
-import { applyDamage, effectiveSpreadDeg, isHeadshot, pelletDamage, rayCylinder, sampleCone, spreadRad } from './combat';
+import { FISTS_SLOT } from '../types';
 import {
-  activeSlotState,
-  activeWeapon,
-  applyPickup,
-  chooseHeal,
-  createInventory,
-  deathDrops,
-  healedHp,
-  reloadAmount,
-  type GroundItem,
-} from './inventory';
-import { scatterInDisc, spawnMatchLoot, toLootState, type LootEntity } from './loot';
+  activeChangedByPickup,
+  advanceActionTimers,
+  applyActionEdges,
+  cancelActionTimers,
+  fireSlowedOf,
+  TIMER_EPSILON_MS,
+  type ActionEvent,
+  type ActionHooks,
+} from './actions';
+import { assignBotDrops, botThink, createBotBrain, rollPersonality, type BotEnv, type BotGrenadeInfo, type RecentShot } from './bots';
+import { lineOfSight, raycastStatic } from './colliders';
+import { adsProgressOf, applyArmorPiece, effectiveSpreadDeg, pelletDamage, sampleCone, spreadRad } from './combat';
+import { dropLaunch, explosionDamage, stepGrenade, throwLaunch, type GrenadeBody } from './grenade';
+import { activeHeld, activeWeapon, applyPickup, createInventory, deathDrops, type GroundItem } from './inventory';
+import { dropTierOf, scatterInDisc, spawnMatchLoot, toLootState, type LootEntity } from './loot';
 import {
   createMovementContext,
   groundHeightAt,
   horizontalSpeed,
+  initialMovementState,
   isInWater,
   MAX_MOVE_INPUT_LEN,
   stepMovement,
   toMovementInput,
+  type MapRuntime,
   type MovementContext,
 } from './movement';
+import { NavBudget, navTuning, PathCache, type NavGraph } from './nav';
+import { drawDropRoute, shiftRoute } from './route';
+import { chestPoint, eyePoint, isStanceSettled, pitchLimits, rayHitbox, stanceProgress } from './stance';
 import type { SimPlayer } from './state';
 import { heightAt } from './terrain';
 import { cloneZoneState, createZone, isOutsideZone, nearestEdgePoint, updateZone, type ZoneRuntime } from './zone';
 
+export { TIMER_EPSILON_MS } from './actions';
+
+/** ADR 0006 §2: a World created by a room at its map lock runs exactly one match. */
+export interface MatchStartOptions {
+  /** Countdown length from timeOriginMs; the match ('playing') starts on the first tick at or after its end. */
+  countdownMs: number;
+  /** Fill up to match.targetPlayers with bots at the start. */
+  fillBots: boolean;
+  /** MatchState.matchId of this match. */
+  matchId: number;
+}
+
 export interface WorldOptions {
-  map: MapData;
+  map: AnyMapData;
+  /** The effective (per-map) balance: balanceForMap(base, map.id). */
   balance: Balance;
   seed: number;
   botNames: readonly string[];
+  /** M2b: server clock ms at tick 0 (timeMs = timeOriginMs + tick x SIM_DT x 1000). Default 0. */
+  timeOriginMs?: number;
+  /**
+   * M2b (ADR 0006 §2): skip the lobby (match.minHumansToStart ignored): the World is in 'countdown' from creation,
+   * starts the match once, and reports `finished` when the results end. Absent = the M1/M2a lobby loop.
+   */
+  matchStart?: MatchStartOptions;
+  /** M2b (ADR 0005 §6): a prepared map (shared colliders and nav graph). Must be for `map` and `balance`. */
+  runtime?: MapRuntime;
+  /** M2b: carrier drop at match start (default true). false = the M1 spawn above playerSpawns (tests). */
+  drop?: boolean;
 }
 
 export interface World {
   readonly tick: number;
-  /** Server clock ms (sum of step dt; tick * SIM_DT * 1000 when the server always passes SIM_DT). */
+  /** Server clock ms (timeOriginMs + the sum of step dt; + tick * SIM_DT * 1000 while every step is SIM_DT). */
   readonly timeMs: number;
-  readonly map: MapData;
+  readonly map: AnyMapData;
+  /** M2b: true once the results of a `matchStart` World have ended (the room drops it). Legacy Worlds never finish. */
+  readonly finished: boolean;
   addPlayer(name: string): PlayerId | null;
   removePlayer(id: PlayerId): void;
   applyInput(id: PlayerId, input: PlayerInput): void;
@@ -84,18 +122,12 @@ const ANIM_FIRING_MIN_MS = 150;
 const ANIM_MOVING_SPEED = 0.3;
 /** Number of appearance variants per channel (the character factory wraps larger values). */
 const APPEARANCE_VARIANTS = 8;
-/**
- * Timers complete when within this many ms of zero (float accumulation of 1000/30 ms steps). Exported so client-side
- * action prediction (src/game/actionPrediction.ts) uses the same completion rule.
- */
-export const TIMER_EPSILON_MS = 1e-6;
-/** Safety cap on shots resolved for one player in one tick. */
-const MAX_SHOTS_PER_TICK = 8;
-
 const RNG_MATCH = 1;
 const RNG_ZONE = 2;
 const RNG_COMBAT = 3;
 const RNG_BOTS = 4;
+/** M2b: the carrier route stream (drawn at World creation, or at the match start of a legacy World). */
+const RNG_ROUTE = 5;
 
 function mixSeed(seed: number, a: number, b: number): number {
   let h = Math.imul(seed ^ 0x27d4eb2d, 0x165667b1) ^ Math.imul(a + 0x3c6ef372, 0x9e3779b1) ^ Math.imul(b + 1, 0x85ebca77);
@@ -113,19 +145,52 @@ interface Human {
   queued: boolean;
 }
 
-const NEUTRAL_EDGES = { jump: false, reload: false, interact: false, useHeal: false, selectSlot: -1 as const };
+const NEUTRAL_EDGES = {
+  jump: false,
+  reload: false,
+  interact: false,
+  useHeal: false,
+  selectSlot: -1 as const,
+  stanceToggle: null,
+};
+
+/** M2a: a live grenade entity (grenades.md). */
+export interface GrenadeEntity {
+  id: GrenadeId;
+  ownerId: PlayerId;
+  body: GrenadeBody;
+  /** Server ms of the fuse end. */
+  explodesAt: number;
+  /** Tick it was created on (it first moves on the next tick, grenades.md edge cases). */
+  spawnTick: number;
+}
+
+/** hp + worn armor durability (placement tie-break, armor.md). */
+const hpPlusArmor = (p: SimPlayer): number => p.hp + (p.vest ? p.vest.durability : 0) + (p.helmet ? p.helmet.durability : 0);
+
+const armorHit = (before: ArmorPieceState | null, absorbed: number, broken: boolean): ArmorHit | null =>
+  before ? { tier: before.tier, absorbed, broken } : null;
 
 export function createWorld(opts: WorldOptions): World {
   return new SimWorld(opts);
 }
 
 class SimWorld implements World {
-  readonly map: MapData;
+  readonly map: AnyMapData;
   private readonly balance: Balance;
   private readonly seed: number;
   private readonly botNames: readonly string[];
   private readonly ctx: MovementContext;
   private readonly worldRng: Rng;
+
+  private readonly timeOriginMs: number;
+  private readonly matchStart: MatchStartOptions | null;
+  private readonly dropEnabled: boolean;
+  private readonly nav: NavGraph | null;
+  private readonly pathCache: PathCache | null;
+  private readonly navBudget: NavBudget | null;
+  private route: DropRoute | null = null;
+  private _finished = false;
 
   private _tick = 0;
   private _timeMs = 0;
@@ -149,6 +214,8 @@ class SimWorld implements World {
   private zone: ZoneRuntime | null = null;
   private nextZoneDamageAt = 0;
   private recentShots: RecentShot[] = [];
+  private grenades: GrenadeEntity[] = [];
+  private nextGrenadeId = 1;
 
   private matchRng: Rng;
   private zoneRng: Rng;
@@ -163,10 +230,30 @@ class SimWorld implements World {
     this.balance = opts.balance;
     this.seed = opts.seed >>> 0;
     this.botNames = opts.botNames;
-    this.ctx = createMovementContext(opts.map, opts.balance);
+    const rt = opts.runtime && opts.runtime.map === opts.map && opts.runtime.balance === opts.balance ? opts.runtime : null;
+    this.ctx = rt ? rt.ctx : createMovementContext(opts.map, opts.balance);
+    this.nav = rt ? rt.nav : null;
+    const nt = navTuning(opts.balance);
+    this.pathCache = this.nav ? new PathCache(nt.pathCacheSize) : null;
+    this.navBudget = this.nav ? new NavBudget(nt.maxPathsPerTick) : null;
+    this.timeOriginMs = Number.isFinite(opts.timeOriginMs) ? opts.timeOriginMs! : 0;
+    this._timeMs = this.timeOriginMs;
+    this.matchStart = opts.matchStart ?? null;
+    this.dropEnabled = opts.drop !== false;
     this.worldRng = createRng(mixSeed(this.seed, 0, 0));
     this.matchRng = this.zoneRng = this.combatRng = this.botRng = this.worldRng;
+    if (this.matchStart) {
+      this.matchId = this.matchStart.matchId;
+      this.phase = 'countdown';
+      // The match starts on the first tick at or after the countdown end; compute that tick's time with the same
+      // formula as step() so the route's startsAt equals the 'playing' start exactly.
+      const tickMs = SIM_DT * 1000;
+      const ticks = Math.max(1, Math.ceil(Math.max(0, this.matchStart.countdownMs) / tickMs - 1e-9));
+      this.phaseEndsAt = this.timeOriginMs + ticks * SIM_DT * 1000;
+    }
     this.seedMatchRngs();
+    // ADR 0005 §8: the route is drawn when the World is created (the room's lock), so clients see it in the countdown.
+    if (this.matchStart && this.dropEnabled) this.route = this.drawRoute(this.phaseEndsAt ?? this.timeOriginMs);
   }
 
   get tick(): number {
@@ -175,6 +262,19 @@ class SimWorld implements World {
 
   get timeMs(): number {
     return this._timeMs;
+  }
+
+  get finished(): boolean {
+    return this._finished;
+  }
+
+  private drawRoute(startsAt: number): DropRoute {
+    const rng = createRng(mixSeed(this.seed, this.matchId, RNG_ROUTE));
+    return drawDropRoute(this.map, this.balance, rng, startsAt);
+  }
+
+  private emit(e: SimEvent): void {
+    this.events.push(e);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -198,6 +298,7 @@ class SimWorld implements World {
       if (credit) credit.kills++;
       p.placement = this.aliveParticipants().length; // alive count after removal + 1
       this.cancelActions(p);
+      this.releaseCook(p, 'death');
       this.dropInventory(p);
       p.alive = false;
     }
@@ -215,11 +316,12 @@ class SimWorld implements World {
     const d = Number.isFinite(dt) && dt > 0 ? dt : 0;
     this.events = [];
     this.actionFailures = [];
+    if (this._finished) return this.events;
     this._tick++;
     const prevMs = this._timeMs;
-    // Exactly tick * SIM_DT * 1000 while every step is SIM_DT (the server contract); accumulates otherwise (tests).
+    // Exactly origin + tick * SIM_DT * 1000 while every step is SIM_DT (the server contract); accumulates otherwise.
     if (d !== SIM_DT) this.uniformDt = false;
-    this._timeMs = this.uniformDt ? this._tick * SIM_DT * 1000 : this._timeMs + d * 1000;
+    this._timeMs = this.uniformDt ? this.timeOriginMs + this._tick * SIM_DT * 1000 : this._timeMs + d * 1000;
     const now = this._timeMs;
 
     switch (this.phase) {
@@ -227,7 +329,7 @@ class SimWorld implements World {
         this.checkLobby();
         break;
       case 'countdown':
-        if (this.queuedCount() < this.balance.match.minHumansToStart) {
+        if (!this.matchStart && this.queuedCount() < this.balance.match.minHumansToStart) {
           this.phase = 'lobby';
           this.phaseEndsAt = null;
         } else if (this.phaseEndsAt !== null && now >= this.phaseEndsAt) {
@@ -240,8 +342,11 @@ class SimWorld implements World {
       case 'results':
         this.simulateResults(d);
         if (this.phaseEndsAt !== null && now >= this.phaseEndsAt) {
-          this.toLobby();
-          this.checkLobby();
+          if (this.matchStart) this._finished = true;
+          else {
+            this.toLobby();
+            this.checkLobby();
+          }
         }
         break;
     }
@@ -250,7 +355,9 @@ class SimWorld implements World {
 
   getMatch(): MatchState {
     const inMatch = this.phase === 'playing' || this.phase === 'results';
-    return {
+    let aboard = 0;
+    if (this.phase === 'playing') for (const p of this.participants.values()) if (p.aboard && p.alive && !p.left) aboard++;
+    const m: MatchState = {
       matchId: this.matchId,
       phase: this.phase,
       phaseEndsAt: this.phaseEndsAt,
@@ -260,7 +367,11 @@ class SimWorld implements World {
       totalPlayers: inMatch ? this.totalPlayers : 0,
       winnerId: this.winnerId,
       winnerName: this.winnerName,
+      mapId: this.map.id,
+      route: this.route ? { ...this.route, entry: { ...this.route.entry }, exit: { ...this.route.exit }, eject: { ...this.route.eject } } : null,
+      aboardCount: aboard,
     };
+    return m;
   }
 
   snapshotFor(viewerId: PlayerId | null): WorldSnapshot {
@@ -276,6 +387,7 @@ class SimWorld implements World {
       players,
       lootVersion: this.lootVersion,
       loot: inMatch ? this.loot.map(toLootState) : [],
+      grenades: this.phase === 'playing' ? this.grenades.map(toGrenadeState) : [],
       local: viewer && !viewer.left ? this.toLocal(viewer) : null,
     };
   }
@@ -323,9 +435,10 @@ class SimWorld implements World {
       dying: null,
       left: false,
       hp: b.player.maxHp,
-      armor: 0,
+      vest: null,
+      helmet: null,
       kills: 0,
-      move: { pos: { x: 0, y: 0, z: 0 }, vel: { x: 0, y: 0, z: 0 }, grounded: false, dropping: true },
+      move: initialMovementState({ x: 0, y: 0, z: 0 }, true),
       yaw: 0,
       pitch: 0,
       inv: createInventory(),
@@ -336,6 +449,11 @@ class SimWorld implements World {
       prevFire: false,
       triggerLatched: false,
       firingUntil: 0,
+      lastShotAt: -Infinity,
+      lastShotWeapon: null,
+      cook: null,
+      throwRecoveryMs: 0,
+      lastGunSlot: FISTS_SLOT,
       queue: [],
       lastInput: null,
       inputRepeatTicks: 0,
@@ -344,6 +462,8 @@ class SimWorld implements World {
       tickStartHpArmor: b.player.maxHp,
       placement: null,
       brain: null,
+      aboard: false,
+      stalled: false,
     };
   }
 
@@ -356,6 +476,8 @@ class SimWorld implements World {
     this.nextLootId = 1;
     this.lootVersion++;
     this.recentShots = [];
+    this.grenades = [];
+    this.nextGrenadeId = 1;
 
     const humans = [...this.humans.values()].filter((h) => h.queued).slice(0, b.match.maxPlayers);
     const list: SimPlayer[] = [];
@@ -363,7 +485,8 @@ class SimWorld implements World {
       h.queued = false;
       list.push(this.newPlayer(h.id, h.name, false, h.appearance));
     }
-    const nBots = Math.max(0, b.match.targetPlayers - humans.length);
+    const fill = this.matchStart ? this.matchStart.fillBots : true;
+    const nBots = fill ? Math.max(0, b.match.targetPlayers - humans.length) : 0;
     const names = [...this.botNames];
     shuffle(names, this.matchRng);
     for (let i = 0; i < nBots; i++) {
@@ -374,32 +497,44 @@ class SimWorld implements World {
       list.push(bot);
     }
     for (const p of list) this.participants.set(p.id, p);
-
-    // Spawns: random rotation offset, then every (S / N)-th spawn; shuffled assignment; jitter; drop height.
-    const spawns = this.map.playerSpawns;
     const n = list.length;
-    const order = [...list];
-    shuffle(order, this.matchRng);
-    const S = spawns.length;
-    const offset = S > 0 ? this.matchRng.int(S) : 0;
-    const stride = S > 0 ? S / Math.max(1, n) : 0;
-    order.forEach((p, k) => {
-      const sp = S > 0 ? spawns[Math.floor(offset + k * stride) % S]! : { x: 0, z: 0 };
-      const j = scatterInDisc(sp.x, sp.z, b.match.spawnJitter, this.matchRng);
-      const ground = heightAt(j.x, j.z, this.map);
-      p.move = {
-        pos: { x: j.x, y: Math.max(ground, 0) + b.match.dropHeight, z: j.z },
-        vel: { x: 0, y: 0, z: 0 },
-        grounded: false,
-        dropping: true,
-      };
-      p.yaw = Math.atan2(j.x, j.z); // face the island centre (forward = (-sin, -cos))
-      p.tickStartHpArmor = p.hp + p.armor;
-    });
+
+    if (this.dropEnabled) {
+      // drop.md: everyone starts aboard the carrier (route drawn at creation; a legacy World draws it now).
+      if (this.route === null) this.route = this.drawRoute(now);
+      else if (this.route.startsAt !== now) this.route = shiftRoute(this.route, now);
+      const route = this.route;
+      const c = carrierPosAt(route, now);
+      const yaw = carrierHeading(route);
+      for (const p of list) {
+        p.aboard = true;
+        p.move = this.aboardMove(c);
+        p.yaw = yaw;
+        p.tickStartHpArmor = hpPlusArmor(p);
+      }
+      this.pickBotDrops(list.filter((p) => p.isBot).sort((x, y) => x.id - y.id), route);
+    } else {
+      // M1 spawn (drop-less test Worlds): random rotation offset, then every (S / N)-th spawn; shuffled assignment;
+      // jitter; drop height.
+      const spawns = this.map.playerSpawns;
+      const order = [...list];
+      shuffle(order, this.matchRng);
+      const S = spawns.length;
+      const offset = S > 0 ? this.matchRng.int(S) : 0;
+      const stride = S > 0 ? S / Math.max(1, n) : 0;
+      order.forEach((p, k) => {
+        const sp = S > 0 ? spawns[Math.floor(offset + k * stride) % S]! : { x: 0, z: 0 };
+        const j = scatterInDisc(sp.x, sp.z, b.match.spawnJitter ?? 0, this.matchRng);
+        const ground = heightAt(j.x, j.z, this.map);
+        p.move = initialMovementState({ x: j.x, y: Math.max(ground, 0) + (b.match.dropHeight ?? b.drop.carrierAltitude), z: j.z }, true);
+        p.yaw = Math.atan2(j.x, j.z); // face the island centre (forward = (-sin, -cos))
+        p.tickStartHpArmor = hpPlusArmor(p);
+      });
+    }
     for (const p of list) this.events.push({ type: 'spawn', playerId: p.id, pos: { ...p.move.pos } });
 
-    this.loot = spawnMatchLoot(this.map, b, this.matchRng, () => this.nextLootId++, (x, z) =>
-      groundHeightAt(this.ctx, x, z, heightAt(x, z, this.map)),
+    this.loot = spawnMatchLoot(this.map, b, this.matchRng, () => this.nextLootId++, (x, z, y) =>
+      groundHeightAt(this.ctx, x, z, y ?? heightAt(x, z, this.map)),
     );
     this.zone = createZone(b, this.map, this.zoneRng, now);
     this.nextZoneDamageAt = now + b.zone.damageTickMs;
@@ -413,6 +548,20 @@ class SimWorld implements World {
     this.noHumansSince = null;
   }
 
+  /** Movement state of an aboard player: at the carrier, "dropping" with no phase, never stepped. */
+  private aboardMove(c: Vec2): SimPlayer['move'] {
+    const alt = this.route ? this.route.altitude : this.balance.drop.carrierAltitude;
+    return initialMovementState({ x: c.x, y: alt, z: c.z }, true, null);
+  }
+
+  /**
+   * drop.md "Bots: jump choice": `assignBotDrops` (bots.ts) writes each bot's target and jump time. Called once per
+   * match, at the start, with the bots in id order and the bot Rng (humans never influence the picks).
+   */
+  private pickBotDrops(bots: SimPlayer[], route: DropRoute): void {
+    if (bots.length > 0) assignBotDrops(bots, route, this.map, this.balance, this.botRng);
+  }
+
   private toLobby(): void {
     this.matchId++;
     this.participants = new Map();
@@ -420,6 +569,8 @@ class SimWorld implements World {
     this.lootVersion++;
     this.zone = null;
     this.recentShots = [];
+    this.grenades = [];
+    this.route = null;
     this.phase = 'lobby';
     this.phaseEndsAt = null;
     this.totalPlayers = 0;
@@ -436,7 +587,14 @@ class SimWorld implements World {
 
   private endMatch(winner: SimPlayer | null): void {
     const now = this._timeMs;
-    for (const p of this.participants.values()) this.cancelActions(p);
+    for (const p of this.participants.values()) {
+      this.cancelActions(p);
+      p.cook = null;
+    }
+    // drop.md edge case: aboard players are ranked like other alive players; the flight is over.
+    for (const p of this.participants.values()) p.aboard = false;
+    // Live grenades are removed without exploding (grenades.md test 17).
+    this.grenades = [];
     if (winner) winner.placement = 1;
     const standings: Standing[] = [...this.participants.values()]
       .map((p) => ({ id: p.id, name: p.name, isBot: p.isBot, kills: p.kills, placement: p.placement ?? this.totalPlayers }))
@@ -463,8 +621,8 @@ class SimWorld implements World {
     }
     if (this.noHumansSince === null) this.noHumansSince = this._timeMs;
     if (this._timeMs - this.noHumansSince < m.lastHumanDeathDelaySeconds * 1000) return;
-    // Rank remaining bots by hp + armor, then kills, then id. Top bot wins.
-    const ranked = [...alive].sort((a, b) => b.hp + b.armor - (a.hp + a.armor) || b.kills - a.kills || a.id - b.id);
+    // Rank remaining bots by hp + armor durability, then kills, then id. Top bot wins.
+    const ranked = [...alive].sort((a, b) => hpPlusArmor(b) - hpPlusArmor(a) || b.kills - a.kills || a.id - b.id);
     ranked.forEach((p, i) => (p.placement = i + 1));
     this.endMatch(ranked[0] ?? null);
   }
@@ -476,12 +634,12 @@ class SimWorld implements World {
   private simulatePlaying(dt: number, prevMs: number, now: number): void {
     const b = this.balance;
     const players = [...this.participants.values()];
-    for (const p of players) p.tickStartHpArmor = p.hp + p.armor;
+    for (const p of players) p.tickStartHpArmor = hpPlusArmor(p);
     const shotWindow = b.bots.decisionIntervalMs;
     if (this.recentShots.length > 0) this.recentShots = this.recentShots.filter((s) => now - s.at <= shotWindow);
 
     // Bots produce inputs through the same queue as humans.
-    const env = {
+    const env: BotEnv = {
       now,
       balance: b,
       map: this.map,
@@ -490,6 +648,11 @@ class SimWorld implements World {
       loot: this.loot,
       zone: this.zone ? this.zone.state : null,
       recentShots: this.recentShots,
+      grenades: this.grenades.map((g): BotGrenadeInfo => ({ id: g.id, ownerId: g.ownerId, pos: g.body.pos })),
+      route: this.route,
+      nav: this.nav,
+      pathCache: this.pathCache,
+      navBudget: this.navBudget,
     };
     for (const p of players) {
       if (!p.isBot || !p.alive || !p.brain) continue;
@@ -502,6 +665,7 @@ class SimWorld implements World {
       if (!p.alive || p.left) continue;
       this.processPlayer(p, dt, prevMs, now);
     }
+    this.stepGrenades(dt, now);
 
     if (this.zone) {
       updateZone(this.zone, b, this.map, this.zoneRng, now);
@@ -515,12 +679,12 @@ class SimWorld implements World {
   private simulateResults(dt: number): void {
     // Movement only (no combat, pickups or zone) so nobody hangs mid-air; humans can wander.
     for (const p of this.participants.values()) {
-      if (!p.alive || p.left) continue;
+      if (!p.alive || p.left || p.aboard) continue;
       const input = this.dequeue(p);
       p.yaw = input.yaw;
       p.pitch = input.pitch;
-      const mi = toMovementInput(input, { alive: true, healing: false, reloading: false }, this.balance);
-      p.move = stepMovement(p.move, mi, dt, this.ctx).state;
+      const status = { alive: true, healing: false, reloading: false, held: activeHeld(p.inv), swapping: false, fireSlowed: false };
+      p.move = stepMovement(p.move, toMovementInput(input, status, this.balance), dt, this.ctx).state;
     }
   }
 
@@ -532,9 +696,11 @@ class SimWorld implements World {
   /**
    * Next input for a player. With an empty queue the last input's held fields repeat for at most
    * MAX_INPUT_REPEAT_TICKS ticks (jitter), then held movement/sprint/fire are released (yaw/pitch kept), so a stalled
-   * or hidden tab cannot run or fire forever.
+   * or hidden tab cannot run or fire forever. BUG-010: that neutral input sets `p.stalled`, so it is not treated as a
+   * trigger or ADS release (see actions.ts and processPlayer).
    */
   private dequeue(p: SimPlayer): PlayerInput {
+    p.stalled = false;
     const next = p.queue.shift();
     if (next) {
       p.lastInput = next;
@@ -545,7 +711,8 @@ class SimWorld implements World {
     p.inputRepeatTicks++;
     const last = p.lastInput;
     if (last && p.inputRepeatTicks > MAX_INPUT_REPEAT_TICKS) {
-      return { ...last, moveForward: 0, moveRight: 0, sprint: false, fire: false, ...NEUTRAL_EDGES };
+      p.stalled = true;
+      return { ...last, moveForward: 0, moveRight: 0, sprint: false, fire: false, ads: false, ...NEUTRAL_EDGES };
     }
     if (!last) {
       return {
@@ -557,6 +724,7 @@ class SimWorld implements World {
         pitch: p.pitch,
         sprint: false,
         fire: false,
+        ads: false,
         ...NEUTRAL_EDGES,
       };
     }
@@ -573,153 +741,122 @@ class SimWorld implements World {
       r /= len;
     }
     const slot = input.selectSlot;
+    // M2b (ADR 0005 §9): prone narrows the pitch range (the same pitchLimits the client look clamp and bots use).
+    const pl = pitchLimits(p.move, this.balance);
     return {
       seq: Math.floor(num(input.seq, p.lastProcessedInputSeq)),
       dt: clamp(num(input.dt, SIM_DT), 0, SIM_DT),
       moveForward: f,
       moveRight: r,
       yaw: wrapAngle(num(input.yaw, p.yaw)),
-      pitch: clamp(num(input.pitch, 0), PITCH_MIN, PITCH_MAX),
+      pitch: clamp(num(input.pitch, 0), pl.min, pl.max),
       sprint: input.sprint === true,
       fire: input.fire === true,
       jump: input.jump === true,
       reload: input.reload === true,
       interact: input.interact === true,
       useHeal: input.useHeal === true,
-      selectSlot: slot === 0 || slot === 1 || slot === 2 ? slot : -1,
+      selectSlot: slot === 0 || slot === 1 || slot === 2 || slot === 3 ? slot : -1,
+      ads: input.ads === true,
+      stanceToggle: input.stanceToggle === 'crouch' || input.stanceToggle === 'prone' ? input.stanceToggle : null,
+    };
+  }
+
+  /**
+   * drop.md "Aboard": position = the carrier; only look and the jump edge count. A jump edge at or after noJumpUntil
+   * leaves the carrier (freefall at the carrier position, zero velocity, no movement step this tick); at ejectAt
+   * everyone still aboard jumps (`auto`). Manual jumps on the eject tick stay manual.
+   */
+  private processAboard(p: SimPlayer, now: number): void {
+    const route = this.route;
+    const input = this.dequeue(p);
+    p.yaw = input.yaw;
+    p.pitch = input.pitch;
+    if (!route) {
+      p.aboard = false;
+      return;
+    }
+    const c = carrierPosAt(route, now);
+    p.move = this.aboardMove(c);
+    const manual = input.jump && now >= route.noJumpUntil - TIMER_EPSILON_MS;
+    if (!manual && now < route.ejectAt - TIMER_EPSILON_MS) return;
+    p.aboard = false;
+    p.move = initialMovementState({ x: c.x, y: route.altitude, z: c.z }, true, 'freefall');
+    this.emit({ type: 'dropJump', playerId: p.id, pos: { ...p.move.pos }, auto: !manual });
+  }
+
+  /** Action hooks for one player: events with the player id, refusals, shots, grenade release and cook-out. */
+  private actionHooks(p: SimPlayer): ActionHooks {
+    return {
+      event: (e: ActionEvent) => {
+        if (e.type === 'grenadeCook') this.events.push({ type: 'grenadeCook', playerId: p.id, pos: this.eyeOf(p), explodesAt: e.explodesAt });
+        else this.events.push({ ...e, playerId: p.id });
+      },
+      failed: (action, reason) => this.actionFailed(p, action, reason),
+      fire: (weapon) => this.fireShot(p, weapon),
+      release: (how, explodesAt) => this.spawnCookEntity(p, how, explodesAt),
+      cookOut: () => this.explode(this.nextGrenadeId++, p.id, this.eyeOf(p), true),
+      interact: () => this.tryPickup(p),
     };
   }
 
   private processPlayer(p: SimPlayer, dt: number, prevMs: number, now: number): void {
+    if (p.aboard) {
+      this.processAboard(p, now);
+      return;
+    }
     const b = this.balance;
-    const dtMs = dt * 1000;
     const input = this.dequeue(p);
     p.yaw = input.yaw;
     p.pitch = input.pitch;
+    const hooks = this.actionHooks(p);
 
-    // Timers.
-    if (p.swapRemainingMs > 0) {
-      p.swapRemainingMs -= dtMs;
-      if (p.swapRemainingMs <= TIMER_EPSILON_MS) p.swapRemainingMs = 0;
-    }
-    if (p.reload) {
-      p.reload.remainingMs -= dtMs;
-      if (p.reload.remainingMs <= TIMER_EPSILON_MS) this.finishReload(p);
-    }
-    if (p.heal) {
-      p.heal.remainingMs -= dtMs;
-      if (p.heal.remainingMs <= TIMER_EPSILON_MS) this.finishHeal(p);
-    }
+    // 1. Action timers (shared step, actions.ts).
+    advanceActionTimers(p, dt * 1000, b, hooks);
 
-    const dropping = p.move.dropping;
-    if (input.selectSlot !== -1) this.selectSlot(p, input.selectSlot);
-    if (input.reload && !this.tryStartReload(p)) {
-      const slot = activeSlotState(p.inv);
-      if (slot && !p.reload && slot.mag < this.balance.weapons[slot.weapon].magSize && p.inv.ammo[ammoFor(this.balance, slot.weapon)] <= 0) {
-        this.actionFailed(p, 'reload', 'noAmmo');
-      }
-    }
-    if (input.useHeal) {
-      if (p.heal) this.cancelHeal(p);
-      else if (!dropping && !this.tryStartHeal(p)) {
-        const any = p.inv.heals.bandage + p.inv.heals.medkit > 0;
-        this.actionFailed(p, 'heal', any ? 'fullHp' : 'noHeals');
-      }
-    }
-    if (input.interact && !dropping) this.tryPickup(p);
-    this.handleFire(p, input, dropping, prevMs, now);
-
-    // Movement.
+    // 2. Movement: stance, ADS and motion (stance.md per-tick order).
     const wasDropping = p.move.dropping;
-    const mi = toMovementInput(input, { alive: true, healing: p.heal !== null, reloading: p.reload !== null }, b);
-    const res = stepMovement(p.move, mi, dt, this.ctx);
+    const held = activeHeld(p.inv);
+    const status = {
+      alive: true,
+      healing: p.heal !== null,
+      reloading: p.reload !== null,
+      held,
+      swapping: p.swapRemainingMs > 0,
+      fireSlowed: fireSlowedOf(p, now, b),
+    };
+    const adsBefore = p.move.adsMs;
+    const res = stepMovement(p.move, toMovementInput(input, status, b), dt, this.ctx);
     p.move = res.state;
+    // BUG-010: a stall-neutral input freezes ADS instead of releasing it (the client still holds RMB).
+    if (p.stalled && adsBefore > 0 && p.move.adsMs === 0) p.move = { ...p.move, adsMs: adsBefore };
+    if (res.stanceChanged) {
+      const c = res.stanceChanged;
+      this.events.push({ type: 'stanceChange', playerId: p.id, from: c.from, to: c.to, forced: c.forced, durationMs: c.durationMs });
+    }
+    if (res.stanceRefused) this.actionFailed(p, 'stance', res.stanceRefused);
+    if (res.chuteOpened) this.emit({ type: 'chuteOpen', playerId: p.id, pos: { ...p.move.pos }, manual: res.chuteOpened === 'manual' });
     if (res.landed && !wasDropping && res.landingSpeed > b.movement.fallDamageMinSpeed) {
       const dmg = (res.landingSpeed - b.movement.fallDamageMinSpeed) * b.movement.fallDamagePerMs;
       this.applyEnvDamage(p, dmg, 'fall', { ...p.move.pos });
     }
+
+    // 3. Edges and the trigger (shared step): slot, reload, heal, pickup (hook), fire / grenade.
+    const r = applyActionEdges(p, input, { now, prevMs, after: p.move, stalled: p.stalled }, b, hooks);
+    if (r.endAds) this.endAds(p);
   }
 
   // -------------------------------------------------------------------------------------------
   // Weapons, reload, heal, pickup
   // -------------------------------------------------------------------------------------------
 
-  private selectSlot(p: SimPlayer, slot: SlotIndex): void {
-    if (slot === p.inv.activeSlot) return;
-    if (slot !== 2 && p.inv.slots[slot] === null) return;
-    this.cancelReload(p);
-    this.cancelHeal(p);
-    p.inv.activeSlot = slot;
-    p.swapRemainingMs = this.balance.combat.swapMs;
-    p.triggerLatched = false;
-    this.events.push({ type: 'weaponSwitch', playerId: p.id, weapon: activeWeapon(p.inv), slot });
-  }
-
-  private tryStartReload(p: SimPlayer): boolean {
-    if (p.reload || p.swapRemainingMs > 0) return false;
-    const slot = activeSlotState(p.inv);
-    if (!slot) return false;
-    const reserve = p.inv.ammo[ammoFor(this.balance, slot.weapon)];
-    if (reloadAmount(slot, reserve, this.balance) <= 0) return false;
-    this.cancelHeal(p);
-    const ms = this.balance.weapons[slot.weapon].reloadMs;
-    p.reload = { slot: p.inv.activeSlot as 0 | 1, weapon: slot.weapon, remainingMs: ms, totalMs: ms };
-    this.events.push({ type: 'reloadStart', playerId: p.id, weapon: slot.weapon, durationMs: ms });
-    return true;
-  }
-
-  private finishReload(p: SimPlayer): void {
-    const r = p.reload;
-    if (!r) return;
-    p.reload = null;
-    const slot = p.inv.slots[r.slot];
-    if (slot && slot.weapon === r.weapon) {
-      const ammo = ammoFor(this.balance, slot.weapon);
-      const n = reloadAmount(slot, p.inv.ammo[ammo], this.balance);
-      slot.mag += n;
-      p.inv.ammo[ammo] -= n;
-    }
-    this.events.push({ type: 'reloadEnd', playerId: p.id, weapon: r.weapon, completed: true });
-  }
-
-  private cancelReload(p: SimPlayer): void {
-    if (!p.reload) return;
-    const w: GunId = p.reload.weapon;
-    p.reload = null;
-    this.events.push({ type: 'reloadEnd', playerId: p.id, weapon: w, completed: false });
-  }
-
-  private tryStartHeal(p: SimPlayer): boolean {
-    const item = chooseHeal(p.hp, p.inv.heals, this.balance);
-    if (!item) return false;
-    this.cancelReload(p);
-    const ms = this.balance.items[item].useMs;
-    p.heal = { item, remainingMs: ms, totalMs: ms };
-    this.events.push({ type: 'healStart', playerId: p.id, item, durationMs: ms });
-    return true;
-  }
-
-  private finishHeal(p: SimPlayer): void {
-    const h = p.heal;
-    if (!h) return;
-    p.heal = null;
-    if (p.inv.heals[h.item] > 0) {
-      p.hp = healedHp(p.hp, h.item, this.balance);
-      p.inv.heals[h.item]--;
-    }
-    this.events.push({ type: 'healEnd', playerId: p.id, item: h.item, completed: true, hpAfter: p.hp });
-  }
-
-  private cancelHeal(p: SimPlayer): void {
-    if (!p.heal) return;
-    const item: HealId = p.heal.item;
-    p.heal = null;
-    this.events.push({ type: 'healEnd', playerId: p.id, item, completed: false, hpAfter: p.hp });
+  /** Ends ADS (combat.md: swap, reload start, heal start set adsMs = 0). */
+  private endAds(p: SimPlayer): void {
+    if (p.move.adsMs !== 0) p.move = { ...p.move, adsMs: 0 };
   }
 
   private cancelActions(p: SimPlayer): void {
-    this.cancelReload(p);
-    this.cancelHeal(p);
+    cancelActionTimers(p, this.balance, this.actionHooks(p));
   }
 
   private tryPickup(p: SimPlayer): void {
@@ -735,112 +872,215 @@ class SimWorld implements World {
       }
     }
     if (!best) return;
-    const res = applyPickup(p.inv, p.armor, { item: best.item, qty: best.qty, mag: best.mag }, this.balance);
-    if (res.outcome.kind === 'refused') {
-      this.actionFailed(p, 'pickup', best.item === 'vest' ? 'betterArmor' : 'inventoryFull');
+    const o = applyPickup(p.inv, p, { item: best.item, qty: best.qty, mag: best.mag, durability: best.durability }, this.balance);
+    if (o.kind === 'refused') {
+      this.actionFailed(p, 'pickup', o.reason);
       return;
     }
-    const o = res.outcome;
-    p.armor = res.armor;
     if (o.remaining > 0) best.qty = o.remaining;
     else this.loot = this.loot.filter((l) => l !== best);
     this.lootVersion++;
-    this.events.push({ type: 'pickup', playerId: p.id, lootId: best.id, item: best.item, qty: o.taken, pos: { ...best.pos } });
+    const ev: SimEvent = { type: 'pickup', playerId: p.id, lootId: best.id, item: best.item, qty: o.taken, pos: { ...best.pos } };
+    if (o.durability !== undefined) ev.durability = o.durability;
+    this.events.push(ev);
     if (o.dropped) {
       this.spawnLootAt({ item: o.dropped.weapon, qty: 1, mag: o.dropped.mag }, pos.x, pos.z, pos.y);
     }
-    if (o.activeChanged) {
-      this.cancelActions(p);
-      p.swapRemainingMs = this.balance.combat.swapMs;
-      p.triggerLatched = false;
-      this.events.push({ type: 'weaponSwitch', playerId: p.id, weapon: activeWeapon(p.inv), slot: p.inv.activeSlot });
+    if (o.droppedArmor) {
+      this.spawnLootAt({ item: o.droppedArmor.item, qty: 1, mag: null, durability: o.droppedArmor.durability }, pos.x, pos.z, pos.y);
     }
+    if (o.activeChanged && activeChangedByPickup(p, this.balance, this.actionHooks(p))) this.endAds(p);
   }
 
   private spawnLootAt(g: GroundItem, x: number, z: number, feetY: number): LootId {
     const id = this.nextLootId++;
     const y = groundHeightAt(this.ctx, x, z, feetY);
-    this.loot.push({ id, item: g.item, qty: g.qty, mag: g.mag, pos: { x, y, z }, tier: 'common' });
+    this.loot.push({
+      id,
+      item: g.item,
+      qty: g.qty,
+      mag: g.mag,
+      pos: { x, y, z },
+      tier: dropTierOf(g.item),
+      durability: g.durability ?? null,
+    });
     this.lootVersion++;
     return id;
   }
 
   private dropInventory(p: SimPlayer): void {
     const pos = p.move.pos;
-    for (const g of deathDrops(p.inv)) {
+    for (const g of deathDrops(p.inv, p, this.balance)) {
       const s = scatterInDisc(pos.x, pos.z, this.balance.combat.deathDropScatter, this.matchRng);
       this.spawnLootAt(g, s.x, s.z, pos.y);
     }
     p.inv = createInventory();
+    p.vest = null;
+    p.helmet = null;
   }
 
-  private handleFire(p: SimPlayer, input: PlayerInput, dropping: boolean, prevMs: number, now: number): void {
-    if (input.fire && !p.prevFire) p.triggerLatched = true;
-    if (!input.fire) p.triggerLatched = false;
-    p.prevFire = input.fire;
-    if (!input.fire) return;
-    if (p.heal) this.cancelHeal(p);
-    if (dropping) return;
-    for (let guard = 0; guard < MAX_SHOTS_PER_TICK; guard++) {
-      if (p.nextFireAt > now || p.reload || p.swapRemainingMs > 0) return;
-      const weapon = activeWeapon(p.inv);
-      const wb = this.balance.weapons[weapon];
-      if (!wb.automatic && !p.triggerLatched) return;
-      const slot = activeSlotState(p.inv);
-      if (slot && slot.mag <= 0) {
-        this.tryStartReload(p);
-        return;
+  // -------------------------------------------------------------------------------------------
+  // Grenades (grenades.md)
+  // -------------------------------------------------------------------------------------------
+
+  private eyeOf(p: SimPlayer): Vec3 {
+    return eyePoint(p.move.pos, p.move, this.balance);
+  }
+
+  /** Death or disconnect while cooking: the grenade drops at the eye with zero velocity and keeps its fuse. */
+  private releaseCook(p: SimPlayer, how: 'death'): void {
+    const cook = p.cook;
+    if (!cook) return;
+    p.cook = null;
+    this.spawnCookEntity(p, how, cook.explodesAt);
+  }
+
+  /**
+   * The grenade in hand becomes an entity: 'throw' (LMB release), 'switch' (short drop on a slot change), 'death'
+   * (drop at the eye with zero velocity). Keeps the remaining fuse. Recovery and the auto-switch are the action step's.
+   */
+  private spawnCookEntity(p: SimPlayer, how: 'throw' | 'switch' | 'death', explodesAt: number): void {
+    const eye = this.eyeOf(p);
+    let launch: { pos: Vec3; vel: Vec3 };
+    if (how === 'throw') {
+      const proneSettled = p.move.stance === 'prone' && isStanceSettled(p.move);
+      launch = throwLaunch(eye, p.yaw, p.pitch, proneSettled, this.ctx);
+    } else if (how === 'switch') launch = dropLaunch(eye, p.yaw, this.ctx);
+    else launch = { pos: eye, vel: { x: 0, y: 0, z: 0 } };
+    const id = this.nextGrenadeId++;
+    this.grenades.push({
+      id,
+      ownerId: p.id,
+      body: { pos: { ...launch.pos }, vel: { ...launch.vel }, inWater: false },
+      explodesAt,
+      spawnTick: this._tick,
+    });
+    this.events.push({
+      type: 'grenadeThrown',
+      id,
+      ownerId: p.id,
+      pos: { ...launch.pos },
+      vel: { ...launch.vel },
+      explodesAt,
+      dropped: how !== 'throw',
+    });
+  }
+
+  /** Moves every live grenade (id order) and explodes those whose fuse ended. New grenades first move next tick. */
+  private stepGrenades(dt: number, now: number): void {
+    if (this.grenades.length === 0) return;
+    const g = this.balance.items.grenade;
+    const keep: GrenadeEntity[] = [];
+    const due: GrenadeEntity[] = [];
+    for (const e of this.grenades) {
+      if (e.spawnTick === this._tick) {
+        keep.push(e);
+        continue;
       }
-      const shotAt = Math.max(p.nextFireAt, prevMs);
-      this.fireShot(p, weapon);
-      p.nextFireAt = shotAt + wb.fireIntervalMs;
-      p.firingUntil = now + Math.max(wb.fireIntervalMs, ANIM_FIRING_MIN_MS);
-      if (!wb.automatic) p.triggerLatched = false;
-      if (slot) {
-        slot.mag--;
-        if (slot.mag <= 0) {
-          this.tryStartReload(p);
-          return;
-        }
+      const r = stepGrenade(e.body, dt, this.ctx);
+      e.body = r.body;
+      const c = r.contact;
+      if (c && (c.surface === 'water' || c.speed >= g.bounceEventMinSpeed)) {
+        this.events.push({ type: 'grenadeBounce', id: e.id, pos: { ...c.pos }, surface: c.surface, speed: c.speed });
       }
+      if (now >= e.explodesAt - TIMER_EPSILON_MS) due.push(e);
+      else keep.push(e);
     }
+    this.grenades = keep;
+    for (const e of due) this.explode(e.id, e.ownerId, e.body.pos, false);
+  }
+
+  /**
+   * Blast (grenades.md "Explosion"): explosion event, then one damage event per victim in range with line of sight from
+   * pos + losHeightOffset to the stance chest point (props and terrain block, players do not). Vest only.
+   */
+  private explode(id: GrenadeId, ownerId: PlayerId, pos: Vec3, inHand: boolean): void {
+    const b = this.balance;
+    const g = b.items.grenade;
+    const at = { x: pos.x, y: pos.y, z: pos.z };
+    this.events.push({ type: 'explosion', id, ownerId, pos: at, radius: g.radius, inHand });
+    const losFrom = { x: pos.x, y: pos.y + g.losHeightOffset, z: pos.z };
+    for (const v of this.participants.values()) {
+      if (!v.alive || v.left || v.dying || v.aboard || v.move.dropping) continue;
+      if (v.id === ownerId && !g.selfDamage) continue;
+      const chest = chestPoint(v.move.pos, v.move, b);
+      const d = Math.hypot(chest.x - pos.x, chest.y - pos.y, chest.z - pos.z);
+      if (d > g.radius) continue;
+      const dmg = explosionDamage(d, b);
+      if (dmg <= 0) continue;
+      if (!lineOfSight(this.ctx.colliders, this.map, losFrom, chest)) continue;
+      this.applyExplosionDamage(v, ownerId, dmg, at, id);
+    }
+  }
+
+  private applyExplosionDamage(v: SimPlayer, ownerId: PlayerId, amount: number, src: Vec3, grenadeId: GrenadeId): void {
+    const before = v.vest;
+    const r = before ? applyArmorPiece(before, amount, armorBalance(this.balance, 'vest', before.tier).absorbFraction) : null;
+    v.vest = r ? r.piece : null;
+    v.hp -= r ? r.hpLoss : amount;
+    if (ownerId !== v.id) v.lastDamagedBy = { id: ownerId, at: this._timeMs };
+    const lethal = v.hp <= 0;
+    if (lethal) v.hp = 0;
+    this.events.push({
+      type: 'damage',
+      victimId: v.id,
+      attackerId: ownerId,
+      amount,
+      headshot: false,
+      cause: 'explosion',
+      sourcePos: { ...src },
+      hpAfter: v.hp,
+      vest: r ? armorHit(before, r.absorbed, r.broken) : null,
+      helmet: null,
+      grenadeId,
+    });
+    if (!lethal) return;
+    let killer: SimPlayer | null;
+    if (ownerId === v.id) killer = this.creditFor(v);
+    else killer = this.participants.get(ownerId) ?? null;
+    if (killer) killer.kills++;
+    v.dying = { killerId: killer ? killer.id : ownerId === v.id ? null : ownerId, weapon: 'grenade', cause: 'explosion', headshot: false };
   }
 
   private fireShot(p: SimPlayer, weapon: WeaponId): void {
     const b = this.balance;
     const wb = b.weapons[weapon];
-    const eye: Vec3 = { x: p.move.pos.x, y: p.move.pos.y + b.player.eyeHeight, z: p.move.pos.z };
+    const eye = this.eyeOf(p);
     const aim = aimDirection(p.yaw, p.pitch);
     const half = spreadRad(
-      effectiveSpreadDeg(weapon, b, { horizontalSpeed: horizontalSpeed(p.move), airborne: !p.move.grounded }),
+      effectiveSpreadDeg(weapon, b, {
+        horizontalSpeed: horizontalSpeed(p.move),
+        airborne: !p.move.grounded,
+        adsProgress: adsProgressOf(p.move, weapon, b),
+        stance: p.move.stance,
+        stanceSettled: isStanceSettled(p.move),
+      }),
     );
     const impacts: ShotImpact[] = [];
-    const hits = new Map<PlayerId, { amount: number; headshot: boolean }>();
+    const hits = new Map<PlayerId, { head: number; body: number }>();
     const pellets = Math.max(1, Math.floor(wb.pellets));
     for (let i = 0; i < pellets; i++) {
       const d = sampleCone(aim, half, this.combatRng);
       const stat = raycastStatic(this.ctx.colliders, this.map, eye, d, wb.range);
       let maxT = stat ? stat.t : wb.range;
       let victim: SimPlayer | null = null;
-      let hitY = 0;
+      let headshot = false;
       for (const o of this.participants.values()) {
-        if (o === p || !o.alive || o.left || o.dying || o.move.dropping) continue;
-        const h = rayCylinder(eye, d, o.move.pos, b.player.radius, b.player.height, maxT);
+        if (o === p || !o.alive || o.left || o.dying || o.aboard || o.move.dropping) continue;
+        const h = rayHitbox(eye, d, maxT, o.move.pos, o.yaw, o.move, b);
         if (h && h.t <= maxT) {
           maxT = h.t;
           victim = o;
-          hitY = h.y;
+          headshot = h.headshot;
         }
       }
       const point = { x: eye.x + d.x * maxT, y: eye.y + d.y * maxT, z: eye.z + d.z * maxT };
       if (victim) {
-        const headshot = isHeadshot(hitY, victim.move.pos.y, b);
         const dmg = pelletDamage(wb, maxT, headshot);
-        const acc = hits.get(victim.id);
-        if (acc) {
-          acc.amount += dmg;
-          acc.headshot ||= headshot;
-        } else hits.set(victim.id, { amount: dmg, headshot });
+        const acc = hits.get(victim.id) ?? { head: 0, body: 0 };
+        if (headshot) acc.head += dmg;
+        else acc.body += dmg;
+        hits.set(victim.id, acc);
         impacts.push({ point, surface: 'player', playerId: victim.id, headshot });
       } else if (stat) {
         if (stat.kind === 'water' && d.y < 0 && eye.y > 0) {
@@ -858,7 +1098,7 @@ class SimWorld implements World {
     this.recentShots.push({ shooterId: p.id, origin: eye, at: this._timeMs });
     for (const [vid, h] of hits) {
       const v = this.participants.get(vid);
-      if (v) this.applyWeaponDamage(v, p, h.amount, h.headshot, weapon, eye);
+      if (v) this.applyWeaponDamage(v, p, h.head, h.body, weapon, eye);
     }
   }
 
@@ -874,12 +1114,22 @@ class SimWorld implements World {
   // Damage and death
   // -------------------------------------------------------------------------------------------
 
-  private applyWeaponDamage(v: SimPlayer, attacker: SimPlayer, amount: number, headshot: boolean, weapon: WeaponId, src: Vec3): void {
-    if (!v.alive || v.dying || v.left || v.move.dropping || amount <= 0) return;
-    const armorBefore = v.armor;
-    const r = applyDamage(v.hp, v.armor, amount, this.balance.armor.absorbFraction);
-    v.hp = r.hp;
-    v.armor = r.armor;
+  /**
+   * One shot's damage on one victim (combat.md "Shot resolution" 6-7): the head sum goes through the helmet, the body
+   * sum through the vest, one damage event.
+   */
+  private applyWeaponDamage(v: SimPlayer, attacker: SimPlayer, head: number, body: number, weapon: WeaponId, src: Vec3): void {
+    const amount = head + body;
+    if (!v.alive || v.dying || v.left || v.aboard || v.move.dropping || amount <= 0) return;
+    const b = this.balance;
+    const hb = v.helmet;
+    const vb = v.vest;
+    const hr = head > 0 && hb ? applyArmorPiece(hb, head, armorBalance(b, 'helmet', hb.tier).absorbFraction) : null;
+    const vr = body > 0 && vb ? applyArmorPiece(vb, body, armorBalance(b, 'vest', vb.tier).absorbFraction) : null;
+    if (hr) v.helmet = hr.piece;
+    if (vr) v.vest = vr.piece;
+    v.hp -= (hr ? hr.hpLoss : head) + (vr ? vr.hpLoss : body);
+    const headshot = head > 0;
     if (attacker.id !== v.id) v.lastDamagedBy = { id: attacker.id, at: this._timeMs };
     const lethal = v.hp <= 0;
     if (lethal) v.hp = 0;
@@ -892,8 +1142,8 @@ class SimWorld implements World {
       cause: 'weapon',
       sourcePos: { ...src },
       hpAfter: v.hp,
-      armorAfter: v.armor,
-      armorBefore,
+      vest: vr ? armorHit(vb, vr.absorbed, vr.broken) : null,
+      helmet: hr ? armorHit(hb, hr.absorbed, hr.broken) : null,
     });
     if (lethal) {
       v.dying = { killerId: attacker.id, weapon, cause: 'weapon', headshot };
@@ -909,14 +1159,15 @@ class SimWorld implements World {
     return k && k.id !== v.id ? k : null;
   }
 
-  /** Zone / fall damage. Ignores armor for fall; zone follows zone.ignoresArmor. */
+  /** Zone / fall damage. Fall ignores armor; zone uses the vest only when zone.ignoresArmor is false. */
   private applyEnvDamage(v: SimPlayer, amount: number, cause: DeathCause, src: Vec3): void {
     if (!v.alive || v.dying || v.left || amount <= 0) return;
-    const ignoreArmor = cause === 'fall' ? true : this.balance.zone.ignoresArmor;
-    const armorBefore = v.armor;
-    const r = applyDamage(v.hp, v.armor, amount, this.balance.armor.absorbFraction, ignoreArmor);
-    v.hp = r.hp;
-    v.armor = r.armor;
+    const useVest = cause === 'zone' && !this.balance.zone.ignoresArmor && v.vest !== null;
+    const before = v.vest;
+    const r =
+      useVest && before ? applyArmorPiece(before, amount, armorBalance(this.balance, 'vest', before.tier).absorbFraction) : null;
+    if (r) v.vest = r.piece;
+    v.hp -= r ? r.hpLoss : amount;
     const lethal = v.hp <= 0;
     if (lethal) v.hp = 0;
     this.events.push({
@@ -928,8 +1179,8 @@ class SimWorld implements World {
       cause,
       sourcePos: src,
       hpAfter: v.hp,
-      armorAfter: v.armor,
-      armorBefore,
+      vest: r ? armorHit(before, r.absorbed, r.broken) : null,
+      helmet: null,
     });
     if (lethal) {
       const credit = this.creditFor(v);
@@ -949,7 +1200,8 @@ class SimWorld implements World {
       const amount = (s.dps * tickMs) / 1000;
       if (amount <= 0) continue;
       for (const p of this.participants.values()) {
-        if (!p.alive || p.left || p.dying) continue;
+        // drop.md: aboard players are immune; freefall and parachute players are not.
+        if (!p.alive || p.left || p.dying || p.aboard) continue;
         if (!isOutsideZone(s, p.move.pos.x, p.move.pos.z)) continue;
         const e = nearestEdgePoint(s, p.move.pos.x, p.move.pos.z);
         this.applyEnvDamage(p, amount, 'zone', { x: e.x, y: p.move.pos.y + this.balance.player.eyeHeight, z: e.z });
@@ -969,6 +1221,7 @@ class SimWorld implements World {
       const d = p.dying!;
       p.placement = aliveAfter + 1 + i;
       this.cancelActions(p);
+      this.releaseCook(p, 'death');
       this.dropInventory(p);
       p.alive = false;
       p.hp = 0;
@@ -996,9 +1249,19 @@ class SimWorld implements World {
     const speed = horizontalSpeed(p.move);
     const moving = speed > ANIM_MOVING_SPEED;
     const li = p.lastInput;
+    const standing = p.move.stance === 'stand' && isStanceSettled(p.move);
     const sprinting =
-      p.alive && moving && p.move.grounded && !!li && li.sprint && li.moveForward > 0 && !li.fire && p.heal === null;
-    return {
+      p.alive &&
+      moving &&
+      standing &&
+      p.move.grounded &&
+      !!li &&
+      li.sprint &&
+      !li.ads &&
+      li.moveForward > 0 &&
+      !li.fire &&
+      p.heal === null;
+    const out: PlayerState = {
       id: p.id,
       name: p.name,
       pos: { ...p.move.pos },
@@ -1006,9 +1269,13 @@ class SimWorld implements World {
       yaw: p.yaw,
       pitch: p.pitch,
       hp: p.hp,
-      armor: p.armor,
+      vestTier: p.vest ? p.vest.tier : 0,
+      helmetTier: p.helmet ? p.helmet.tier : 0,
       alive: p.alive,
-      weapon: activeWeapon(p.inv),
+      weapon: activeHeld(p.inv) as HeldId,
+      stance: p.move.stance,
+      stanceFrom: p.move.stanceFrom,
+      stanceProgress: stanceProgress(p.move, b),
       anim: {
         moving: p.alive && moving,
         sprinting,
@@ -1018,35 +1285,54 @@ class SimWorld implements World {
         firing: p.alive && this._timeMs < p.firingUntil,
         reloading: p.reload !== null,
         healing: p.heal !== null,
+        ads: p.alive && p.move.adsMs > 0,
+        cooking: p.cook !== null,
       },
       appearance: { ...p.appearance },
       isBot: p.isBot,
       kills: p.kills,
+      aboard: p.aboard,
+      dropPhase: p.move.dropping ? p.move.dropPhase : null,
     };
+    return out;
   }
 
   private toLocal(p: SimPlayer): LocalPlayerState {
     const inv = p.inv;
-    return {
+    const m = p.move;
+    const out: LocalPlayerState = {
       id: p.id,
       lastProcessedInputSeq: p.lastProcessedInputSeq,
       movement: {
-        pos: { ...p.move.pos },
-        vel: { ...p.move.vel },
-        grounded: p.move.grounded,
-        dropping: p.move.dropping,
+        pos: { ...m.pos },
+        vel: { ...m.vel },
+        grounded: m.grounded,
+        dropping: m.dropping,
+        stance: m.stance,
+        stanceFrom: m.stanceFrom,
+        stanceMs: m.stanceMs,
+        adsMs: m.adsMs,
+        dropPhase: m.dropPhase,
+        dropMs: m.dropMs,
       },
       slots: [inv.slots[0] ? { ...inv.slots[0] } : null, inv.slots[1] ? { ...inv.slots[1] } : null],
       activeSlot: inv.activeSlot,
       ammo: { ...inv.ammo },
       heals: { ...inv.heals },
+      vest: p.vest ? { ...p.vest } : null,
+      helmet: p.helmet ? { ...p.helmet } : null,
+      grenades: inv.grenades,
+      cookExplodesAt: p.cook ? p.cook.explodesAt : null,
+      throwRecoveryMs: p.throwRecoveryMs,
       reloadRemainingMs: p.reload ? Math.max(0, p.reload.remainingMs) : 0,
       reloadTotalMs: p.reload ? p.reload.totalMs : 0,
       healRemainingMs: p.heal ? Math.max(0, p.heal.remainingMs) : 0,
       healTotalMs: p.heal ? p.heal.totalMs : 0,
       healItem: p.heal ? p.heal.item : null,
       swapRemainingMs: p.swapRemainingMs,
+      aboard: p.aboard,
     };
+    return out;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -1074,7 +1360,34 @@ class SimWorld implements World {
   debugContext(): MovementContext {
     return this.ctx;
   }
+
+  /** Live grenade entities (tests and tools only). */
+  debugGrenades(): readonly GrenadeEntity[] {
+    return this.grenades;
+  }
+
+  /** Places a live grenade (tests only): first moves next tick, explodes fuseMs from now. */
+  debugSpawnGrenade(ownerId: PlayerId, pos: Vec3, vel: Vec3, fuseMs: number): GrenadeId {
+    const id = this.nextGrenadeId++;
+    this.grenades.push({
+      id,
+      ownerId,
+      body: { pos: { ...pos }, vel: { ...vel }, inWater: false },
+      explodesAt: this._timeMs + fuseMs,
+      spawnTick: this._tick,
+    });
+    return id;
+  }
 }
+
+const toGrenadeState = (g: GrenadeEntity): GrenadeState => ({
+  id: g.id,
+  ownerId: g.ownerId,
+  pos: { ...g.body.pos },
+  vel: { ...g.body.vel },
+  explodesAt: g.explodesAt,
+  inWater: g.body.inWater,
+});
 
 /** Fisher-Yates shuffle in place with the given Rng. */
 function shuffle<T>(arr: T[], rng: Rng): void {
@@ -1093,6 +1406,8 @@ export interface DebugWorld extends World {
   debugActionFailures(): readonly ActionFailedSimEvent[];
   debugZone(): ZoneRuntime | null;
   debugContext(): MovementContext;
+  debugGrenades(): readonly GrenadeEntity[];
+  debugSpawnGrenade(ownerId: PlayerId, pos: Vec3, vel: Vec3, fuseMs: number): GrenadeId;
 }
 
 /** Same as createWorld, typed with the test/tool hooks. */

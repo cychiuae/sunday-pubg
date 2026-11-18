@@ -5,13 +5,16 @@ import {
   findNearestLoot,
   InteractPromptTracker,
   PhaseTracker,
+  pickupRefusal,
   RemoteMotionTracker,
   StrideCounter,
   ZoneStatusTracker,
   ZoneTracker,
   type Bus,
 } from './derived';
-import { makeMatch, makePlayer, makeZone } from './testFixtures';
+import { BALANCE } from '../shared/balance';
+import type { LootState } from '../shared/types';
+import { makeLocal, makeMatch, makePlayer, makeZone } from './testFixtures';
 import { isOutsideZone, zoneAt } from './zoneView';
 
 function recorder() {
@@ -98,10 +101,10 @@ describe('ZoneStatusTracker', () => {
 });
 
 describe('interact prompt', () => {
-  const loot = [
-    { id: 1, item: 'pistol' as const, qty: 1, pos: { x: 2, y: 0, z: 0 } },
-    { id: 2, item: 'bandage' as const, qty: 3, pos: { x: 1, y: 0, z: 0 } },
-    { id: 3, item: 'vest' as const, qty: 1, pos: { x: 0, y: 5, z: 0 } },
+  const loot: LootState[] = [
+    { id: 1, item: 'pistol', qty: 1, pos: { x: 2, y: 0, z: 0 } },
+    { id: 2, item: 'bandage', qty: 3, pos: { x: 1, y: 0, z: 0 } },
+    { id: 3, item: 'vest_2', qty: 1, pos: { x: 0, y: 5, z: 0 }, durability: 31 },
   ];
 
   it('findNearestLoot uses 3D distance within range', () => {
@@ -119,10 +122,59 @@ describe('interact prompt', () => {
     t.set({ ...loot[1]!, qty: 1 }, bus);
     t.set(null, bus);
     expect(events.map((e) => e.payload)).toEqual([
-      { lootId: 2, item: 'bandage', qty: 3 },
-      { lootId: 2, item: 'bandage', qty: 1 },
-      { lootId: null, item: null, qty: 0 },
+      { lootId: 2, item: 'bandage', qty: 3, durability: null, maxDurability: null, refusal: null },
+      { lootId: 2, item: 'bandage', qty: 1, durability: null, maxDurability: null, refusal: null },
+      { lootId: null, item: null, qty: 0, durability: null, maxDurability: null, refusal: null },
     ]);
+  });
+
+  it('M2a: carries armor durability and re-emits when the refusal changes', () => {
+    const { bus, events } = recorder();
+    const t = new InteractPromptTracker();
+    t.set(loot[2]!, bus, null);
+    t.set(loot[2]!, bus, null);
+    t.set(loot[2]!, bus, 'betterArmor');
+    t.set(null, bus, 'betterArmor'); // no loot: refusal is dropped
+    expect(events.map((e) => e.payload)).toEqual([
+      { lootId: 3, item: 'vest_2', qty: 1, durability: 31, maxDurability: null, refusal: null },
+      { lootId: 3, item: 'vest_2', qty: 1, durability: 31, maxDurability: null, refusal: 'betterArmor' },
+      { lootId: null, item: null, qty: 0, durability: null, maxDurability: null, refusal: null },
+    ]);
+  });
+
+  it('M2b (REVIEW-M2a M6): maxDurability = items.<armor>.durability for armor, null otherwise (with balance)', () => {
+    const { bus, events } = recorder();
+    const t = new InteractPromptTracker();
+    t.set(loot[2]!, bus, null, BALANCE);
+    t.set(loot[1]!, bus, null, BALANCE);
+    expect(events.map((e) => (e.payload as GameEvents['interactPromptChanged']).maxDurability)).toEqual([
+      BALANCE.items.vest_2.durability,
+      null,
+    ]);
+    t.reset();
+    t.set(loot[1]!, bus, null, BALANCE);
+    expect(events).toHaveLength(3);
+  });
+
+  it('M2a pickupRefusal: betterArmor for a same-or-lower tier, inventoryFull at carry limits, guns never', () => {
+    const at = (item: LootState['item'], extra: Partial<LootState> = {}): LootState => ({ id: 9, item, qty: 1, pos: { x: 0, y: 0, z: 0 }, ...extra });
+    const wearing = makeLocal(1, { vest: { tier: 2, durability: 5 }, helmet: null });
+    expect(pickupRefusal(at('vest_2'), wearing, BALANCE)).toBe('betterArmor');
+    expect(pickupRefusal(at('vest_1'), wearing, BALANCE)).toBe('betterArmor');
+    expect(pickupRefusal(at('vest_3'), wearing, BALANCE)).toBeNull();
+    expect(pickupRefusal(at('helmet_1'), wearing, BALANCE)).toBeNull();
+    const full = makeLocal(1, {
+      grenades: BALANCE.items.grenade.maxCarry,
+      ammo: { ammo_light: 0, ammo_heavy: 0, ammo_shell: 0, ammo_sniper: BALANCE.items.ammo_sniper.maxCarry },
+      heals: { bandage: BALANCE.items.bandage.maxStack, medkit: 0 },
+    });
+    expect(pickupRefusal(at('grenade'), full, BALANCE)).toBe('inventoryFull');
+    expect(pickupRefusal(at('ammo_sniper'), full, BALANCE)).toBe('inventoryFull');
+    expect(pickupRefusal(at('ammo_light'), full, BALANCE)).toBeNull();
+    expect(pickupRefusal(at('bandage'), full, BALANCE)).toBe('inventoryFull');
+    expect(pickupRefusal(at('medkit'), full, BALANCE)).toBeNull();
+    expect(pickupRefusal(at('sniper'), full, BALANCE)).toBeNull();
+    expect(pickupRefusal(at('grenade'), makeLocal(1, { grenades: 1 }), BALANCE)).toBeNull();
   });
 });
 
@@ -152,6 +204,13 @@ describe('RemoteMotionTracker', () => {
     t.update(at(1.5), 1, surface, tuning, bus);
     expect(events.map((e) => e.type)).toEqual(['footstep', 'jump', 'land']);
     expect(events[2]!.payload).toMatchObject({ fallSpeed: 7, surface: 'sand', isLocal: false });
+    // REVIEW-M2a M4: footsteps carry the remote's stance.
+    expect(events[0]!.payload).toMatchObject({ stance: 'stand' });
+    const { bus: bus2, events: ev2 } = recorder();
+    const t2 = new RemoteMotionTracker();
+    t2.update([makePlayer(2, { stance: 'prone', stanceFrom: 'prone' })], 1, surface, tuning, bus2);
+    t2.update([makePlayer(2, { stance: 'prone', stanceFrom: 'prone', pos: { x: 1.1, y: 0, z: 0 } })], 1, surface, tuning, bus2);
+    expect(ev2[0]!.payload).toMatchObject({ stance: 'prone' });
   });
 
   it('skips the local id, dead players and teleports', () => {

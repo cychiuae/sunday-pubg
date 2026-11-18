@@ -36,6 +36,12 @@ owners work, so they are recorded together here.
    map, or derive coordinates from the map (for example, `ISLAND.playerSpawns[0]`). Hard-coded island coordinates
    break when level-designer edits the map. Dev tools in `src/shared/sim/tools/` are exempt from the determinism
    rule (`Date.now` for wall-clock reports is fine), but no sim module may import them.
+   *Amendment (BUG-001 follow-up, 2026-11-18):* QA flagged `Date.now()` in `src/shared/sim/tools/matchReport.ts`.
+   Decision: it stays where it is and the exemption stands. It must sit next to the sim to drive `createDebugWorld`
+   without reaching into private paths, and the risk is one-way imports, which `tests/static/sim-purity.test.ts`
+   enforces in two checks: runtime files (excluding `*.test.ts`, test kits and `tools/`) must have no wall clock and no
+   `Math.random`, and no runtime file may import `tools/`. Move it to `scripts/` only if it ever needs Node APIs
+   beyond `console`.
 7. **Render may import `src/shared/sim/colliders.ts`** (read-only, for constants such as `DOCK_DECK_HEIGHT` and
    collider dimensions). Render must not import the World or movement. This removes mirrored constants such as
    `PropLayer.DOCK_DECK_HEIGHT_MIRROR`, which drift.

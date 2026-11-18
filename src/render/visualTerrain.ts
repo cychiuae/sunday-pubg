@@ -5,7 +5,7 @@
  * flattens at -SEA_FLOOR_DEPTH everywhere, which would make the whole ocean shallow-turquoise to the horizon.
  */
 import { heightAt as simHeightAt } from '../shared/sim/terrain';
-import type { MapData } from '../shared/types';
+import type { IslandMapData } from '../shared/types';
 
 export const REEF_START_OFFSET = 6;
 export const REEF_WIDTH = 20;
@@ -14,8 +14,8 @@ export const REEF_DEPTH = 7;
 export function visualHeight(
   x: number,
   z: number,
-  map: MapData,
-  base: (x: number, z: number, map: MapData) => number = simHeightAt,
+  map: IslandMapData,
+  base: (x: number, z: number, map: IslandMapData) => number = simHeightAt,
 ): number {
   const h = base(x, z, map);
   const start = map.worldRadius + REEF_START_OFFSET;

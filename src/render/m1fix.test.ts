@@ -5,16 +5,24 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import { getMap } from '../game/levels';
+import { isIndoor } from '../shared/maps';
+import type { AnyMapData } from '../shared/types';
 import { collidersForProp, DOCK_DECK_HEIGHT, PROP_SHAPES } from '../shared/sim/colliders';
 import { heightAt } from '../shared/sim/terrain';
 import type { LootState, PropKind, PropPlacement } from '../shared/types';
 import { CameraObstacles, segmentBoxEntry, type CameraCollider } from './cameraRig';
 import { lootTierOf } from './LootLayer';
 import { tagRect } from './NameTags';
+import { bodyFade } from './PlayerViews';
 import { cameraCollidersFor, DOCK_MODEL_DECK_TOP, propBaseY } from './PropLayer';
 import { createProp } from './procedural';
 
-const map = getMap('island01');
+const map = (() => {
+  // C-gate: getMap returns AnyMapData; these tests are island-only.
+  const m = getMap('island01') as AnyMapData;
+  if (isIndoor(m)) throw new Error('island01 must be an island map');
+  return m;
+})();
 
 /** Top of the solid ('body') geometry of a prop model at scale 1, metres above its origin. */
 function modelTop(kind: PropKind): number {
@@ -124,5 +132,24 @@ describe('camera blockers from sim colliders', () => {
     if (bush) expect(cameraCollidersFor(bush, 0, map, 0)).toHaveLength(1);
     const boat = map.props.find((p) => p.kind === 'boat');
     if (boat) expect(cameraCollidersFor(boat, 0, map, 0)).toHaveLength(0);
+  });
+});
+
+describe('followed character fade (camera pulled in close)', () => {
+  const feet = { x: 0, y: 2, z: 0 };
+  it('is opaque at the normal boom length and hidden when the camera is inside the head', () => {
+    expect(bodyFade(feet, 1.3, { x: 0.5, y: 3.5, z: 3.2 })).toBe(1);
+    expect(bodyFade(feet, 1.3, { x: 0, y: 3.0, z: 0.2 })).toBe(0);
+  });
+  it('fades smoothly between about 0.45 and 1.15 m from the body', () => {
+    let prev = -1;
+    for (let z = 0.3; z <= 1.4; z += 0.05) {
+      const a = bodyFade(feet, 1.3, { x: 0, y: 3, z });
+      expect(a).toBeGreaterThanOrEqual(prev);
+      prev = a;
+    }
+    const mid = bodyFade(feet, 1.3, { x: 0, y: 3, z: 0.8 });
+    expect(mid).toBeGreaterThan(0.2);
+    expect(mid).toBeLessThan(0.8);
   });
 });

@@ -5,7 +5,7 @@
  * Vertex colours: dry sand / wet sand / grass (+ toon patches), seabed under water. Shared toon material.
  */
 import * as THREE from 'three';
-import type { MapData, Surface } from '../shared/types';
+import type { IslandMapData, Surface } from '../shared/types';
 import { buildPolarGrid, ringRadii } from './radialMesh';
 import { mixHex, palette, vertexColorToon } from './procedural';
 
@@ -56,7 +56,7 @@ export interface TerrainBuild {
 }
 
 export function buildTerrain(
-  map: MapData,
+  map: IslandMapData,
   heightAt: (x: number, z: number) => number,
   surfaceAt: SurfaceFn,
   radius: number,

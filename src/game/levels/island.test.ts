@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ISLAND, LAND_LIMIT, SAND_INNER, buildIsland, propFootprint } from './island';
-import { DEFAULT_MAP_ID, MAPS, getMap } from './index';
+import { DEFAULT_MAP_ID, MAPS, MAP_IDS, getMap } from './index';
+import { OFFICE } from './office';
 
 type P = { x: number; z: number };
 const len = (p: P): number => Math.hypot(p.x, p.z);
@@ -21,6 +22,8 @@ describe('island01 map data', () => {
   });
 
   it('has the expected identity and POI ids', () => {
+    expect(map.kind).toBe('island');
+    expect(map.carrier).toBe('seaplane');
     expect(map.id).toBe('island01');
     expect(map.nameKey).toBe('map.island01.name');
     expect(map.pois.map((p) => p.id).sort()).toEqual([...POI_IDS].sort());
@@ -125,11 +128,21 @@ describe('island01 map data', () => {
 });
 
 describe('map registry', () => {
-  it('returns island01 and rejects unknown ids', () => {
-    expect(MAPS.island01).toBe(ISLAND);
+  it('returns island01 and office, and rejects unknown ids', () => {
+    expect(MAPS['island01']).toBe(ISLAND);
+    expect(MAPS['office']).toBe(OFFICE);
     expect(getMap(DEFAULT_MAP_ID)).toBe(ISLAND);
     expect(getMap('island01')).toBe(ISLAND);
+    expect(getMap('office')).toBe(OFFICE);
     expect(() => getMap('nope')).toThrow();
     expect(() => getMap('toString')).toThrow();
+  });
+
+  it('lists every map id once, in display order, with a matching id field', () => {
+    expect([...MAP_IDS]).toEqual(['island01', 'office']);
+    expect(Object.keys(MAPS).sort()).toEqual([...MAP_IDS].sort());
+    for (const id of MAP_IDS) expect(MAPS[id]?.id).toBe(id);
+    expect(MAPS['island01']?.kind).toBe('island');
+    expect(MAPS['office']?.kind).toBe('indoor');
   });
 });

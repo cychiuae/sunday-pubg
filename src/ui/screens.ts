@@ -4,13 +4,34 @@
  * inherits `pointer-events: none` from #ui-root.
  * Owner: ui-ux-designer.
  */
-import { t, tRandom } from '../content/strings';
+import { hasKey, t, tRandom } from '../content/strings';
 import { MAX_NAME_LENGTH } from '../shared/constants';
-import { DEFAULT_QUALITY, QUALITY_LEVELS, type HudView, type QualityLevel, type Settings } from '../shared/contracts';
+import {
+  ADS_MODES,
+  DEFAULT_ADS_MODE,
+  DEFAULT_ADS_SENSITIVITY,
+  DEFAULT_FP_FOV_DEG,
+  DEFAULT_QUALITY,
+  FP_FOV_MAX_DEG,
+  FP_FOV_MIN_DEG,
+  QUALITY_LEVELS,
+  type AdsMode,
+  type HudView,
+  type QualityLevel,
+  type Settings,
+} from '../shared/contracts';
 import type { GameEvents } from '../shared/events';
 import { Flags, h, retrigger, Shown, TextSlot } from './dom';
-import { validateName } from './logic';
+import { CONFIRM_MS } from './roomLogic';
+import { deathCauseKey, validateName } from './logic';
 import {
+  ADS_SENSITIVITY_MAX,
+  ADS_SENSITIVITY_MIN,
+  ADS_SENSITIVITY_STEP,
+  effectiveHeadBob,
+  FOV_STEP,
+  headBobChoiceFor,
+  isReducedMotion,
   SENSITIVITY_MAX,
   SENSITIVITY_MIN,
   SENSITIVITY_STEP,
@@ -20,10 +41,36 @@ import {
   type UiPrefs,
 } from './settings';
 
-const CONTROL_IDS = ['move', 'sprint', 'jump', 'aim', 'fire', 'reload', 'pickup', 'switch', 'heal', 'release'] as const;
+/**
+ * Controls help rows, in reading order (two columns). M2a adds ads (RMB), crouch (C), prone (Z), grenade (4 / G) and
+ * throw (hold LMB); `jump` reads "Jump / Stand up" (Space). `cycle` (mouse wheel) shows once narrative-designer adds
+ * `menu.controls.cycle.*`; rows whose strings are missing are skipped rather than showing raw keys.
+ * M2b: `jumpPlane` (Space / F) and `spectateView` (V).
+ */
+export const CONTROL_IDS = [
+  'move',
+  'sprint',
+  'jump',
+  'aim',
+  'fire',
+  'ads',
+  'crouch',
+  'prone',
+  'reload',
+  'pickup',
+  'switch',
+  'cycle',
+  'grenade',
+  'throw',
+  'heal',
+  'jumpPlane',
+  'spectateView',
+  'release',
+] as const;
 
 export function controlsList(compact = false): HTMLElement {
-  const rows = CONTROL_IDS.map((id) =>
+  const ids = CONTROL_IDS.filter((id) => hasKey(`menu.controls.${id}.key`) && hasKey(`menu.controls.${id}.label`));
+  const rows = ids.map((id) =>
     h(
       'div',
       'ui-controls__row',
@@ -64,8 +111,11 @@ export class TitleScreen {
   private readonly shown: Shown;
   private readonly input: HTMLInputElement;
   private readonly error: HTMLParagraphElement;
+  private readonly deepLink: HTMLElement;
+  private readonly deepLinkText: TextSlot;
+  private readonly deepLinkShown: Shown;
 
-  constructor(initialName: string, onPlay: (name: string) => void, onSettings: () => void) {
+  constructor(initialName: string, onPlay: (name: string) => void, onSettings: () => void, onCancelDeepLink: () => void = () => {}) {
     this.input = h('input', 'ui-input', {
       id: 'ui-name',
       type: 'text',
@@ -85,6 +135,23 @@ export class TitleScreen {
     );
     this.error.hidden = true;
     const play = h('button', 'ui-btn ui-btn--primary ui-btn--big', { type: 'submit' }, t('menu.play'));
+    // M2b (UI.md §12.9): "Joining room ABCDE" chip from a ?room= link, with a small × to cancel.
+    const dlText = h('span', null);
+    const dlCancel = h(
+      'button',
+      'ui-chip__x',
+      { type: 'button', 'aria-label': t('browser.deepLink.cancel'), title: t('browser.deepLink.cancel') },
+      h('span', 'ui-glyph ui-glyph--close', { 'aria-hidden': 'true' }),
+    );
+    dlCancel.addEventListener('click', () => {
+      this.setDeepLink(null);
+      onCancelDeepLink();
+      this.input.focus({ preventScroll: true });
+    });
+    this.deepLink = h('p', 'ui-chip ui-deeplink', { role: 'status' }, h('span', 'ui-glyph ui-glyph--link', { 'aria-hidden': 'true' }), dlText, dlCancel);
+    this.deepLinkText = new TextSlot(dlText);
+    this.deepLinkShown = new Shown(this.deepLink);
+    this.deepLinkShown.set(false);
     const form = h(
       'form',
       'ui-title__form',
@@ -92,6 +159,7 @@ export class TitleScreen {
       h('label', 'ui-label', { for: 'ui-name' }, t('menu.name.prompt')),
       this.input,
       this.error,
+      this.deepLink,
       play,
     );
     form.addEventListener('submit', (ev) => {
@@ -130,6 +198,12 @@ export class TitleScreen {
       // Focus after the frame so the element is visible (focus on hidden elements is ignored).
       requestAnimationFrame(() => this.input.focus({ preventScroll: true }));
     }
+  }
+
+  /** M2b: show or clear the deep-link chip. */
+  setDeepLink(code: string | null): void {
+    this.deepLinkShown.set(code !== null);
+    if (code) this.deepLinkText.set(t('browser.deepLink', { code }));
   }
 
   showError(text?: string): void {
@@ -296,8 +370,12 @@ export class PlayOverlay {
   private readonly primary: HTMLButtonElement;
   private readonly primaryLabel: TextSlot;
   private readonly flags: Flags;
+  private readonly leave: HTMLButtonElement;
+  private readonly leaveLabel: TextSlot;
+  private readonly leaveShown: Shown;
+  private leaveArmedUntil = 0;
 
-  constructor(onResume: () => void, onSettings: () => void) {
+  constructor(onResume: () => void, onSettings: () => void, onLeaveRoom: () => void = () => {}) {
     const resume = (): void => {
       // Drop focus so Space (jump) / Enter never re-press a focused button while playing.
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
@@ -308,6 +386,25 @@ export class PlayOverlay {
       resume();
     });
     this.primary.classList.add('ui-btn--big');
+    // M2b: leave the room from the pause screen (two-step: it forfeits the match).
+    this.leave = button('', 'ghost', (ev) => {
+      ev.stopPropagation();
+      const now = performance.now();
+      if (now < this.leaveArmedUntil) {
+        this.leaveArmedUntil = 0;
+        this.syncLeave(now);
+        onLeaveRoom();
+        return;
+      }
+      this.leaveArmedUntil = now + CONFIRM_MS;
+      this.syncLeave(now);
+    });
+    this.leave.prepend(h('span', 'ui-glyph ui-glyph--back', { 'aria-hidden': 'true' }));
+    const leaveText = h('span', null);
+    this.leave.appendChild(leaveText);
+    this.leaveLabel = new TextSlot(leaveText);
+    this.leaveShown = new Shown(this.leave);
+    this.leaveShown.set(false);
     const panel = h(
       'div',
       'ui-panel ui-panel--menu ui-panel--play',
@@ -316,7 +413,7 @@ export class PlayOverlay {
       this.primary,
       h('p', 'ui-subtle', null, t('menu.pointerLock.hint')),
       controlsList(),
-      h('div', 'ui-row ui-row--end', null, gearButton(onSettings)),
+      h('div', 'ui-row ui-row--split', null, this.leave, gearButton(onSettings)),
     );
     // Clicking anywhere on the dimmed backdrop also resumes (big target, still inside a user gesture).
     this.el = h('section', 'ui-screen ui-screen--play ui-interactive', null, panel);
@@ -328,9 +425,17 @@ export class PlayOverlay {
     this.primaryLabel = new TextSlot(this.primary);
   }
 
-  update(firstLock: boolean): void {
+  update(firstLock: boolean, inRoom = false): void {
     this.primaryLabel.set(t(firstLock ? 'menu.pointerLock.prompt' : 'menu.resume'));
     this.flags.set('is-paused', !firstLock);
+    this.leaveShown.set(inRoom);
+    this.syncLeave(performance.now());
+  }
+
+  private syncLeave(now: number): void {
+    const armed = now < this.leaveArmedUntil;
+    this.leave.classList.toggle('is-armed', armed);
+    this.leaveLabel.set(t(armed ? 'room.leave.confirm' : 'room.leave'));
   }
 
   show(on: boolean): void {
@@ -396,6 +501,7 @@ export class GraphicsOverlay {
 export class DeathCard {
   readonly el: HTMLElement;
   private readonly shown: Shown;
+  private readonly flags: Flags;
   private readonly cause: TextSlot;
   private readonly place: TextSlot;
   private readonly kills: TextSlot;
@@ -422,20 +528,22 @@ export class DeathCard {
       ),
     );
     this.shown = new Shown(this.el);
+    this.flags = new Flags(this.el);
     this.cause = new TextSlot(cause);
     this.place = new TextSlot(place);
     this.kills = new TextSlot(kills);
   }
 
-  setDeath(e: GameEvents['playerKilled']): void {
+  /** `self` = the local player's own grenade (logic.isSelfGrenadeKill). */
+  setDeath(e: GameEvents['playerKilled'], self = false): void {
     this.placement = e.placement;
-    if (e.cause === 'zone') this.cause.set(t('death.eliminatedByTide'));
-    else if (e.cause === 'fall') this.cause.set(t('death.eliminatedByFall'));
-    else if (e.killerName) this.cause.set(t('death.eliminatedBy', { name: e.killerName }));
-    else this.cause.set('');
+    const key = deathCauseKey(e.cause, e.killerName, self);
+    this.cause.set(key ? t(key, { name: e.killerName ?? '' }) : '');
   }
 
   update(hud: HudView): void {
+    // M2b (UI.md §13.3): with the first-person camera the death cam orbits the body, so the card sits in the lower third.
+    this.flags.set('is-lower', hud.cameraView !== undefined);
     const total = hud.totalPlayers;
     this.place.set(
       this.placement > 0
@@ -608,7 +716,12 @@ export class SettingsPanel {
   readonly el: HTMLElement;
   private readonly shown: Shown;
   private readonly sens: RangeRow;
+  private readonly fov: RangeRow;
+  private readonly bob: HTMLInputElement;
+  private readonly bobNote: Shown;
+  private readonly adsSens: RangeRow;
   private readonly vol: RangeRow;
+  private readonly adsMode: Map<AdsMode, HTMLInputElement>;
   private readonly scale: RangeRow;
   private readonly invert: HTMLInputElement;
   private readonly motion: HTMLInputElement;
@@ -624,12 +737,38 @@ export class SettingsPanel {
     private readonly onPrefs: (p: UiPrefs) => void,
   ) {
     this.sens = rangeRow('ui-set-sens', 'menu.settings.sensitivity', SENSITIVITY_MIN, SENSITIVITY_MAX, SENSITIVITY_STEP);
+    // M2b (UI.md §13.4): FOV slider (live while dragging) and head bob (auto / on / off behind one checkbox).
+    this.fov = rangeRow('ui-set-fov', 'menu.settings.fov', FP_FOV_MIN_DEG, FP_FOV_MAX_DEG, FOV_STEP);
+    this.fov.input.addEventListener('input', () => this.emitSettings({ fovDeg: Number(this.fov.input.value) }));
+    const bob = checkRow('ui-set-bob', 'menu.settings.headBob');
+    this.bob = bob.input;
+    const bobNote = h('p', 'ui-subnote ui-field__note', { id: 'ui-set-bob-note' }, t('menu.settings.headBob.reduced'));
+    bob.row.appendChild(bobNote);
+    this.bobNote = new Shown(bobNote);
+    this.bob.addEventListener('change', () => {
+      this.emitPrefs({ headBob: headBobChoiceFor(this.bob.checked, this.reducedNow()) });
+      this.syncBob();
+    });
+    this.adsSens = rangeRow(
+      'ui-set-ads-sens',
+      'menu.settings.adsSensitivity',
+      ADS_SENSITIVITY_MIN,
+      ADS_SENSITIVITY_MAX,
+      ADS_SENSITIVITY_STEP,
+    );
     this.vol = rangeRow('ui-set-vol', 'menu.settings.volume', 0, 1, 0.05);
     this.scale = rangeRow('ui-set-scale', 'menu.settings.uiScale', UI_SCALE_MIN, UI_SCALE_MAX, UI_SCALE_STEP);
     const inv = checkRow('ui-set-invert', 'menu.settings.invertY');
     const mot = checkRow('ui-set-motion', 'menu.settings.reducedMotion');
     this.invert = inv.input;
     this.motion = mot.input;
+    const aim = segmentedRow('ui-set-aim', 'menu.settings.aimMode', ADS_MODES, (m) => `menu.settings.mode.${m}`);
+    this.adsMode = aim.inputs;
+    for (const [mode, input] of this.adsMode) {
+      input.addEventListener('change', () => {
+        if (input.checked) this.emitSettings({ adsMode: mode });
+      });
+    }
     const qual = segmentedRow('ui-set-quality', 'menu.settings.quality', QUALITY_LEVELS, (q) => `menu.settings.quality.${q}`);
     this.quality = qual.inputs;
     for (const [level, input] of this.quality) {
@@ -639,13 +778,17 @@ export class SettingsPanel {
     }
 
     this.sens.input.addEventListener('input', () => this.emitSettings({ mouseSensitivity: Number(this.sens.input.value) }));
+    this.adsSens.input.addEventListener('input', () => this.emitSettings({ adsSensitivity: Number(this.adsSens.input.value) }));
     this.vol.input.addEventListener('input', () => this.emitSettings({ masterVolume: Number(this.vol.input.value) }));
     this.invert.addEventListener('change', () => this.emitSettings({ invertY: this.invert.checked }));
     this.scale.input.addEventListener('change', () => this.emitPrefs({ uiScale: Number(this.scale.input.value) }));
     this.scale.input.addEventListener('input', () => {
       this.scale.output.value = percent.format(Number(this.scale.input.value));
     });
-    this.motion.addEventListener('change', () => this.emitPrefs({ reducedMotion: this.motion.checked ? 'on' : 'off' }));
+    this.motion.addEventListener('change', () => {
+      this.emitPrefs({ reducedMotion: this.motion.checked ? 'on' : 'off' });
+      this.syncBob();
+    });
 
     const close = button(t('menu.settings.close'), 'primary', () => this.show(false));
     this.el = h(
@@ -658,8 +801,12 @@ export class SettingsPanel {
         { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'ui-settings-title' },
         h('h2', 'ui-heading', { id: 'ui-settings-title' }, t('menu.settings.title')),
         this.sens.row,
-        this.vol.row,
+        this.fov.row,
+        bob.row,
         inv.row,
+        aim.row,
+        this.adsSens.row,
+        this.vol.row,
         qual.row,
         this.scale.row,
         mot.row,
@@ -700,6 +847,11 @@ export class SettingsPanel {
   private sync(): void {
     this.sens.input.value = String(this.settings.mouseSensitivity);
     this.sens.output.value = decimal.format(this.settings.mouseSensitivity);
+    const adsSens = this.settings.adsSensitivity ?? DEFAULT_ADS_SENSITIVITY;
+    this.adsSens.input.value = String(adsSens);
+    this.adsSens.output.value = decimal.format(adsSens);
+    const mode = this.settings.adsMode ?? DEFAULT_ADS_MODE;
+    for (const [m, input] of this.adsMode) input.checked = m === mode;
     this.vol.input.value = String(this.settings.masterVolume);
     this.vol.output.value = percent.format(this.settings.masterVolume);
     this.invert.checked = this.settings.invertY;
@@ -707,14 +859,40 @@ export class SettingsPanel {
     for (const [level, input] of this.quality) input.checked = level === quality;
     this.scale.input.value = String(this.prefs.uiScale);
     this.scale.output.value = percent.format(this.prefs.uiScale);
-    this.motion.checked = this.prefs.reducedMotion === 'on' || (this.prefs.reducedMotion === 'system' && this.systemReducedMotion());
+    this.motion.checked = this.reducedNow();
+    const fov = this.settings.fovDeg ?? DEFAULT_FP_FOV_DEG;
+    this.fov.input.value = String(fov);
+    this.fov.output.value = t('menu.settings.fov.value', { deg: fov });
+    this.syncBob();
+  }
+
+  private reducedNow(): boolean {
+    return isReducedMotion(this.prefs.reducedMotion, this.systemReducedMotion());
+  }
+
+  /** The head-bob checkbox shows the EFFECTIVE value; the sub-label explains an automatic "off". */
+  private syncBob(): void {
+    const reduced = this.reducedNow();
+    this.bob.checked = effectiveHeadBob(this.prefs.headBob, reduced);
+    const note = this.prefs.headBob === 'auto' && reduced;
+    this.bobNote.set(note);
+    if (note) this.bob.setAttribute('aria-describedby', 'ui-set-bob-note');
+    else this.bob.removeAttribute('aria-describedby');
+  }
+
+  /** Ui calls this when the OS reduced-motion preference changes while the panel may be open. */
+  refreshMotion(): void {
+    this.motion.checked = this.reducedNow();
+    this.syncBob();
   }
 
   private emitSettings(patch: Partial<Settings>): void {
     this.settings = { ...this.settings, ...patch };
     this.onSettings(this.settings);
     this.sens.output.value = decimal.format(this.settings.mouseSensitivity);
+    this.adsSens.output.value = decimal.format(this.settings.adsSensitivity ?? DEFAULT_ADS_SENSITIVITY);
     this.vol.output.value = percent.format(this.settings.masterVolume);
+    this.fov.output.value = t('menu.settings.fov.value', { deg: this.settings.fovDeg ?? DEFAULT_FP_FOV_DEG });
   }
 
   private emitPrefs(patch: Partial<UiPrefs>): void {

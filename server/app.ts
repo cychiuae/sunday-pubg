@@ -6,13 +6,18 @@ import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import { t, keysWithPrefix } from '../src/content/strings';
-import { DEFAULT_MAP_ID, getMap } from '../src/game/levels';
-import type { Balance } from '../src/shared/balance';
+import { balanceForMap, type Balance } from '../src/shared/balance';
 import { INPUT_HZ, SIM_HZ, SNAPSHOT_HZ, WS_PATH } from '../src/shared/constants';
+import { isIndoor, validateIndoorMap } from '../src/shared/maps';
 import { MAX_CLIENT_FRAME_BYTES_HARD } from '../src/shared/protocol/messages';
+import { resolveMapChoice } from '../src/shared/sim/mapVote';
+import { prepareMap } from '../src/shared/sim/movement';
+import type { Logger, WorldFactory } from './common';
+import { getMap } from '../src/game/levels';
+import { levelIds, mapVoteLockSeconds, roomsBalance } from './config';
 import type { LagConfig } from './lag';
 import { ANY_ORIGIN, isOriginAllowed, type OriginPolicy } from './origin';
-import { Room, type Logger, type WorldFactory } from './Room';
+import { RoomManager } from './RoomManager';
 import { createStaticHandler } from './static';
 
 export interface StartOptions {
@@ -25,8 +30,19 @@ export interface StartOptions {
   serveStatic?: boolean;
   distDir?: string;
   lag?: LagConfig;
-  seed?: number;
+  /** SEED: deterministic room seeds (mixSeed(SEED, roomSerial)). Absent/null = random. */
+  seed?: number | null;
   log?: Logger;
+  /** MAX_ROOMS (default 8). */
+  maxRooms?: number;
+  /** MAX_CONNECTIONS (default maxRooms x match.maxPlayers + 32). */
+  maxConnections?: number;
+  /** MAP pin (already validated by readConfig; an unknown id here throws). */
+  mapPin?: string | null;
+  /** WorldOptions.drop (tests: false = the M1 spawn, no carrier flight). */
+  worldDrop?: boolean;
+  /** Tests: fixed event-loop delay reading (server_busy). */
+  loopDelayP99Ms?: () => number;
   maxConnsPerIp?: number;
   /** WebSocket upgrade Origin policy (server/origin.ts). Default: any origin (tests, dev). */
   originPolicy?: OriginPolicy;
@@ -41,7 +57,7 @@ export interface StartOptions {
 
 export interface RunningServer {
   readonly port: number;
-  readonly room: Room;
+  readonly manager: RoomManager;
   readonly http: Server;
   close(): Promise<void>;
 }
@@ -65,21 +81,51 @@ function rejectUpgrade(socket: Duplex, status: number, text: string): void {
 const rawToString = (data: RawData): string =>
   Buffer.isBuffer(data) ? data.toString('utf8') : Array.isArray(data) ? Buffer.concat(data).toString('utf8') : Buffer.from(data).toString('utf8');
 
+/**
+ * Startup data checks (ARCHITECTURE §15.4): every indoor level passes validateIndoorMap, and once the balance has a
+ * `maps` block, every level id has an entry. Throws (fail fast) with every problem listed.
+ */
+export function checkLevels(balance: Balance, ids: readonly string[] = levelIds()): void {
+  const problems: string[] = [];
+  for (const id of ids) {
+    const map = getMap(id);
+    if (isIndoor(map)) {
+      for (const p of validateIndoorMap(map, balance.movement.stepHeight)) problems.push(`${id}: ${p}`);
+    }
+    if (balance.maps && !Object.hasOwn(balance.maps, id)) problems.push(`${id}: no maps.${id} entry in the balance`);
+  }
+  if (problems.length > 0) throw new Error(`level data check failed:\n  ${problems.join('\n  ')}`);
+}
+
 export async function startServer(opts: StartOptions): Promise<RunningServer> {
   const log = opts.log ?? console;
-  const mapId = DEFAULT_MAP_ID;
-  const room = new Room({
-    createWorld: opts.createWorld,
-    map: getMap(mapId),
-    mapId,
+  const maps = levelIds();
+  checkLevels(opts.balance, maps);
+  const pin = opts.mapPin ?? null;
+  if (pin !== null && !maps.includes(pin)) throw new Error(`MAP pin "${pin}" is not a level id`);
+  const maxRooms = opts.maxRooms ?? 8;
+  const manager = new RoomManager({
     balance: opts.balance,
-    seed: opts.seed ?? Math.floor(Math.random() * 0xffffffff),
+    rooms: roomsBalance(opts.balance),
+    lockSeconds: mapVoteLockSeconds(opts.balance),
+    createWorld: opts.createWorld,
+    getMap,
+    maps,
+    pin,
+    balanceForMap,
+    prepareMap: (map, balance) => prepareMap(map, balance),
+    resolveMapChoice,
     botNames: keysWithPrefix('bot.name').map((k) => t(k)),
+    ...(opts.worldDrop !== undefined ? { worldDrop: opts.worldDrop } : {}),
+    maxRooms,
+    maxConnections: opts.maxConnections ?? maxRooms * opts.balance.match.maxPlayers + 32,
     simHz: opts.simHz ?? SIM_HZ,
     snapshotHz: opts.snapshotHz ?? SNAPSHOT_HZ,
     inputHz: opts.inputHz ?? INPUT_HZ,
-    lag: opts.lag,
+    seed: opts.seed ?? null,
+    ...(opts.lag ? { lag: opts.lag } : {}),
     log,
+    ...(opts.loopDelayP99Ms ? { loopDelayP99Ms: opts.loopDelayP99Ms } : {}),
   });
 
   const staticHandler = opts.serveStatic && opts.distDir ? createStaticHandler(opts.distDir) : null;
@@ -87,7 +133,7 @@ export async function startServer(opts: StartOptions): Promise<RunningServer> {
     const path = new URL(req.url ?? '/', 'http://x').pathname;
     if (path === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({ ok: true, ...room.stats() }));
+      res.end(JSON.stringify(manager.stats()));
       return;
     }
     if (staticHandler) {
@@ -108,7 +154,7 @@ export async function startServer(opts: StartOptions): Promise<RunningServer> {
   });
 
   const perIp = new Map<string, number>();
-  const maxPerIp = opts.maxConnsPerIp ?? 32;
+  const maxPerIp = opts.maxConnsPerIp ?? 128;
   const originPolicy = opts.originPolicy ?? ANY_ORIGIN;
   let rejectedOrigins = 0;
 
@@ -129,7 +175,7 @@ export async function startServer(opts: StartOptions): Promise<RunningServer> {
 
     wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
       perIp.set(ip, (perIp.get(ip) ?? 0) + 1);
-      const conn = room.connect(ws, ip);
+      const conn = manager.connect(ws, ip);
       let alive = true;
       const release = (): void => {
         const n = (perIp.get(ip) ?? 1) - 1;
@@ -169,19 +215,22 @@ export async function startServer(opts: StartOptions): Promise<RunningServer> {
       resolve();
     });
   });
-  room.start();
   const port = (http.address() as AddressInfo).port;
 
   let closed = false;
   return {
     port,
-    room,
+    manager,
     http,
     close: async () => {
       if (closed) return;
       closed = true;
-      room.stop();
-      room.closeAll();
+      manager.closeAll();
+      // Let the close handshakes (after `roomLeft closed`) finish, then cut whatever is left.
+      await Promise.race([
+        Promise.all([...wss.clients].map((ws) => new Promise<void>((r) => (ws.readyState === ws.CLOSED ? r() : ws.once('close', () => r()))))),
+        new Promise<void>((r) => setTimeout(r, 500).unref()),
+      ]);
       for (const ws of wss.clients) ws.terminate();
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       http.closeAllConnections();

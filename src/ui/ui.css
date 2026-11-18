@@ -132,6 +132,32 @@
   background: radial-gradient(circle, var(--ink) 0 32%, var(--icon-colour) 34%);
 }
 .ui-icon[data-shape='crossbox'] { --clip: inset(0 round 22%); }
+/* M2a shapes (STYLE.md §18) */
+.ui-icon[data-shape='hexagon'] { --clip: polygon(25% 4%, 75% 4%, 100% 50%, 75% 96%, 25% 96%, 0 50%); }
+.ui-icon[data-shape='octagon'] { --clip: polygon(30% 0, 70% 0, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0 70%, 0 30%); }
+.ui-icon[data-shape='star'] {
+  --clip: polygon(50% 0, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
+}
+.ui-icon[data-shape='star']::after { inset: 0.2em; }
+.ui-icon[data-shape='pineapple'] {
+  --clip: polygon(40% 0, 60% 0, 60% 14%, 80% 22%, 96% 45%, 96% 72%, 80% 92%, 50% 100%, 20% 92%, 4% 72%, 4% 45%, 20% 22%, 40% 14%);
+}
+.ui-icon[data-shape='dome'] { --clip: polygon(50% 8%, 78% 16%, 95% 40%, 100% 72%, 100% 86%, 0 86%, 0 72%, 5% 40%, 22% 16%); }
+/* Full-colour SVG icons (armor, grenade): one background, no clip layers. */
+.ui-icon[data-shape='svg'] { background: var(--icon-svg) center / contain no-repeat; }
+.ui-icon[data-shape='svg']::before,
+.ui-icon[data-shape='svg']::after { display: none; }
+
+/* Visually hidden text for assistive tech. */
+.ui-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 .ui-icon[data-shape='crossbox']::after {
   background:
     linear-gradient(var(--cream), var(--cream)) center / 22% 64% no-repeat,
@@ -391,7 +417,7 @@
 .ui-controls__list { display: grid; grid-template-columns: 1fr 1fr; gap: 0.3em 1em; margin: 0; }
 .ui-controls__row { display: flex; align-items: center; gap: 0.5em; }
 .ui-controls__row dt, .ui-controls__row dd { margin: 0; }
-.ui-controls__row dt { min-width: 4.6em; }
+.ui-controls__row dt { min-width: 4.6em; flex: none; }
 .ui-controls--compact { font-size: 0.85em; }
 
 /* Play / pause */
@@ -507,7 +533,7 @@
 .ui-hud__banner { position: absolute; top: 17%; left: 50%; transform: translateX(-50%); width: max-content; max-width: 70%; }
 .ui-hud__centre { position: absolute; left: 50%; top: 50%; width: 0; height: 0; }
 .ui-hud__hint { position: absolute; left: 50%; bottom: 8.6em; transform: translateX(-50%); max-width: 60%; }
-.ui-hud__bl { position: absolute; left: var(--edge); bottom: var(--edge); width: 17em; display: grid; gap: 0.35em; }
+.ui-hud__bl { position: absolute; left: var(--edge); bottom: var(--edge); width: 17.5em; display: grid; gap: 0.45em; }
 .ui-hud__bc { position: absolute; left: 50%; bottom: var(--edge); transform: translateX(-50%); display: flex; gap: 0.5em; align-items: flex-end; }
 .ui-hud__br { position: absolute; right: var(--edge); bottom: var(--edge); display: grid; gap: 0.35em; justify-items: end; min-width: 11em; }
 
@@ -517,6 +543,9 @@
 .ui-hud.is-dropping .ui-hud__bc {
   display: none;
 }
+/* M2a: looking through a scope, keep the lens clear of the pickup prompt and hints. */
+.ui-hud.is-scoped .ui-prompt,
+.ui-hud.is-scoped .ui-hud__hint { visibility: hidden; }
 
 /* Alive / kills / tide chips */
 .ui-chip--alive .ui-glyph, .ui-chip--kills .ui-glyph { color: var(--accent); }
@@ -565,6 +594,7 @@
 .ui-feed__name { color: var(--accent); font-weight: 900; }
 .ui-feed__weapon { font-weight: 800; text-decoration: underline; text-decoration-thickness: 0.1em; text-underline-offset: 0.15em; }
 .ui-feed__item .ui-glyph--target { color: var(--accent); }
+.ui-feed__icon { font-size: 1.15em; }
 .ui-feed__item.is-mine { border: 0.2em solid var(--accent); }
 .ui-feed__item.is-me { border: 0.2em dashed var(--danger); }
 
@@ -638,7 +668,6 @@
 .ui-bar.is-healing .ui-bar__ghost { transition: none; }
 .ui-bar__fill { transition: transform 80ms ease-out; }
 .ui-bar--hp .ui-bar__fill { background: var(--hp); }
-.ui-bar--armor .ui-bar__fill { background: var(--armor); }
 .ui-bar__value { font: 900 1.05em var(--font-display); text-align: right; }
 .ui-bar.is-hit .ui-bar__track { animation: ui-bar-hit 260ms ease-out; }
 /* Low: diagonal stripes + pulse (pattern is the non-colour cue). */
@@ -646,7 +675,109 @@
   background: repeating-linear-gradient(135deg, var(--danger) 0 0.45em, #ff8aa0 0.45em 0.9em);
 }
 .ui-bar--hp.is-low .ui-bar__glyph { animation: ui-pulse 700ms ease-in-out infinite alternate; }
-.ui-bar--armor.is-empty .ui-bar__track { border-style: dashed; }
+
+/* M2a: vest + helmet pieces and the stance indicator (row under the HP bar). */
+.ui-gearrow { display: grid; grid-template-columns: 1fr 1fr auto; gap: 0.4em; align-items: stretch; }
+.ui-gear {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 0.35em;
+  padding: 0.2em 0.4em 0.2em 0.3em;
+  background: var(--cream);
+  border: 0.14em solid var(--ink);
+  border-radius: 0.6em;
+}
+.ui-gear__badge { display: grid; justify-items: center; gap: 0.1em; }
+.ui-gear__icon { font-size: 1.6em; }
+.ui-gear__info { display: grid; gap: 0.15em; min-width: 0; }
+.ui-gear__text { font: 900 0.8em var(--font-display); white-space: nowrap; }
+.ui-gear__track {
+  position: relative;
+  height: 0.5em;
+  overflow: hidden;
+  background: var(--ink-soft);
+  border: 0.1em solid var(--ink);
+  border-radius: 0.3em;
+}
+.ui-gear__fill {
+  position: absolute;
+  inset: 0;
+  background: var(--armor);
+  transform-origin: left center;
+  transform: scaleX(var(--r, 0));
+  transition: transform 80ms ease-out;
+}
+.ui-gear.is-low .ui-gear__fill { background: repeating-linear-gradient(135deg, var(--armor) 0 0.35em, #a9d4ff 0.35em 0.7em); }
+/* Tier pips: 1-3 ink-rimmed diamonds, filled up to --tier (shape count, never colour alone). */
+.ui-gear__pips { display: flex; gap: 0.12em; }
+.ui-gear__pip {
+  width: 0.42em;
+  height: 0.42em;
+  transform: rotate(45deg);
+  border: 0.09em solid var(--ink);
+  background: transparent;
+}
+.ui-gear__pips[data-tier='1'] .ui-gear__pip:nth-child(-n + 1),
+.ui-gear__pips[data-tier='2'] .ui-gear__pip:nth-child(-n + 2),
+.ui-gear__pips[data-tier='3'] .ui-gear__pip:nth-child(-n + 3) { background: var(--accent); }
+.ui-gear.is-none { background: transparent; border-style: dashed; }
+.ui-gear.is-none .ui-gear__icon { opacity: 0.3; filter: grayscale(1); }
+.ui-gear.is-none .ui-gear__text { color: var(--ink-soft); font-weight: 800; }
+.ui-gear.is-none .ui-gear__track { visibility: hidden; }
+/* Broken: 40% icon with a diagonal ink slash, "Broken" text (shape cue, not colour only). */
+.ui-gear.is-broken .ui-gear__icon { opacity: 0.4; }
+.ui-gear.is-broken .ui-gear__badge { position: relative; }
+.ui-gear.is-broken .ui-gear__badge::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: -0.1em;
+  width: 0.22em;
+  height: 2.1em;
+  background: var(--ink);
+  border-radius: 0.1em;
+  transform: translateX(-50%) rotate(40deg);
+}
+.ui-gear.is-broken .ui-gear__text { color: var(--danger-text); }
+.ui-gear.is-hit .ui-gear__track { animation: ui-bar-hit 260ms ease-out; }
+.ui-gear.is-breaking { animation: ui-shake 320ms ease-out; }
+
+.ui-stance {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 2.5em;
+  background: var(--cream);
+  border: 0.14em solid var(--ink);
+  border-radius: 0.6em;
+  overflow: hidden;
+}
+.ui-stance__glyph {
+  width: 1.8em;
+  height: 1.8em;
+  background: var(--ink);
+  -webkit-mask: var(--g) center / contain no-repeat;
+  mask: var(--g) center / contain no-repeat;
+}
+.ui-stance[data-stance='stand'] .ui-stance__glyph { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='3.6' r='2.6'/%3E%3Crect x='8.6' y='7' width='6.8' height='8.5' rx='2'/%3E%3Crect x='8.8' y='14' width='2.6' height='9' rx='1.2'/%3E%3Crect x='12.6' y='14' width='2.6' height='9' rx='1.2'/%3E%3C/svg%3E"); }
+.ui-stance[data-stance='crouch'] .ui-stance__glyph { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='10' cy='8' r='2.6'/%3E%3Cpath d='M7 11.5h6.5l2 6H8.5z'/%3E%3Crect x='9' y='16' width='9' height='2.8' rx='1.3'/%3E%3Crect x='15.4' y='16' width='2.8' height='7' rx='1.3'/%3E%3Crect x='7.6' y='16' width='2.8' height='7' rx='1.3'/%3E%3C/svg%3E"); }
+.ui-stance[data-stance='prone'] .ui-stance__glyph { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='3.6' cy='17' r='2.6'/%3E%3Crect x='6.4' y='15.2' width='9.5' height='4.6' rx='2'/%3E%3Crect x='15' y='16' width='8.5' height='3' rx='1.4'/%3E%3Crect x='1' y='21.4' width='22' height='1.4' rx='0.7'/%3E%3C/svg%3E"); }
+.ui-stance.is-low { background: var(--accent); border-width: 0.2em; }
+.ui-stance__progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 0.22em;
+  background: var(--ink);
+  transform-origin: left center;
+  transform: scaleX(var(--p, 1));
+  opacity: 0;
+}
+.ui-stance.is-moving .ui-stance__progress { opacity: 1; }
+.ui-stance.is-changed .ui-stance__glyph { animation: ui-stance-in 200ms ease-out; }
 .ui-bar--compact { grid-template-columns: 6em 2.2em; }
 .ui-bar--compact .ui-bar__track { height: 0.8em; }
 
@@ -658,7 +789,7 @@
   grid-template-rows: auto auto;
   align-items: center;
   gap: 0.1em 0.45em;
-  min-width: 7.4em;
+  min-width: 6.6em;
   padding: 0.4em 0.65em 0.45em;
   background: var(--sand);
   border: var(--line) solid var(--ink);
@@ -686,6 +817,9 @@
 .ui-slot.is-active .ui-slot__mag { color: var(--ink); }
 .ui-slot.is-empty { background: rgba(247, 228, 181, 0.8); border-style: dashed; box-shadow: none; }
 .ui-slot.is-empty .ui-slot__name { color: var(--ink-soft); font-weight: 700; }
+/* M2a: slot 4 always shows the grenade; at 0 it is dashed and the icon desaturates. */
+.ui-slot.is-grenade .ui-slot__mag { font-family: var(--font-display); font-weight: 900; }
+.ui-slot.is-grenade.is-empty .ui-slot__icon { opacity: 0.35; filter: grayscale(1); }
 
 /* Ammo + heals */
 .ui-ammo { position: relative; display: grid; justify-items: end; padding-bottom: 0.3em; }
@@ -736,7 +870,16 @@
 .ui-heal.is-using { background: var(--accent); }
 
 /* Crosshair */
-.ui-crosshair { position: absolute; left: 0; top: 0; --gap: calc(0.4em + var(--spread, 0px)); }
+.ui-crosshair { position: absolute; left: 0; top: 0; --gap: calc(0.4em * var(--hip, 1) + var(--spread, 0px)); opacity: var(--hip, 1); }
+
+/* M2a: over-shoulder ADS reticles (STYLE.md §17: 32 / 48 px at 1080p, scale with vmin). */
+.ui-sight { position: absolute; left: 0; top: 0; opacity: var(--o, 1); }
+.ui-sight > div { position: absolute; display: none; }
+.ui-sight > div > svg { display: block; width: 100%; height: 100%; }
+.ui-sight__iron { width: 2.963vmin; height: 2.963vmin; left: -1.4815vmin; top: -1.4815vmin; }
+.ui-sight__red { width: 4.444vmin; height: 4.444vmin; left: -2.222vmin; top: -2.222vmin; }
+.ui-sight:not(.is-red) .ui-sight__iron,
+.ui-sight.is-red .ui-sight__red { display: block; }
 .ui-crosshair__line {
   position: absolute;
   background: var(--cream);
@@ -774,7 +917,43 @@
 .ui-hitmarker__tick--d { transform: rotate(315deg) translateY(0.55em); }
 .ui-hitmarker__crown { display: none; position: absolute; left: -0.3em; top: -2.1em; width: 0.6em; height: 0.6em; background: var(--accent); border: 2px solid var(--ink); transform: rotate(45deg); }
 .ui-hitmarker.is-head .ui-hitmarker__crown { display: block; }
-.ui-hitmarker.is-armor::after { content: ''; position: absolute; left: -1.4em; top: -1.4em; width: 2.8em; height: 2.8em; border-radius: 50%; border: 3px dashed var(--armor); }
+/* M2a armor variants: vest = dashed ring, helmet = a cap arc over the ticks, break = 4 shards flying out. */
+.ui-hitmarker__vest, .ui-hitmarker__helmet, .ui-hitmarker__shard { display: none; position: absolute; }
+.ui-hitmarker.is-vest .ui-hitmarker__vest {
+  display: block;
+  left: -1.4em;
+  top: -1.4em;
+  width: 2.8em;
+  height: 2.8em;
+  border-radius: 50%;
+  border: 3px dashed var(--armor);
+}
+.ui-hitmarker.is-helmet .ui-hitmarker__helmet {
+  display: block;
+  left: -1.3em;
+  top: -1.9em;
+  width: 2.6em;
+  height: 1.3em;
+  border: 4px solid var(--armor);
+  border-bottom: 0;
+  border-radius: 1.3em 1.3em 0 0;
+  filter: drop-shadow(0 0 1px var(--ink));
+}
+.ui-hitmarker.is-break .ui-hitmarker__shard {
+  display: block;
+  left: -0.3em;
+  top: -0.3em;
+  width: 0.6em;
+  height: 0.6em;
+  background: var(--armor);
+  border: 2px solid var(--ink);
+  clip-path: polygon(50% 0, 100% 100%, 0 70%);
+}
+.ui-hitmarker.is-break.is-on .ui-hitmarker__shard { animation: ui-shard 360ms ease-out forwards; }
+.ui-hitmarker__shard--a { --dx: -1.8em; --dy: -1.8em; }
+.ui-hitmarker__shard--b { --dx: 1.8em; --dy: -1.8em; }
+.ui-hitmarker__shard--c { --dx: 1.8em; --dy: 1.8em; }
+.ui-hitmarker__shard--d { --dx: -1.8em; --dy: 1.8em; }
 
 /* Damage direction arcs (rotated around screen centre; 0deg = in front) */
 .ui-dmgarcs { position: absolute; left: 0; top: 0; }
@@ -830,9 +1009,79 @@
 }
 .ui-ring__hint:empty { display: none; }
 
+/* M2a: grenade cook ring (empties over the fuse; last second = red, thicker, pulsing). */
+.ui-cook { position: absolute; left: -2.6em; top: -2.6em; width: 5.2em; height: 5.2em; --cook-offset: 0; }
+.ui-cook__svg { width: 100%; height: 100%; transform: rotate(-90deg); overflow: visible; display: none; }
+.ui-cook.is-cooking .ui-cook__svg { display: block; }
+.ui-cook__bg { fill: none; stroke: rgba(42, 29, 51, 0.55); stroke-width: 6; }
+.ui-cook__fg { fill: none; stroke: #ff9f1c; stroke-width: 4; stroke-linecap: round; stroke-dashoffset: var(--cook-offset); }
+.ui-cook.is-urgent .ui-cook__fg { stroke: var(--danger); stroke-width: 6; }
+.ui-cook.is-urgent .ui-cook__svg { animation: ui-cook-pulse 250ms ease-in-out infinite alternate; }
+.ui-cook__text {
+  position: absolute;
+  top: 5.6em;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.1em 0.6em;
+  color: var(--cream);
+  background: var(--ink-glass);
+  border-radius: 0.5em;
+  font-weight: 800;
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+.ui-cook__secs { font: 900 1.15em var(--font-display); color: #ffc66e; }
+.ui-cook__secs:empty { display: none; }
+.ui-cook.is-urgent .ui-cook__secs { color: #ff8aa0; }
+.ui-cook.is-urgent .ui-cook__text { border: 0.12em dashed #ff8aa0; }
+
+/* M2a: grenade danger (pineapple + pulsing red ring; pointer arrow when pinned to the edge). */
+.ui-dangers { position: absolute; left: 0; top: 0; }
+.ui-danger {
+  position: absolute;
+  left: -1.4em;
+  top: -1.4em;
+  width: 2.8em;
+  height: 2.8em;
+  translate: var(--pos, 0 0);
+  scale: var(--s, 1);
+}
+.ui-danger:not(.is-edge) { top: 4.2em; }
+.ui-danger__icon { position: absolute; inset: 0.45em; width: auto; height: auto; }
+.ui-danger__ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: rgba(42, 29, 51, 0.55);
+  border: 0.2em solid var(--danger);
+  box-shadow: 0 0 0 0.12em var(--ink);
+  animation: ui-danger-pulse 420ms ease-in-out infinite alternate;
+}
+.ui-danger.is-nearest .ui-danger__ring { border-width: 0.28em; }
+.ui-danger__arrow { display: none; position: absolute; left: 50%; top: 50%; width: 0; height: 0; transform: rotate(var(--a, 0deg)); }
+.ui-danger.is-edge .ui-danger__arrow { display: block; }
+.ui-danger__arrow::before {
+  content: '';
+  position: absolute;
+  left: -0.55em;
+  top: -2.35em;
+  border: 0.55em solid transparent;
+  border-bottom: 0.8em solid var(--danger);
+  border-top: 0;
+  filter: drop-shadow(0 -0.1em 0 var(--ink));
+}
+
 /* Pickup prompt */
 .ui-prompt { position: absolute; left: 50%; top: calc(50% + 7.6em); transform: translateX(-50%); font-size: 1.05em; }
 .ui-prompt.is-blocked { border-style: dashed; color: #d9cfd9; } /* 5.9:1 on ink-glass over white */
+/* M2a armor detail: pips + "Lv.2" + "31/55". */
+.ui-prompt__detail { display: inline-flex; align-items: center; gap: 0.35em; padding: 0 0.5em; border-left: 0.12em solid currentColor; }
+.ui-gear__pips--row .ui-gear__pip { border-color: var(--cream); }
+.ui-prompt__tier { font-weight: 900; }
+.ui-prompt__dur:empty { display: none; }
 .ui-prompt.is-blocked::after {
   content: '';
   width: 1em;
@@ -914,12 +1163,45 @@
 .ui-spectate .ui-bar--compact { grid-template-columns: 6em auto; }
 
 /* --------------------------------------------------------------------------------------------
+ * M2a scope frame (STYLE.md §17): lens radius 42vmin, ink rim, family-colour inner ring, inner shadow,
+ * 5% glass tint, deep-ink outside. The lens is one element whose huge box-shadow paints the outside, so the
+ * 120 ms iris (30 → 42vmin) is a transform-only animation.
+ * ------------------------------------------------------------------------------------------ */
+.ui-scope { position: absolute; inset: 0; overflow: hidden; opacity: 0; --scope-c: #5b8def; }
+.ui-scope[data-sight='scope_8x'] { --scope-c: #ff6fa8; }
+.ui-scope.is-in { opacity: 1; transition: opacity 120ms ease-out; }
+.ui-scope.is-out { opacity: 0; transition: opacity 80ms linear; }
+.ui-scope__lens {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 85.2vmin;
+  height: 85.2vmin;
+  margin: -42.6vmin 0 0 -42.6vmin;
+  border-radius: 50%;
+  border: 1vmin solid #2a1d33;
+  box-shadow: 0 0 0 150vmax #140e1a, inset 0 0 0 0.5vmin var(--scope-c);
+  transform: scale(0.714);
+}
+.ui-scope.is-in .ui-scope__lens { transform: none; transition: transform 120ms ease-out; }
+.ui-scope__glass {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(159, 232, 240, 0.05) 0 88%, rgba(20, 14, 26, 0.45) 100%);
+}
+.ui-scope__mark { position: absolute; inset: 0.1vmin; display: none; }
+.ui-scope[data-sight='scope_4x'] .ui-scope__mark--4x,
+.ui-scope[data-sight='scope_8x'] .ui-scope__mark--8x { display: block; }
+.ui-scope__mark > svg { display: block; width: 100%; height: 100%; overflow: visible; }
+
+/* --------------------------------------------------------------------------------------------
  * Narrow / short viewports (≤ 1280×720 and small windows)
  * ------------------------------------------------------------------------------------------ */
 @media (max-height: 560px), (max-width: 900px) {
   .ui-minimap { width: 9.5em; height: 9.5em; }
-  .ui-hud__bl { width: 14em; }
-  .ui-slot { min-width: 5.8em; }
+  .ui-hud__bl { width: 15.5em; }
+  .ui-slot { min-width: 5.2em; }
   .ui-controls { display: none; }
 }
 
@@ -944,6 +1226,10 @@
 @keyframes ui-pulse { from { transform: translateX(var(--tx, 0)) scale(1); } to { transform: translateX(var(--tx, 0)) scale(1.06); } }
 @keyframes ui-vignette { from { opacity: var(--strength, 0.7); } to { opacity: 0; } }
 @keyframes ui-tide-breathe { from { opacity: 0.75; } to { opacity: 1; } }
+@keyframes ui-shard { from { opacity: 1; transform: translate(0, 0); } to { opacity: 0; transform: translate(var(--dx), var(--dy)) rotate(90deg); } }
+@keyframes ui-cook-pulse { from { transform: rotate(-90deg) scale(1); } to { transform: rotate(-90deg) scale(1.08); } }
+@keyframes ui-danger-pulse { from { transform: scale(1); } to { transform: scale(1.12); } }
+@keyframes ui-stance-in { from { transform: scale(0.7); opacity: 0.4; } to { transform: none; opacity: 1; } }
 .ui-outside { --tx: -50%; }
 
 /* --------------------------------------------------------------------------------------------
@@ -958,6 +1244,11 @@
 .ui.is-reduced-motion .ui-lobby__big.is-pop,
 .ui.is-reduced-motion .ui-input.is-shake,
 .ui.is-reduced-motion .ui-prompt.is-shake,
+.ui.is-reduced-motion .ui-gear.is-breaking,
+.ui.is-reduced-motion .ui-gear.is-hit .ui-gear__track,
+.ui.is-reduced-motion .ui-stance.is-changed .ui-stance__glyph,
+.ui.is-reduced-motion .ui-cook.is-urgent .ui-cook__svg,
+.ui.is-reduced-motion .ui-danger__ring,
 .ui.is-reduced-motion .ui-bar.is-hit .ui-bar__track {
   animation: none;
 }
@@ -972,9 +1263,430 @@
 .ui.is-reduced-motion .ui-slot,
 .ui.is-reduced-motion .ui-btn,
 .ui.is-reduced-motion .ui-seg__opt,
-.ui.is-reduced-motion .ui-crosshair__line { transition: none; }
+.ui.is-reduced-motion .ui-crosshair__line,
+.ui.is-reduced-motion .ui-gear__fill { transition: none; }
+/* Scope: no iris, just the fade. Shards fade in place. */
+.ui.is-reduced-motion .ui-scope__lens,
+.ui.is-reduced-motion .ui-scope.is-in .ui-scope__lens { transform: none; transition: none; }
+.ui.is-reduced-motion .ui-hitmarker.is-break.is-on .ui-hitmarker__shard { animation: ui-fade-out 300ms linear forwards; }
 .ui.is-reduced-motion .ui-slot.is-active { transform: none; }
 .ui.is-reduced-motion .ui-btn:hover,
 .ui.is-reduced-motion .ui-btn:active,
 .ui.is-reduced-motion .ui-seg__opt:hover,
 .ui.is-reduced-motion .ui-seg__opt:active { transform: none; }
+
+/* ============================================================================================
+ * M2b: rooms (browser, create dialog, waiting room), drop HUD, first-person HUD layout.
+ * Spec: docs/ui/UI.md §12 and §13. Same tokens as above; every state has a non-colour cue.
+ * ========================================================================================== */
+
+/* ---- Glyphs (masks, currentColor) */
+.ui-glyph--clock { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill-rule='evenodd' d='M12 1a11 11 0 1 1 0 22a11 11 0 0 1 0-22zm0 3a8 8 0 1 0 0 16a8 8 0 0 0 0-16zm-1.2 2.5h2.4v4.8l3.4 2-1.2 2.1-4.6-2.7z'/%3E%3C/svg%3E"); }
+.ui-glyph--plus { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M10 3h4v7h7v4h-7v7h-4v-7H3v-4h7z'/%3E%3C/svg%3E"); }
+.ui-glyph--refresh { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 3a9 9 0 0 1 7.4 3.9L22 4.5V12h-7.4l2.8-2.7A6 6 0 1 0 18 14.5h3.1A9 9 0 1 1 12 3z'/%3E%3C/svg%3E"); }
+.ui-glyph--back { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M10.5 4 2.5 12l8 8v-5.2h11V9.2h-11z'/%3E%3C/svg%3E"); }
+.ui-glyph--umbrella { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2C6.5 2 2 6 1.5 11h21C22 6 17.5 2 12 2zm-1.2 10h2.4v7.5a3.3 3.3 0 0 1-6.6 0h2.4a.9.9 0 0 0 1.8 0z'/%3E%3C/svg%3E"); }
+.ui-glyph--copy { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M8 1.5h12a2 2 0 0 1 2 2V16h-3V4.5H8zM3 6.5h11a2 2 0 0 1 2 2V20.5a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2v-12a2 2 0 0 1 2-2z'/%3E%3C/svg%3E"); }
+.ui-glyph--link { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M10.6 15.6 8.9 17.3a3.6 3.6 0 0 1-5.1-5.1l3.5-3.5a3.6 3.6 0 0 1 5.1 0l-1.7 1.7a1.2 1.2 0 0 0-1.7 0l-3.5 3.5a1.2 1.2 0 0 0 1.7 1.7l1.7-1.7zM13.4 8.4l1.7-1.7a3.6 3.6 0 0 1 5.1 5.1l-3.5 3.5a3.6 3.6 0 0 1-5.1 0l1.7-1.7a1.2 1.2 0 0 0 1.7 0l3.5-3.5a1.2 1.2 0 0 0-1.7-1.7l-1.7 1.7zM8.6 13.7l5.1-5.1 1.7 1.7-5.1 5.1z'/%3E%3C/svg%3E"); }
+.ui-glyph--play { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 3l15 9-15 9z'/%3E%3C/svg%3E"); }
+.ui-glyph--hourglass { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill-rule='evenodd' d='M5 1.5h14V5c0 3-3 5.5-5 7 2 1.5 5 4 5 7v3.5H5V19c0-3 3-5.5 5-7-2-1.5-5-4-5-7zm3 3.2c0 2 2 3.6 4 5 2-1.4 4-3 4-5zM8 19.5h8c-.4-1.6-2.3-3-4-4.2-1.7 1.2-3.6 2.6-4 4.2z'/%3E%3C/svg%3E"); }
+.ui-glyph--close { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5.6 3.5 12 9.9l6.4-6.4 2.1 2.1-6.4 6.4 6.4 6.4-2.1 2.1-6.4-6.4-6.4 6.4-2.1-2.1 6.4-6.4-6.4-6.4z'/%3E%3C/svg%3E"); }
+.ui-glyph--camera { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill-rule='evenodd' d='M2 6.5h4.5l2-3h7l2 3H22V20H2zm10 3a4 4 0 1 0 0 8a4 4 0 0 0 0-8z'/%3E%3C/svg%3E"); }
+/* Zone chip glyph by the map's fiction: tide = waves, lights out = bulb, sprinklers = droplet. */
+.ui-glyph--zone { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M1 11c3-4 6-4 8 0s5 4 7 0 5-4 7 0v4c-3-4-5-4-7 0s-5 4-7 0-5-4-8 0zM1 18c3-4 6-4 8 0s5 4 7 0 5-4 7 0v4H1z'/%3E%3C/svg%3E"); }
+.ui-glyph--zone[data-theme='lightsOut'] { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 1.5a7.5 7.5 0 0 1 4.5 13.5V18h-9v-3A7.5 7.5 0 0 1 12 1.5zM8.5 19.5h7V23h-7z'/%3E%3C/svg%3E"); }
+.ui-glyph--zone[data-theme='sprinklers'] { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M8 2s-5 6.2-5 9.9a5 5 0 0 0 10 0C13 8.2 8 2 8 2zm9 8s-3.5 4.3-3.5 6.9a3.5 3.5 0 0 0 7 0C20.5 14.3 17 10 17 10z'/%3E%3C/svg%3E"); }
+.ui-tide .ui-glyph--zone { color: var(--tide); }
+.ui-tide .ui-glyph--zone[data-theme='lightsOut'] { color: var(--accent); }
+.ui-tide.is-urgent .ui-glyph--zone { color: var(--ink); }
+
+/* Map shape glyphs (◆ island, ▣ office, ◈ vote, ? random) and room status glyphs (● waiting, ◔ starting, ▶ in match, ■ results). */
+.ui-mapglyph, .ui-statusglyph {
+  display: inline-block;
+  flex: none;
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.12em;
+  background: var(--ink);
+  -webkit-mask: var(--g) center / contain no-repeat;
+  mask: var(--g) center / contain no-repeat;
+  --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3C/svg%3E");
+}
+.ui-mapglyph[data-glyph='island'] { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 1 23 12 12 23 1 12z'/%3E%3C/svg%3E"); }
+.ui-mapglyph[data-glyph='office'] { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill-rule='evenodd' d='M2 2h20v20H2zM5 5v14h14V5zM8 8h8v8H8z'/%3E%3C/svg%3E"); }
+.ui-mapglyph[data-glyph='vote'] { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill-rule='evenodd' d='M12 1 23 12 12 23 1 12zM12 4.6 4.6 12 12 19.4 19.4 12zM12 8l4 4-4 4-4-4z'/%3E%3C/svg%3E"); }
+.ui-mapglyph[data-glyph='random'] { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill-rule='evenodd' d='M12 1a11 11 0 1 1 0 22a11 11 0 0 1 0-22zm-1.3 15.2v2.6h2.6v-2.6zM8.4 9.4h2.5a1.2 1.2 0 1 1 1.8 1c-1.3.8-2 1.6-2 3.2v.6h2.5v-.4c0-.8.4-1.2 1.2-1.7a3.7 3.7 0 1 0-6-2.7z'/%3E%3C/svg%3E"); }
+.ui-statusglyph[data-glyph='waiting'] { background: #1f8a80; } /* teal dot */
+.ui-statusglyph[data-glyph='starting'] { background: #9a6a00; --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill-rule='evenodd' d='M12 1a11 11 0 1 1 0 22a11 11 0 0 1 0-22zm0 3a8 8 0 1 0 8 8h-8z'/%3E%3C/svg%3E"); }
+.ui-statusglyph[data-glyph='playing'] { background: var(--danger-text); --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 2.5l16 9.5-16 9.5z'/%3E%3C/svg%3E"); }
+.ui-statusglyph[data-glyph='results'] { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M4 4h16v16H4z'/%3E%3C/svg%3E"); }
+
+/* ---- Shared bits */
+.ui-btn--small { min-height: 2.2em; padding: 0.3em 0.8em; font-size: 0.92em; }
+.ui-btn__spin { display: none; width: 1em; height: 1em; border-radius: 50%; border: 0.18em solid currentColor; border-top-color: transparent; animation: ui-spin 800ms linear infinite; }
+.ui-btn.is-pending .ui-btn__spin { display: inline-block; }
+.ui-btn.is-spinning .ui-glyph--refresh { animation: ui-spin 400ms linear; }
+.ui-btn.is-armed { background: var(--coral); color: var(--ink); border-style: dashed; box-shadow: 0 0.2em 0 var(--ink); }
+.ui-btn.is-done { background: var(--hp); }
+.ui-subnote { display: flex; align-items: center; gap: 0.3em; margin: 0.25em 0 0; font-size: 0.85em; font-weight: 700; color: var(--ink-soft); }
+.ui-subnote .ui-glyph { width: 0.9em; height: 0.9em; }
+.ui-heading--small { font-size: 1.25em; margin: 0.3em 0 0.5em; }
+.ui-row--split { justify-content: space-between; }
+.ui-seg--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ui-seg__opt.is-disabled { cursor: not-allowed; border-style: dashed; background: var(--sand-dark); box-shadow: none; color: var(--ink-soft); }
+.ui-seg__opt .ui-mapglyph { width: 0.9em; height: 0.9em; }
+.ui-field__note { grid-column: 2; margin: 0; }
+.ui-spinner--small { width: 1em; height: 1em; margin: 0; border-width: 0.2em; outline-width: 0.1em; }
+
+/* Title: "Joining room ABCDE" deep-link chip */
+.ui-deeplink { justify-self: start; margin: 0.1em 0 0; padding-right: 0.3em; font-size: 0.95em; }
+.ui-deeplink .ui-glyph--link { color: var(--accent); }
+.ui-chip__x {
+  display: inline-grid;
+  place-items: center;
+  width: 1.9em;
+  height: 1.9em;
+  margin-left: 0.2em;
+  padding: 0;
+  color: var(--cream);
+  background: transparent;
+  border: 0.12em solid var(--cream);
+  border-radius: 50%;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.ui-chip__x:hover { background: rgba(255, 250, 240, 0.18); }
+.ui-chip__x:focus-visible { outline: 0.2em solid var(--accent-2); outline-offset: 0.12em; }
+.ui-chip__x .ui-glyph { width: 0.8em; height: 0.8em; }
+
+/* ---- Room browser */
+.ui-screen--browser { background: rgba(42, 29, 51, 0.3); }
+.ui-panel--browser { width: min(46em, 94vw); }
+.ui-browser__head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5em 1em; }
+.ui-browser__head .ui-heading { margin-right: auto; }
+.ui-browser__actions { display: flex; align-items: flex-start; gap: 0.5em; }
+.ui-browser__create { display: grid; justify-items: end; }
+.ui-browser__foot { justify-content: space-between; margin-top: 0.6em; }
+.ui-browser__bots { display: flex; align-items: center; gap: 0.5em; margin: 0; }
+
+.ui-codeform { margin: 0.4em 0 0.8em; }
+.ui-codeform__row { display: flex; gap: 0.5em; align-items: stretch; }
+.ui-input--code { width: 9.5em; flex: none; text-transform: uppercase; letter-spacing: 0.22em; font-size: 1.3em; }
+.ui-input--code::placeholder { letter-spacing: 0.02em; text-transform: none; font-size: 0.8em; }
+.ui-input[readonly] { background: var(--sand-dark); }
+
+.ui-roomtable { background: var(--cream); border: 0.14em solid var(--ink); border-radius: 0.8em; overflow: hidden; }
+.ui-roomtable__head,
+.ui-roomrow { display: grid; grid-template-columns: minmax(0, 2.2fr) minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1.4fr); gap: 0.6em; align-items: center; }
+.ui-roomtable__head { padding: 0.4em 0.9em; font: 900 0.78em var(--font-display); text-transform: uppercase; letter-spacing: 0.05em; background: var(--sand-dark); border-bottom: 0.14em solid var(--ink); }
+.ui-roomtable__list { list-style: none; margin: 0; padding: 0.3em; max-height: min(42vh, 22em); overflow: auto; display: grid; gap: 0.25em; }
+.ui-roomtable__item { margin: 0; }
+.ui-roomrow {
+  position: relative;
+  width: 100%;
+  min-height: 2.8em;
+  padding: 0.45em 0.6em;
+  text-align: left;
+  font: inherit;
+  font-weight: 700;
+  color: var(--ink);
+  background: transparent;
+  border: 0.14em solid transparent;
+  border-radius: 0.6em;
+  cursor: pointer;
+  transition: background-color 60ms ease-out, transform 60ms ease-out;
+}
+.ui-roomrow:hover { background: #fff3d6; border-color: var(--ink); }
+.ui-roomrow:active { transform: translateY(0.08em); }
+.ui-roomrow:focus-visible { outline: 0.2em solid var(--accent-2); outline-offset: 0.05em; background: #fff3d6; }
+.ui-roomrow__name { font: 900 1.02em var(--font-display); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-roomrow__name::before { content: ''; display: inline-block; width: 0; height: 0; margin-right: 0.35em; border: 0.3em solid transparent; border-left: 0.45em solid var(--ink); border-right: 0; opacity: 0; }
+.ui-roomrow:hover .ui-roomrow__name::before, .ui-roomrow:focus-visible .ui-roomrow__name::before { opacity: 1; }
+.ui-roomrow__map, .ui-roomrow__status, .ui-roomrow__playerscell { display: inline-flex; align-items: center; gap: 0.35em; white-space: nowrap; overflow: hidden; }
+.ui-roomrow__full { display: none; }
+.ui-roomrow__full .ui-glyph { width: 0.8em; height: 0.8em; vertical-align: -0.1em; }
+.ui-roomrow.is-full { cursor: not-allowed; border: 0.14em dashed var(--ink-soft); color: var(--ink-soft); }
+.ui-roomrow.is-full .ui-roomrow__full { display: inline-block; }
+.ui-roomrow__notice { display: none; grid-column: 1 / -1; align-items: center; gap: 0.35em; font-size: 0.85em; font-weight: 700; color: var(--ink-soft); }
+.ui-roomrow.is-playing:hover .ui-roomrow__notice, .ui-roomrow.is-playing:focus-visible .ui-roomrow__notice { display: flex; }
+.ui-roomtable__loading { padding: 0.5em; display: grid; gap: 0.35em; }
+.ui-roomtable__loading .ui-subtle { margin: 0.2em 0 0; text-align: center; }
+.ui-skel { height: 2.4em; border-radius: 0.6em; background: linear-gradient(90deg, var(--sand) 0 30%, #fff3d6 50%, var(--sand) 70%) 0 0 / 300% 100%; animation: ui-shimmer 1.4s linear infinite; }
+.ui-roomtable__empty { display: grid; justify-items: center; gap: 0.4em; padding: 1.4em 1em; text-align: center; font: 900 1.1em var(--font-display); }
+.ui-roomtable__empty > p { margin: 0; }
+.ui-roomtable__empty > .ui-glyph--umbrella { width: 2.6em; height: 2.6em; color: var(--coral); }
+
+/* ---- Create / room settings dialog */
+.ui-screen--roomdlg { background: rgba(42, 29, 51, 0.55); z-index: 4; }
+.ui-panel--roomdlg { width: min(28em, 94vw); }
+.ui-roomdlg__form { display: grid; gap: 0.2em; }
+.ui-roomdlg__form > .ui-field, .ui-roomdlg__form > .ui-field--seg { margin: 0.55em 0; }
+.ui-roomdlg__form .ui-seg { grid-template-columns: repeat(var(--n, 3), minmax(0, 1fr)); }
+.ui-roomdlg__form .ui-seg--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ui-roomdlg__actions { margin-top: 0.4em; }
+
+/* ---- Waiting room */
+.ui-screen--room {
+  justify-content: space-between;
+  align-items: center;
+  gap: 2vw;
+  padding-left: max(4vw, 1em);
+  padding-right: max(4vw, 1em);
+}
+.ui-panel--room { width: min(27em, 46vw); }
+.ui-room__head { display: flex; align-items: center; gap: 0.6em; }
+.ui-room__name { margin-right: auto; overflow-wrap: anywhere; }
+.ui-room__vis { flex: none; }
+.ui-room__vis.is-private::before {
+  content: '';
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  margin-right: 0.25em;
+  vertical-align: -0.08em;
+  background: currentColor;
+  -webkit-mask: var(--g) center / contain no-repeat;
+  mask: var(--g) center / contain no-repeat;
+  --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill-rule='evenodd' d='M6.5 10V7a5.5 5.5 0 0 1 11 0v3H20v13H4V10zm2.5 0h6V7a3 3 0 0 0-6 0z'/%3E%3C/svg%3E");
+}
+.ui-room__codeblock { margin: 0.2em 0 0.4em; }
+.ui-room__coderow { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45em; }
+.ui-room__code {
+  display: inline-block;
+  padding: 0.1em 0.5em 0.1em 0.7em;
+  font: 900 2.2em var(--font-display);
+  letter-spacing: 0.22em;
+  line-height: 1.15;
+  color: var(--ink);
+  background: var(--cream);
+  border: var(--line) solid var(--ink);
+  border-radius: 0.35em;
+  user-select: all;
+  -webkit-user-select: all;
+}
+.ui-room__copied { display: block; min-height: 1.2em; margin-top: 0.2em; font-size: 0.85em; font-weight: 800; color: var(--ink-soft); }
+.ui-room__counts { margin: 0.4em 0 0.3em; font-weight: 800; }
+
+.ui-members { list-style: none; margin: 0; padding: 0.25em; display: grid; gap: 0.2em; background: var(--cream); border: 0.14em solid var(--ink); border-radius: 0.7em; max-height: 30vh; overflow: auto; }
+.ui-member { display: flex; align-items: center; gap: 0.45em; min-height: 2.3em; padding: 0.15em 0.45em; border-radius: 0.45em; }
+.ui-member:nth-child(even) { background: rgba(230, 197, 140, 0.3); }
+.ui-member.is-me { outline: 0.14em solid var(--ink); background: #fff3d6; }
+.ui-member__crown { flex: none; width: 1.2em; height: 1.2em; }
+.ui-member.is-host .ui-member__crown {
+  background: #b47b00;
+  -webkit-mask: var(--g) center / contain no-repeat;
+  mask: var(--g) center / contain no-repeat;
+  --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M2 6.5l5.2 4.3L12 3.5l4.8 7.3L22 6.5 20 19H4zM4 20.5h16V23H4z'/%3E%3C/svg%3E");
+}
+.ui-member__name { font-weight: 900; font-family: var(--font-display); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-member__you { color: var(--ink-soft); font-weight: 700; font-size: 0.9em; }
+.ui-member__hosttag { margin-left: auto; }
+.ui-member__status { margin-left: auto; display: inline-flex; align-items: center; gap: 0.3em; padding: 0.05em 0.5em; font-size: 0.85em; font-weight: 900; border: 0.12em solid var(--ink); border-radius: 999px; white-space: nowrap; }
+.ui-member__hosttag + .ui-member__status { margin-left: 0.3em; }
+.ui-member__mark { display: inline-block; width: 0.85em; height: 0.85em; background: currentColor; -webkit-mask: var(--g) center / contain no-repeat; mask: var(--g) center / contain no-repeat; }
+.ui-member__status.is-ready, .ui-member__status.is-playing { background: var(--accent); }
+.ui-member__status.is-ready .ui-member__mark, .ui-member__status.is-playing .ui-member__mark { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M9 16.2 4.8 12l-2.3 2.3L9 20.8 21.5 8.3 19.2 6z'/%3E%3C/svg%3E"); }
+.ui-member__status.is-notReady { border-style: dashed; color: var(--ink-soft); background: transparent; }
+.ui-member__status.is-notReady .ui-member__mark { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill-rule='evenodd' d='M12 2a10 10 0 1 1 0 20a10 10 0 0 1 0-20zm0 3a7 7 0 1 0 0 14a7 7 0 0 0 0-14z'/%3E%3C/svg%3E"); }
+.ui-member__status.is-watching { background: var(--cream); }
+.ui-member__status.is-watching .ui-member__mark { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill-rule='evenodd' d='M12 5C6 5 1.5 12 1.5 12S6 19 12 19s10.5-7 10.5-7S18 5 12 5zm0 3.5a3.5 3.5 0 1 1 0 7a3.5 3.5 0 0 1 0-7z'/%3E%3C/svg%3E"); }
+.ui-member__kick { margin-left: 0.2em; min-height: 1.9em; padding: 0.1em 0.55em; }
+.ui-room__bots { margin: 0.45em 0 0; }
+.ui-room__bots:empty { display: none; }
+
+.ui-room__status { margin: 0.5em 0 0.2em; font: 900 1.15em var(--font-display); }
+.ui-room__status.is-countdown { text-align: center; font-size: 1.3em; }
+.ui-room__actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0.5em; margin-top: 0.7em; }
+.ui-room__start { display: grid; gap: 0.1em; margin-left: auto; }
+.ui-room__waithost { display: flex; align-items: center; gap: 0.4em; margin: 0.35em auto 0.35em 0; font-weight: 800; color: var(--ink-soft); }
+.ui-room__waithost .ui-glyph--hourglass { animation: ui-hourglass 2.4s ease-in-out infinite; }
+.ui-ready__box { display: inline-block; width: 1.1em; height: 1.1em; border: 0.16em solid var(--ink); border-radius: 0.3em; background: var(--cream); }
+.ui-btn.is-on .ui-ready__box {
+  background: var(--ink);
+  -webkit-mask: none;
+  box-shadow: inset 0 0 0 0.12em var(--cream);
+}
+.ui-btn[aria-pressed='true'] { background: var(--accent-2); }
+.ui-room__foot { justify-content: space-between; }
+.ui-panel--room .ui-controls { margin-top: 0.7em; }
+
+/* Map side: vote panel or map card */
+.ui-room__side { display: grid; align-content: center; justify-items: end; gap: 1em; width: min(26em, 40vw); }
+.ui-panel--vote, .ui-panel--mapcard { width: 100%; }
+.ui-vote__options { display: grid; grid-template-columns: repeat(auto-fit, minmax(6.5em, 1fr)); gap: 0.5em; }
+.ui-vote__btn {
+  display: grid;
+  justify-items: center;
+  gap: 0.2em;
+  padding: 0.7em 0.4em 0.55em;
+  font: inherit;
+  color: var(--ink);
+  background: var(--cream);
+  border: 0.16em solid var(--ink);
+  border-radius: 0.8em;
+  box-shadow: 0 0.22em 0 var(--ink);
+  cursor: pointer;
+  transition: transform 60ms ease-out, box-shadow 60ms ease-out, background-color 60ms ease-out;
+}
+.ui-vote__btn:hover { transform: translateY(-0.06em); background: #fff3d6; }
+.ui-vote__btn:active { transform: translateY(0.14em); box-shadow: 0 0.05em 0 var(--ink); }
+.ui-vote__btn:focus-visible { outline: 0.2em solid var(--accent-2); outline-offset: 0.15em; }
+.ui-vote__btn:disabled { cursor: not-allowed; border-style: dashed; background: var(--sand-dark); box-shadow: none; transform: none; color: var(--ink-soft); }
+.ui-vote__btn > .ui-mapglyph { width: 1.6em; height: 1.6em; }
+.ui-vote__name { font: 900 1.05em var(--font-display); }
+.ui-vote__count { font-weight: 800; font-size: 0.88em; }
+.ui-vote__yours { display: none; align-items: center; gap: 0.2em; font-size: 0.8em; font-weight: 900; }
+.ui-vote__yours .ui-seg__tick { display: inline-block; }
+.ui-vote__btn.is-mine { background: var(--accent); border-width: 0.24em; }
+.ui-vote__btn.is-mine .ui-vote__yours { display: inline-flex; }
+.ui-vote__note:empty { display: none; }
+
+.ui-mapcard__head { display: flex; align-items: center; gap: 0.5em; }
+.ui-mapcard__glyph { width: 1.4em; height: 1.4em; }
+.ui-mapcard__title { margin: 0.3em 0 0.1em; }
+.ui-mapcard__tagline { margin: 0 0 0.6em; font-style: italic; }
+.ui-minimap--card { width: 100%; height: auto; aspect-ratio: 1; max-height: 40vh; margin: 0 auto; background: #3a3f47; }
+.ui-minimap--card:not(.is-indoor) { background: #1f7fbf; }
+.ui-panel--mapcard.is-big .ui-minimap--card { max-height: 52vh; }
+.ui-mapcard__legend { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4em; margin: 0.6em 0 0; font-weight: 800; }
+.ui-legend__route { display: inline-block; width: 2.2em; height: 0.36em; background: repeating-linear-gradient(90deg, var(--ink) 0 0.45em, transparent 0.45em 0.75em); border-radius: 0.2em; }
+.ui-legend__sep { color: var(--ink-soft); }
+.ui-legend__plane { display: inline-block; width: 1.1em; height: 1.1em; background: var(--ink); -webkit-mask: var(--g) center / contain no-repeat; mask: var(--g) center / contain no-repeat; --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 1l1.6 6 8.4 5v2.2l-8.4-2.4-.6 6 3 2.2V22l-4-1.2L8 22v-1.8l3-2.2-.6-6L2 14.2V12l8.4-5z'/%3E%3C/svg%3E"); }
+.ui-mapcard__loading { margin: 0.6em 0 0; }
+
+/* Countdown: the panel compacts (members collapse into a line of chips) and the map card grows. */
+.ui-screen--room.is-countdown .ui-room__codeblock .ui-label,
+.ui-screen--room.is-countdown .ui-room__copied,
+.ui-screen--room.is-countdown .ui-room__bots,
+.ui-screen--room.is-countdown .ui-lobby__bots,
+.ui-screen--room.is-countdown .ui-controls { display: none; }
+.ui-screen--room.is-countdown .ui-room__code { font-size: 1.3em; }
+.ui-screen--room.is-countdown .ui-members { display: flex; flex-wrap: wrap; gap: 0.3em; max-height: none; background: transparent; border: 0; padding: 0; }
+.ui-screen--room.is-countdown .ui-member { min-height: 0; padding: 0.1em 0.5em; background: var(--cream); border: 0.12em solid var(--ink); border-radius: 999px; font-size: 0.9em; }
+.ui-screen--room.is-countdown .ui-member__you,
+.ui-screen--room.is-countdown .ui-member__hosttag,
+.ui-screen--room.is-countdown .ui-member__kick { display: none; }
+.ui-screen--room.is-countdown .ui-member__status { margin-left: 0.1em; padding: 0 0.3em; font-size: 0.8em; }
+.ui-screen--room.is-countdown .ui-member__status { font-size: 0; gap: 0; }
+.ui-screen--room.is-countdown .ui-member__status .ui-member__mark { font-size: 0.8rem; width: 0.9em; height: 0.9em; }
+.ui-screen--room.is-countdown .ui-room__side { width: min(34em, 48vw); }
+.ui-screen--room .ui-lobby__big[hidden] { display: none; }
+
+/* Menu toasts: top centre on the browser, bottom right in the waiting room. */
+.ui-menutoasts { position: absolute; z-index: 3; display: grid; gap: 0.3em; justify-items: center; left: 50%; top: var(--edge); transform: translateX(-50%); }
+.ui[data-screen='room'] .ui-menutoasts { left: auto; right: var(--edge); top: auto; bottom: var(--edge); transform: none; justify-items: end; }
+.ui:not([data-screen='browser']):not([data-screen='room']) .ui-menutoasts { display: none; }
+.ui-menutoast { font-size: 0.95em; animation: ui-rise-in 160ms ease-out; }
+
+/* ---- HUD: first-person layout (UI.md §13.2) */
+.ui-hud__br { display: grid; gap: 0.55em; justify-items: end; min-width: 0; }
+.ui-hud__ammo { display: grid; gap: 0.35em; justify-items: end; min-width: 11em; }
+.ui-hud__slots { display: flex; gap: 0.35em; align-items: flex-end; }
+.ui-hud__slots .ui-slot { min-width: 0; grid-template-columns: auto auto; padding: 0.35em 0.5em 0.35em; gap: 0 0.3em; }
+.ui-hud__slots .ui-slot__name { display: none; }
+.ui-hud__slots .ui-slot.is-active .ui-slot__name { display: block; }
+.ui-hud__slots .ui-slot.is-active { transform: translateY(-0.2em); }
+.ui-hud__slots .ui-slot.is-active::after { display: none; }
+.ui-hud__slots .ui-slot.is-active { box-shadow: 0 0.3em 0 var(--ink); }
+.ui-hud__hint { left: var(--edge); right: auto; bottom: calc(var(--edge) + 6.8em); transform: none; max-width: min(26em, 40%); text-align: left; }
+.ui-hud__hint .ui-hint { text-align: left; }
+.ui-toasts { bottom: 13em; }
+.ui-hud.is-dropping .ui-hud__slots,
+.ui-hud.is-aboard .ui-hud__bl,
+.ui-hud.is-aboard .ui-hud__br { display: none; }
+
+/* Crosshair cases: dot only (fists, grenade) and the dim FP spectate dot. */
+.ui-crosshair.is-dot .ui-crosshair__line,
+.ui-crosshair.is-spectate .ui-crosshair__line { display: none; }
+.ui-crosshair.is-spectate { opacity: 0.6; }
+
+/* ADS blocked ("Can't aim while reloading") under the centre, above the pickup prompt. */
+.ui-adsblock { position: absolute; left: 0; top: 3.2em; transform: translateX(-50%); font-size: 0.9em; border-style: dashed; }
+.ui-adsblock .ui-glyph--warn { width: 1em; height: 1em; color: var(--accent); }
+
+/* Danger blink by fuse time; the last second also thickens the ring (survives reduced motion). */
+.ui-danger__ring { animation-duration: var(--blink, 420ms); }
+.ui-danger.is-urgent .ui-danger__ring { border-width: 0.36em; border-style: double; }
+
+/* Spectate: [V] view chip (eye = first person, camera = chase). */
+.ui-spectate__view { display: inline-flex; align-items: center; gap: 0.35em; padding: 0.1em 0.5em; font-size: 0.9em; border: 0.12em solid var(--ink); border-radius: 0.5em; background: var(--cream); }
+.ui-spectate__viewglyph { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill-rule='evenodd' d='M12 5C6 5 1.5 12 1.5 12S6 19 12 19s10.5-7 10.5-7S18 5 12 5zm0 3.5a3.5 3.5 0 1 1 0 7a3.5 3.5 0 0 1 0-7z'/%3E%3C/svg%3E"); }
+.ui-spectate__view.is-chase .ui-spectate__viewglyph { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill-rule='evenodd' d='M2 6.5h4.5l2-3h7l2 3H22V20H2zm10 3a4 4 0 1 0 0 8a4 4 0 0 0 0-8z'/%3E%3C/svg%3E"); }
+
+/* Death cam: the card moves to the lower third so the orbit stays visible. */
+.ui-screen--death.is-lower { align-items: flex-end; padding-bottom: max(6vh, 1em); background: linear-gradient(transparent 45%, rgba(42, 29, 51, 0.55)); }
+.ui-screen--death.is-lower .ui-panel--death { width: min(24em, 92vw); animation: ui-rise-in 160ms ease-out; }
+.ui-screen--death.is-lower .ui-panel--death > .ui-glyph--lifebuoy { width: 2.2em; height: 2.2em; }
+
+/* ---- Drop HUD (aboard / freefall / chute) */
+.ui-drop { position: absolute; inset: 0; }
+.ui-drop__top { position: absolute; top: var(--edge); left: 50%; transform: translateX(-50%); display: flex; gap: 0.5em; }
+.ui-drop__timer { font-size: 1.1em; }
+.ui-drop__timer .ui-glyph--clock { color: var(--accent); }
+.ui-drop__timer.is-urgent { color: var(--ink); background: repeating-linear-gradient(135deg, var(--accent) 0 0.7em, #ffd877 0.7em 1.4em); }
+.ui-drop__timer.is-urgent .ui-glyph--clock { color: var(--ink); }
+.ui-drop__aboard .ui-glyph { color: var(--accent); }
+.ui-drop__prompts { position: absolute; left: 50%; top: calc(50% + 6.4em); transform: translateX(-50%); display: grid; justify-items: center; gap: 0.4em; }
+.ui-drop__prompt { font-size: 1.15em; }
+.ui-drop.is-aboard .ui-drop__prompt:not(.ui-drop__prompt--second) { font-size: 1.35em; padding: 0.4em 1.1em; }
+.ui-drop__prompt.is-blocked { border-style: dashed; color: #d9cfd9; }
+.ui-drop__prompt--second { background: var(--accent); color: var(--ink); }
+.ui-drop.is-hint .ui-drop__prompt:not(.ui-drop__prompt--second) { visibility: hidden; }
+.ui-alt { position: absolute; right: calc(var(--edge) + 2em); top: 50%; transform: translateY(-50%); display: grid; justify-items: center; gap: 0.3em; }
+.ui-alt__track { position: relative; width: 0.9em; height: 30vh; background: var(--ink-glass); border: 0.14em solid var(--ink); border-radius: 0.5em; }
+.ui-alt__fill { position: absolute; left: 0.12em; right: 0.12em; bottom: 0.12em; height: calc((100% - 0.24em) * var(--r, 0)); background: var(--accent-2); border-radius: 0.3em; }
+.ui-alt__mark { position: absolute; left: -0.5em; right: -0.5em; bottom: calc(100% * var(--m, 0)); height: 0.22em; background: var(--cream); box-shadow: 0 0 0 0.1em var(--ink); }
+.ui-alt__label { position: absolute; right: calc(100% + 0.5em); top: 50%; transform: translateY(-50%); padding: 0.1em 0.5em; font-size: 0.85em; font-weight: 800; color: var(--cream); background: var(--ink-glass); border-radius: 0.4em; white-space: nowrap; }
+.ui-alt__value { padding: 0.05em 0.45em; font: 900 0.95em var(--font-display); color: var(--cream); background: var(--ink-glass); border-radius: 0.4em; }
+.ui-alt__value:empty { display: none; }
+
+/* ---- Narrow widths: stacked browser cards, single-column waiting room (UI.md §12.7) */
+@media (max-width: 900px) {
+  .ui-hud__slots .ui-slot.is-active .ui-slot__name { display: none; }
+  .ui-screen--room { flex-direction: column; justify-content: flex-start; overflow: auto; }
+  .ui-panel--room, .ui-room__side, .ui-screen--room.is-countdown .ui-room__side { width: min(30em, 94vw); }
+  .ui-room__side { justify-items: stretch; order: -1; }
+}
+@media (max-width: 600px) {
+  .ui-roomtable__head { display: none; }
+  .ui-roomrow { grid-template-columns: 1fr auto; min-height: 3.2em; }
+  .ui-roomrow__name { grid-column: 1 / -1; }
+  .ui-browser__actions { width: 100%; justify-content: space-between; }
+  .ui-codeform__row { flex-wrap: wrap; }
+  .ui-input--code { flex: 1; width: auto; }
+  .ui-panel--roomdlg { width: 100vw; max-height: 100vh; border-radius: 0; }
+}
+
+@keyframes ui-shimmer { from { background-position: 100% 0; } to { background-position: -50% 0; } }
+@keyframes ui-hourglass { 0%, 70% { transform: none; } 85%, 100% { transform: rotate(180deg); } }
+
+.ui.is-reduced-motion .ui-skel,
+.ui.is-reduced-motion .ui-room__waithost .ui-glyph--hourglass,
+.ui.is-reduced-motion .ui-btn.is-spinning .ui-glyph--refresh,
+.ui.is-reduced-motion .ui-menutoast,
+.ui.is-reduced-motion .ui-screen--death.is-lower .ui-panel--death,
+.ui.is-reduced-motion .ui-room__big.is-pop,
+.ui.is-reduced-motion .ui-vote__btn,
+.ui.is-reduced-motion .ui-roomrow { animation: none; transition: none; }
+.ui.is-reduced-motion .ui-btn__spin { animation-duration: 2.4s; }
+.ui.is-reduced-motion .ui-vote__btn:hover,
+.ui.is-reduced-motion .ui-vote__btn:active,
+.ui.is-reduced-motion .ui-roomrow:active { transform: none; }
+
+/* BUG-009: "Helmet" overflowed its gear cell at 960×540. The vitals panel is a little wider at small sizes, the badge
+ * shrinks, and the label clips with an ellipsis as a last resort (the sr text still reads the full label). */
+.ui-gearrow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+.ui-gear { min-width: 0; }
+.ui-gear__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+@media (max-height: 560px), (max-width: 900px) {
+  .ui-hud__bl { width: 17em; }
+  .ui-gear__icon { font-size: 1.35em; }
+  .ui-gear { gap: 0.25em; padding-right: 0.3em; }
+  .ui-gear__text { font-size: 0.76em; }
+}
+/* ADS-blocked hint sits above the crosshair (below it are the reload label, danger icons and the pickup prompt). */
+.ui-adsblock { top: -4.6em; }
+/* Short viewports: the waiting room drops the controls list (it is in the pause screen too). */
+@media (max-height: 820px) {
+  .ui-panel--room .ui-controls { display: none; }
+}

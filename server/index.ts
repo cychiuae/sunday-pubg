@@ -19,6 +19,9 @@ async function main(): Promise<void> {
     distDir: config.distDir,
     lag: config.lag,
     seed: config.seed,
+    maxRooms: config.maxRooms,
+    maxConnections: config.maxConnections,
+    mapPin: config.mapPin,
     maxConnsPerIp: config.maxConnsPerIp,
     originPolicy: config.originPolicy,
     trustProxy: config.trustProxy,
@@ -30,7 +33,9 @@ async function main(): Promise<void> {
     config.lag.latencyMs || config.lag.jitterMs
       ? `simulated lag ${config.lag.latencyMs} ms RTT + ${config.lag.jitterMs} ms jitter`
       : null,
-    `seed ${config.seed}`,
+    config.seed !== null ? `SEED ${config.seed} (deterministic room seeds)` : 'random room seeds',
+    `max ${config.maxRooms} rooms / ${config.maxConnections} connections`,
+    config.mapPin ? `MAP pinned to ${config.mapPin}` : null,
     `ws origins: ${describeOriginPolicy(config.originPolicy)}`,
   ].filter(Boolean);
   if (config.production && config.originPolicy.any) {

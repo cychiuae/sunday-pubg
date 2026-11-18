@@ -10,11 +10,45 @@
  * centre, and every target is additionally kept within (r_i - r_last) of F, so F is always reachable in the last
  * phase. Early phases stay close to uniform (that disc is large); later ones converge on F. The last phase first tries
  * the zoneCenters that satisfy containment (F first), exactly as zone.md says.
+ *
+ * M2b: the first centre is (0, 0) on every map. Indoor maps accept sampled centres inside the floor inset by
+ * zone.indoorCenterInset instead of the land check (maps.md 2.2); fallbacks are projected into that rectangle.
  */
 import type { Balance } from '../balance';
 import type { Rng } from '../math';
-import type { MapData, Vec2, ZoneState } from '../types';
+import { isIndoor } from '../maps';
+import type { AnyMapData, Rect, Vec2, ZoneState } from '../types';
 import { heightAt } from './terrain';
+
+/**
+ * M2b (maps.md 2.2, ADR 0005 §3 #5): indoor maps replace the land check with "inside the floor rectangle inset by
+ * zone.indoorCenterInset". The rectangle collapses to its centre line when the inset exceeds a half extent.
+ */
+function centerArea(map: AnyMapData, balance: Balance): Rect | null {
+  if (!isIndoor(map)) return null;
+  const f = map.floor;
+  const inset = balance.zone.indoorCenterInset ?? 0;
+  const ix = Math.min(inset, (f.maxX - f.minX) / 2);
+  const iz = Math.min(inset, (f.maxZ - f.minZ) / 2);
+  return { minX: f.minX + ix, maxX: f.maxX - ix, minZ: f.minZ + iz, maxZ: f.maxZ - iz };
+}
+const inArea = (r: Rect, x: number, z: number): boolean => x >= r.minX && x <= r.maxX && z >= r.minZ && z <= r.maxZ;
+/** Projection onto the area (non-expansive, so containment around a centre already inside the area is kept). */
+const clampToArea = (r: Rect | null, c: Vec2): Vec2 =>
+  r ? { x: Math.min(r.maxX, Math.max(r.minX, c.x)), z: Math.min(r.maxZ, Math.max(r.minZ, c.z)) } : c;
+
+/** Accepts a sampled centre: island = on land (landCheckMinHeight), indoor = inside the inset floor rectangle. */
+function centerAccepted(map: AnyMapData, balance: Balance, x: number, z: number): boolean {
+  const area = centerArea(map, balance);
+  if (area) return inArea(area, x, z);
+  return heightAt(x, z, map) >= balance.zone.landCheckMinHeight;
+}
+
+/** Final-centre candidates: map.zoneCenters (indoor: only those inside the inset floor rectangle). */
+function finalCandidates(map: AnyMapData, balance: Balance): readonly Vec2[] {
+  const area = centerArea(map, balance);
+  return area ? map.zoneCenters.filter((c) => inArea(area, c.x, c.z)) : map.zoneCenters;
+}
 
 export interface ZoneRuntime {
   state: ZoneState;
@@ -54,17 +88,18 @@ export function pickTargetCenter(
   r: number,
   finalCenter: Vec2 | null,
   balance: Balance,
-  map: MapData,
+  map: AnyMapData,
   rng: Rng,
 ): Vec2 {
   const z = balance.zone;
   const allowed = Math.max(0, prevRadius - r);
   const n = z.phases.length;
+  const candidates = finalCandidates(map, balance);
   // Last phase (zone.md): first try the map's candidates that satisfy containment (prefer the chosen final one).
-  if (i === n - 1 && map.zoneCenters.length > 0) {
+  if (i === n - 1 && candidates.length > 0) {
     const ok = (c: Vec2): boolean => Math.hypot(c.x - prevCenter.x, c.z - prevCenter.z) <= allowed + 1e-9;
     if (finalCenter && ok(finalCenter)) return { x: finalCenter.x, z: finalCenter.z };
-    const reachable = map.zoneCenters.filter(ok);
+    const reachable = candidates.filter(ok);
     if (reachable.length > 0) {
       const c = rng.pick(reachable);
       return { x: c.x, z: c.z };
@@ -86,30 +121,32 @@ export function pickTargetCenter(
     const x = sc.x + Math.cos(a) * d;
     const zz = sc.z + Math.sin(a) * d;
     if (!inContainment(x, zz) || !inFinal(x, zz)) continue;
-    if (heightAt(x, zz, map) >= z.landCheckMinHeight) return { x, z: zz };
+    if (centerAccepted(map, balance, x, zz)) return { x, z: zz };
   }
+  const area = centerArea(map, balance);
   if (finalCenter) {
     // Step from the previous centre toward F as far as containment allows (always inside both discs).
     const dx = finalCenter.x - prevCenter.x;
     const dz = finalCenter.z - prevCenter.z;
     const d = Math.hypot(dx, dz);
     const k = d > allowed && d > 0 ? allowed / d : 1;
-    return { x: prevCenter.x + dx * k, z: prevCenter.z + dz * k };
+    return clampToArea(area, { x: prevCenter.x + dx * k, z: prevCenter.z + dz * k });
   }
   // zone.md fallback: 50% of the way toward the origin, clamped to the containment disc.
   const len = Math.hypot(prevCenter.x, prevCenter.z);
   if (len < 1e-9) return { x: prevCenter.x, z: prevCenter.z };
   const step = Math.min(len * 0.5, allowed);
-  return { x: prevCenter.x - (prevCenter.x / len) * step, z: prevCenter.z - (prevCenter.z / len) * step };
+  return clampToArea(area, { x: prevCenter.x - (prevCenter.x / len) * step, z: prevCenter.z - (prevCenter.z / len) * step });
 }
 
 const targetRadiusFor = (balance: Balance, i: number): number =>
   i >= balance.zone.phases.length ? 0 : balance.zone.phases[i]!.radiusFraction * balance.zone.startRadius;
 
 /** Zone at match start (phase 0 wait begins at `nowMs`, target chosen immediately). */
-export function createZone(balance: Balance, map: MapData, rng: Rng, nowMs: number): ZoneRuntime {
+export function createZone(balance: Balance, map: AnyMapData, rng: Rng, nowMs: number): ZoneRuntime {
   const z = balance.zone;
-  const finalCenter = map.zoneCenters.length > 0 ? rng.pick(map.zoneCenters) : null;
+  const candidates = finalCandidates(map, balance);
+  const finalCenter = candidates.length > 0 ? rng.pick(candidates) : null;
   const center = { x: 0, z: 0 };
   const rt: ZoneRuntime = {
     state: {
@@ -133,7 +170,7 @@ export function createZone(balance: Balance, map: MapData, rng: Rng, nowMs: numb
   return rt;
 }
 
-function beginWait(rt: ZoneRuntime, i: number, balance: Balance, map: MapData, rng: Rng): void {
+function beginWait(rt: ZoneRuntime, i: number, balance: Balance, map: AnyMapData, rng: Rng): void {
   const s = rt.state;
   s.phaseIndex = i;
   s.shrinking = false;
@@ -150,7 +187,7 @@ function beginWait(rt: ZoneRuntime, i: number, balance: Balance, map: MapData, r
 /**
  * Advances the zone to `nowMs`. Returns true when the phase index or shrinking flag changed.
  */
-export function updateZone(rt: ZoneRuntime, balance: Balance, map: MapData, rng: Rng, nowMs: number): boolean {
+export function updateZone(rt: ZoneRuntime, balance: Balance, map: AnyMapData, rng: Rng, nowMs: number): boolean {
   const s = rt.state;
   let changed = false;
   // Process every boundary that has passed (handles large dt).

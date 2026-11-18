@@ -92,6 +92,26 @@ describe('sim purity (C1)', () => {
     expect(bad).toEqual([]);
   });
 
+  it('M2b: the sim import closure never reaches src/shared/kits (map kit data is passed in through MapData.kit)', () => {
+    const KITS = join(SHARED, 'kits');
+    const seen = new Set<string>();
+    const bad: string[] = [];
+    const queue = [...files];
+    while (queue.length) {
+      const f = queue.pop()!;
+      if (seen.has(f)) continue;
+      seen.add(f);
+      for (const spec of importsOf(f)) {
+        const target = resolveImport(f, spec);
+        if (target === null) continue;
+        if (target === KITS || target.startsWith(KITS + '/')) bad.push(`${relative(ROOT, f)} imports ${relative(ROOT, target)}`);
+        else if (target.endsWith('.ts') && existsSync(target)) queue.push(target);
+      }
+    }
+    expect(seen.size).toBeGreaterThan(files.length - 1);
+    expect(bad).toEqual([]);
+  });
+
   it('no sim runtime file imports the offline tools/ folder', () => {
     const bad = files.filter((f) => importsOf(f).some((s) => s.includes('tools/')));
     expect(bad.map((f) => relative(ROOT, f))).toEqual([]);

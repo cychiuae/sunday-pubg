@@ -2,6 +2,10 @@
  * Cross-module integration over real sockets (owner: qa-tester): real ws server (server/app.ts) + real World +
  * two protocol clients (server/testClient.ts). No bots.
  *
+ * M2b: clients say `hello` and meet in a room (A creates a private no-bot room on island01, B joins by code, A starts).
+ * `worldDrop: false` keeps the M1 spawn drop (dropHeight 2), so the carrier drop does not slow the fight down; the
+ * carrier drop is covered by tests/e2e/m2b.spec.ts and the sim tests.
+ *
  * Scenario: A and B drop, A walks to the nearest gun and presses interact, B walks up to A, A aims at B's chest and
  * fires until B dies. Checks pickup, hitscan damage, kill credit, the match ending with A as winner, and the
  * standings both clients receive. A second suite covers a cheating client (speed hack, fire-rate hack, garbage).
@@ -9,7 +13,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startServer, type RunningServer } from '../../server/app';
 import { loadBalance } from '../../server/config';
-import { SILENT_LOGGER } from '../../server/Room';
+import { SILENT_LOGGER } from '../../server/common';
 import { TestClient } from '../../server/testClient';
 import { WS_PATH } from '../../src/shared/constants';
 import type { EventsMessage, SnapshotMessage } from '../../src/shared/protocol/messages';
@@ -84,6 +88,25 @@ async function walkTo(drv: Driver, target: () => Vec3, stopAt: number, timeoutMs
   return false;
 }
 
+/** M2b handshake: A says hello and creates a private, bot-free island room; B says hello and joins by code; A starts. */
+async function pair(server: RunningServer, nameA: string, nameB: string): Promise<{ a: TestClient; b: TestClient }> {
+  const url = `ws://127.0.0.1:${server.port}${WS_PATH}`;
+  const a = new TestClient(url);
+  const b = new TestClient(url);
+  await Promise.all([a.opened(), b.opened()]);
+  await a.helloAndWait(nameA);
+  await b.helloAndWait(nameB);
+  const room = await a.createAndWait({ visibility: 'private', fillBots: false, mapMode: 'island01' });
+  const joined = await b.joinCodeAndWait(room.code);
+  expect(joined.id).toBe(room.id);
+  const rid = a.startMatch();
+  // Success has no direct answer (the room goes to countdown); a reject for this rid fails fast.
+  await until(() => a.room?.phase === 'countdown' || a.messages.some((m) => m.t === 'reject' && m.rid === rid), 5000, 'countdown');
+  const rej = a.messages.find((m) => m.t === 'reject' && m.rid === rid);
+  if (rej) throw new Error(`startMatch rejected: ${JSON.stringify(rej)}`);
+  return { a, b };
+}
+
 describe('PvP over real sockets: A picks up a gun and kills B', () => {
   let server: RunningServer;
   let a: TestClient;
@@ -98,14 +121,9 @@ describe('PvP over real sockets: A picks up a gun and kills B', () => {
         loot: { spawnChance: 1 },
       }),
     );
-    server = await startServer({ createWorld, balance, port: 0, host: '127.0.0.1', log: SILENT_LOGGER, seed: 20261118 });
-    const url = `ws://127.0.0.1:${server.port}${WS_PATH}`;
-    a = new TestClient(url);
-    b = new TestClient(url);
-    await Promise.all([a.opened(), b.opened()]);
-    a.join('Shooter');
-    b.join('Target');
-    await until(() => !!a.welcome && !!b.welcome, 3000, 'welcome');
+    server = await startServer({ createWorld, balance, port: 0, host: '127.0.0.1', log: SILENT_LOGGER, seed: 20261118, worldDrop: false });
+    ({ a, b } = await pair(server, 'Shooter', 'Target'));
+    await until(() => !!a.welcome && !!b.welcome, 5000, 'welcome');
     da = new Driver(a);
     db = new Driver(b);
   });
@@ -195,9 +213,14 @@ describe('PvP over real sockets: A picks up a gun and kills B', () => {
     // The results snapshot can arrive one tick after the matchEnded event.
     await until(() => a.latest?.match.phase === 'results', 2000, 'results phase');
 
-    // 5. Back to lobby after resultsSeconds; both are re-queued and a new match starts.
+    // 5. M2b: after resultsSeconds both return to the same waiting room (rooms.md AT8/AT9); the host starts again.
+    const roomId = a.room!.id;
+    await until(() => a.room?.phase === 'waiting' && b.room?.phase === 'waiting' && a.room.matchId === null, 8000, 'back to waiting');
+    expect(b.room!.id).toBe(roomId);
+    expect(a.room!.members.every((m) => !m.ready)).toBe(true);
     const matchId = a.latest!.match.matchId;
-    await until(() => (a.latest?.match.matchId ?? 0) > matchId && a.latest?.match.phase === 'playing', 8000, 'next match');
+    a.startMatch();
+    await until(() => (a.latest?.match.matchId ?? 0) !== matchId && a.latest?.match.phase === 'playing', 10_000, 'next match');
     const snap = (await a.waitFor((m) => m.t === 'snapshot', 2000, false)) as SnapshotMessage;
     expect(snap.snap.players.filter((p) => p.alive)).toHaveLength(2);
   }, 120_000);
@@ -212,13 +235,8 @@ describe('cheating client: the server clamps and drops what a hacked client send
     const balance = loadBalance(
       JSON.stringify({ match: { countdownSeconds: 0.5, minHumansToStart: 2, targetPlayers: 2, dropHeight: 2 } }),
     );
-    server = await startServer({ createWorld, balance, port: 0, host: '127.0.0.1', log: SILENT_LOGGER, seed: 99 });
-    const url = `ws://127.0.0.1:${server.port}${WS_PATH}`;
-    cheat = new TestClient(url);
-    honest = new TestClient(url);
-    await Promise.all([cheat.opened(), honest.opened()]);
-    cheat.join('Cheater');
-    honest.join('Honest');
+    server = await startServer({ createWorld, balance, port: 0, host: '127.0.0.1', log: SILENT_LOGGER, seed: 99, worldDrop: false });
+    ({ a: cheat, b: honest } = await pair(server, 'Cheater', 'Honest'));
     await until(() => cheat.latest?.match.phase === 'playing', 6000, 'playing');
     // Keep both sockets "alive" in the World with idle inputs until landed.
     const idle = setInterval(() => {
@@ -227,7 +245,7 @@ describe('cheating client: the server clamps and drops what a hacked client send
     }, 1000 / 30);
     await until(() => !!cheat.latest && !me(cheat).anim.dropping, 8000, 'landed');
     clearInterval(idle);
-  });
+  }, 20_000);
 
   afterAll(async () => {
     cheat?.close();
@@ -247,7 +265,7 @@ describe('cheating client: the server clamps and drops what a hacked client send
     // sprintSpeed 7.2 m/s; allow 15% for snapshot timing.
     expect(moved / secs, `moved ${moved.toFixed(1)} m in ${secs.toFixed(2)} s`).toBeLessThanOrEqual(7.2 * 1.15);
     expect(cheat.closed).toBeNull();
-  });
+  }, 15_000); // 2.2 s of wall-clock sleeps: the 5 s default flakes under CPU load (M2a D1 flake hunt)
 
   it('fire-rate hack: fists fire no faster than fireIntervalMs even when fire toggles every input', async () => {
     const id = cheat.welcome!.playerId;
@@ -263,21 +281,28 @@ describe('cheating client: the server clamps and drops what a hacked client send
     const shots = events(cheat).filter((e) => e.type === 'shot' && e.shooterId === id).length - before;
     // fists fireIntervalMs 450 => at most ceil(3000 / 450) + 1 = 8 in 3 s.
     expect(shots).toBeLessThanOrEqual(8);
-  });
+  }, 15_000); // 3.2 s of wall-clock sleeps against a 5 s default timeout
 
   it('garbage in valid frames (null numbers, huge seq jumps, bad slot) never crashes the room', async () => {
-    const before = await (await fetch(`http://127.0.0.1:${server.port}/healthz`)).json() as { tick: number };
+    // M2b /healthz: manager stats with one entry per room (this suite has exactly one room).
+    type Health = { ok: boolean; perRoom: { tick: number }[] };
+    const before = (await (await fetch(`http://127.0.0.1:${server.port}/healthz`)).json()) as Health;
     const raw = [
       '{"t":"input","input":{"seq":999999,"dt":null,"moveForward":"x","moveRight":0,"yaw":0,"pitch":0,"sprint":0,"fire":0,"jump":0,"reload":0,"interact":0,"useHeal":0,"selectSlot":9}}',
       '{"t":"input","input":{"seq":1e400,"dt":0.03}}',
       '{"t":"input","input":{"__proto__":{"polluted":true},"seq":1000000,"dt":0.03,"moveForward":0,"moveRight":0,"yaw":1e308,"pitch":-1e308,"sprint":false,"fire":false,"jump":false,"reload":false,"interact":false,"useHeal":false,"selectSlot":-1}}',
       '{"t":"join","name":"again","protocolVersion":1}',
+      '{"t":"hello","name":"again","protocolVersion":3}',
+      '{"t":"startMatch","rid":7}',
+      '{"t":"kick","memberId":-1,"rid":8}',
+      '{"t":"vote","choice":"moon"}',
     ];
     for (const r of raw) cheat.send(r);
     await sleep(500);
-    const after = await (await fetch(`http://127.0.0.1:${server.port}/healthz`)).json() as { tick: number; ok: boolean };
+    const after = (await (await fetch(`http://127.0.0.1:${server.port}/healthz`)).json()) as Health;
     expect(after.ok).toBe(true);
-    expect(after.tick).toBeGreaterThan(before.tick);
+    expect(after.perRoom).toHaveLength(1);
+    expect(after.perRoom[0]!.tick).toBeGreaterThan(before.perRoom[0]!.tick);
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
     // The honest client is still being served snapshots.
     const s = await honest.waitFor((m) => m.t === 'snapshot', 2000, false);
@@ -285,5 +310,5 @@ describe('cheating client: the server clamps and drops what a hacked client send
     // The extreme yaw/pitch input (if accepted) must not produce NaN positions.
     const p = me(cheat);
     expect(Number.isFinite(p.pos.x) && Number.isFinite(p.yaw) && Number.isFinite(p.pitch)).toBe(true);
-  });
+  }, 15_000);
 });

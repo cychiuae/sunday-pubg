@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { makePlayer, makeSnapshot } from '../shared/protocol/testing';
-import { BUFFER_KEEP_MS, SnapshotBuffer, TELEPORT_DIST, interpolatePlayers } from './SnapshotBuffer';
+import { BUFFER_KEEP_MS, SnapshotBuffer, TELEPORT_DIST, interpStanceProgress, interpolatePlayers } from './SnapshotBuffer';
 
 const at = (tick: number, serverTime: number, x: number, yaw = 0) =>
   makeSnapshot(tick, [makePlayer(1, { pos: { x, y: 0, z: -x }, yaw, velY: x })], { serverTime });
@@ -90,5 +90,31 @@ describe('SnapshotBuffer.sample', () => {
     const newest = 99 * 50;
     expect(b.size).toBeLessThanOrEqual(BUFFER_KEEP_MS / 50 + 2);
     expect(b.sample(newest - BUFFER_KEEP_MS + 10)!.players[0]!.pos.x).toBeCloseTo((newest - BUFFER_KEEP_MS + 10) / 50);
+  });
+});
+
+describe('M2a stanceProgress interpolation', () => {
+  const p = (stanceFrom: 'stand' | 'crouch' | 'prone', stance: 'stand' | 'crouch' | 'prone', stanceProgress: number) =>
+    makePlayer(1, { stanceFrom, stance, stanceProgress });
+
+  it('lerps inside one transition', () => {
+    expect(interpStanceProgress(p('stand', 'prone', 0.2), p('stand', 'prone', 0.6), 0.5)).toBeCloseTo(0.4);
+    expect(interpStanceProgress(p('stand', 'prone', 0.8), p('prone', 'prone', 1), 0.5)).toBe(1); // settled: from changed
+  });
+
+  it('takes the newer value when the transition changed or restarted', () => {
+    expect(interpStanceProgress(p('stand', 'stand', 1), p('stand', 'crouch', 0.3), 0.5)).toBe(0.3);
+    expect(interpStanceProgress(p('stand', 'crouch', 0.5), p('crouch', 'prone', 0.1), 0.5)).toBe(0.1);
+    expect(interpStanceProgress(p('stand', 'crouch', 0.9), p('stand', 'crouch', 0.1), 0.5)).toBe(0.1);
+  });
+
+  it('is applied by sample() between bracketing snapshots', () => {
+    const b = new SnapshotBuffer();
+    b.push(makeSnapshot(1, [p('crouch', 'prone', 0)], { serverTime: 0 }));
+    b.push(makeSnapshot(2, [p('crouch', 'prone', 0.5)], { serverTime: 100 }));
+    const s = b.sample(25)!.players[0]!;
+    expect(s.stanceProgress).toBeCloseTo(0.125);
+    expect(s.stance).toBe('prone');
+    expect(s.stanceFrom).toBe('crouch');
   });
 });

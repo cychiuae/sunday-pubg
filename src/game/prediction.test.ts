@@ -3,11 +3,11 @@ import { BALANCE } from '../shared/balance';
 import { getMap, DEFAULT_MAP_ID } from './levels';
 import { createMovementContext, stepMovement, toMovementInput } from '../shared/sim/movement';
 import type { MovementState, PlayerInput } from '../shared/types';
-import { fixedStatus, Predictor, type PredictStep } from './prediction';
-import { makeMovement } from './testFixtures';
+import { fixedStatus, Predictor, type PredictStatus, type PredictStep } from './prediction';
+import { makeMovement, NO_DROP_STEP } from './testFixtures';
 
 const DT = 1 / 30;
-const STATUS = { alive: true, healing: false, reloading: false };
+const STATUS: PredictStatus = { alive: true, healing: false, reloading: false, held: 'fists', swapping: false, fireSlowed: false };
 const OPTS = { snapDistance: 3, decayMs: 100, maxPending: 90 };
 const FIXED = fixedStatus(STATUS);
 
@@ -17,6 +17,10 @@ const toyStep: PredictStep = (state, input) => ({
   jumped: false,
   landed: false,
   landingSpeed: 0,
+  stanceChanged: null,
+  stanceRefused: null,
+  ...NO_DROP_STEP,
+  adsEngaged: false,
 });
 
 function input(seq: number, moveRight = 1): PlayerInput {
@@ -34,6 +38,8 @@ function input(seq: number, moveRight = 1): PlayerInput {
     interact: false,
     useHeal: false,
     selectSlot: -1,
+    ads: false,
+    stanceToggle: null,
   };
 }
 
@@ -134,5 +140,84 @@ describe('Predictor', () => {
     for (const i of inputs.slice(0, 12)) server = step(server, i, STATUS).state;
     const res = client.reconcile(server, 12, null);
     expect(res.correction).toBeLessThan(1e-9);
+  });
+
+  it('M2a (stance.md test 16): C/Z/Space/sprint/ADS inputs predict identical stance and ADS state, no correction', () => {
+    const map = getMap(DEFAULT_MAP_ID);
+    const ctx = createMovementContext(map, BALANCE);
+    const rifle: PredictStatus = { ...STATUS, held: 'rifle' };
+    const step: PredictStep = (state, i, status) => stepMovement(state, toMovementInput(i, status, BALANCE), i.dt, ctx);
+    const spawn = map.playerSpawns[0]!;
+    let ground: MovementState = makeMovement({ pos: { x: spawn.x, y: 20, z: spawn.z }, grounded: false });
+    for (let i = 0; i < 120; i++) ground = step(ground, input(0, 0), rifle).state;
+
+    const script = (k: number): PlayerInput => ({
+      ...input(k + 1, 0),
+      moveForward: 1,
+      yaw: k * 0.01,
+      stanceToggle: k === 2 ? 'crouch' : k === 20 ? 'prone' : k === 60 ? 'crouch' : null,
+      jump: k === 75 || k === 90,
+      sprint: k >= 100 && k < 110,
+      ads: (k >= 10 && k < 40) || k >= 112,
+    });
+    const inputs = Array.from({ length: 130 }, (_, k) => script(k));
+    const client = new Predictor(step, OPTS, fixedStatus(rifle));
+    client.reconcile(ground, 0, null);
+    const predicted: MovementState[] = [];
+    for (const i of inputs) predicted.push(client.apply(i)!.state);
+
+    let server = ground;
+    const seen = new Set<string>();
+    for (let k = 0; k < inputs.length; k++) {
+      server = step(server, inputs[k]!, rifle).state;
+      const c = predicted[k]!;
+      expect([c.stance, c.stanceFrom, c.stanceMs, c.adsMs]).toEqual([server.stance, server.stanceFrom, server.stanceMs, server.adsMs]);
+      seen.add(server.stance);
+    }
+    // The script really visits every stance and aims.
+    expect([...seen].sort()).toEqual(['crouch', 'prone', 'stand']);
+    expect(predicted.some((m) => m.adsMs > 0)).toBe(true);
+    const res = client.reconcile(server, inputs.length, null);
+    expect(res.correction).toBeLessThan(1e-9);
+  });
+
+  it('M2b: seedPending (inactive only) replays inputs sent before prediction started that the server has not acked', () => {
+    const p = new Predictor(toyStep, OPTS, FIXED);
+    p.seedPending([input(1), input(2), input(3)]);
+    const res = p.reconcile(makeMovement(), 1, null);
+    expect(res.replayed).toBe(2);
+    expect(p.state!.pos.x).toBeCloseTo(2 * 6 * DT);
+    // Ignored while active.
+    p.seedPending([input(9), input(10)]);
+    expect(p.pendingInputs.map((i) => i.seq)).toEqual([2, 3]);
+  });
+
+  it('M2b: movement states keep the drop fields (dropPhase, dropMs) through apply and reconcile', () => {
+    const step: PredictStep = (state, i) => {
+      const r = toyStep(state, i, STATUS);
+      const d = state as MovementState & { dropMs?: number };
+      return { ...r, state: Object.assign(r.state, { dropPhase: 'freefall', dropMs: (d.dropMs ?? 0) + 1 }) };
+    };
+    const p = new Predictor(step, OPTS, FIXED);
+    p.reconcile(Object.assign(makeMovement({ dropping: true }), { dropPhase: 'freefall', dropMs: 5 }), 0, null);
+    p.apply(input(1));
+    p.apply(input(2));
+    expect(p.state).toMatchObject({ dropPhase: 'freefall', dropMs: 7 });
+    p.reconcile(Object.assign(makeMovement({ dropping: true }), { dropPhase: 'freefall', dropMs: 6 }), 1, null);
+    expect(p.state).toMatchObject({ dropMs: 7 });
+  });
+
+  it('the decaying correction offset snaps to exactly 0 (no denormal tail on the rendered position)', () => {
+    const p = new Predictor(toyStep, OPTS, FIXED);
+    p.reconcile(makeMovement({ pos: { x: 0, y: 0, z: 0 } }), 0, null);
+    p.apply(input(1, 0));
+    p.reconcile(makeMovement({ pos: { x: 0, y: 0.5, z: 0 } }), 0, null); // 0.5 m correction -> visual offset
+    expect(p.visualOffset.y).not.toBe(0);
+    for (let i = 0; i < 2000; i++) p.decay(1 / 60);
+    expect(p.visualOffset).toEqual({ x: 0, y: 0, z: 0 });
+    expect(Object.is(p.renderPosition(1)!.y, 0.5)).toBe(true);
+    // Stays exactly 0 afterwards; never a denormal.
+    p.decay(1 / 60);
+    expect(p.visualOffset.y).toBe(0);
   });
 });

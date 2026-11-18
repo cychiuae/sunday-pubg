@@ -1,18 +1,39 @@
 /**
  * Browser network client (INetClient). Owner: network-engineer.
- * Socket lifecycle, join, input send, ping/pong clock sync, snapshot buffer + remote interpolation.
+ * Socket lifecycle, the `hello` handshake (with the per-browser client token), M2b room requests and the room list,
+ * input send, ping/pong clock sync, snapshot buffer + remote interpolation.
  * Local prediction/reconciliation is ClientGame's job; it reads `snapshot.local.lastProcessedInputSeq`.
+ *
+ * M2b (ADR 0006): every `welcome` starts a new World (ticks restart), so the delta decoder and the snapshot buffer are
+ * reset on each one; leaving the room resets them too.
  */
 import { PING_INTERVAL_MS, PROTOCOL_VERSION, WS_PATH } from '../shared/constants';
-import type { InterpolatedWorld, INetClient, NetHandlers } from '../shared/contracts';
+import {
+  CLIENT_TOKEN_STORAGE_KEY,
+  type InterpolatedWorld,
+  type INetClient,
+  type NetHandlers,
+  type RoomJoinTarget,
+  type RoomSettingsInput,
+} from '../shared/contracts';
 import {
   decodeServerMessage,
   encode,
   type ClientMessage,
   type DecodeHooks,
+  type LobbyRequest,
 } from '../shared/protocol/messages';
 import { CAP_DELTA, SnapshotDeltaDecoder } from '../shared/protocol/delta';
-import type { ConnectionStatus, PlayerId, PlayerInput, WorldSnapshot } from '../shared/types';
+import type {
+  ConnectionStatus,
+  MapVoteOption,
+  MemberId,
+  PlayerId,
+  PlayerInput,
+  RoomId,
+  RoomSummary,
+  WorldSnapshot,
+} from '../shared/types';
 import { ClockSync } from './clock';
 import { LogLimiter } from './logLimiter';
 import { SnapshotBuffer } from './SnapshotBuffer';
@@ -38,7 +59,66 @@ export interface NetClientOptions {
   location?: { protocol: string; host: string };
   /** Min ms between repeats of the same warning (malformed frames, dropped events). Default 5000. */
   warnIntervalMs?: number;
+  /** Where the client token lives (window.localStorage by default; null = none, a fresh token per NetClient). */
+  storage?: TokenStorage | null;
+  /** Random bytes for a new token (crypto.getRandomValues by default). */
+  randomBytes?: (n: number) => Uint8Array;
 }
+
+/** The slice of Storage the client token needs. */
+export interface TokenStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+const TOKEN_RE = /^[A-Za-z0-9_-]{16,64}$/;
+
+function base64url(bytes: Uint8Array): string {
+  const abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = ((bytes[i] ?? 0) << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0);
+    const chars = i + 2 < bytes.length ? 4 : i + 1 < bytes.length ? 3 : 2;
+    for (let k = 0; k < chars; k++) out += abc[(n >> (18 - 6 * k)) & 63];
+  }
+  return out;
+}
+
+/**
+ * ADR 0006 §5: the per-browser token (128 random bits, base64url) from `storage`, created and stored when missing or
+ * malformed. Storage failures (private mode, quota) fall back to an unsaved token.
+ */
+export function loadClientToken(storage: TokenStorage | null, randomBytes: (n: number) => Uint8Array): string {
+  try {
+    const have = storage?.getItem(CLIENT_TOKEN_STORAGE_KEY) ?? null;
+    if (have !== null && TOKEN_RE.test(have)) return have;
+  } catch {
+    // unreadable storage: fall through to a fresh token
+  }
+  const token = base64url(randomBytes(16));
+  try {
+    storage?.setItem(CLIENT_TOKEN_STORAGE_KEY, token);
+  } catch {
+    // not persisted: the kick cooldown then lasts only for this page
+  }
+  return token;
+}
+
+const defaultStorage = (): TokenStorage | null => {
+  try {
+    return typeof localStorage !== 'undefined' ? localStorage : null;
+  } catch {
+    return null;
+  }
+};
+const defaultRandomBytes = (n: number): Uint8Array => {
+  const b = new Uint8Array(n);
+  globalThis.crypto.getRandomValues(b);
+  return b;
+};
+
+/** Lobby requests issued before the socket opens are queued (deep link: connect, then joinRoom right away). */
+const MAX_QUEUED_REQUESTS = 16;
 
 const OPEN = 1;
 /** Quick pings right after connect so the clock is good before the first snapshots matter. */
@@ -83,6 +163,15 @@ export class NetClient implements INetClient {
   private initialPingTimers: ReturnType<typeof setTimeout>[] = [];
   private opened = false;
   private serverError: string | null = null;
+  /** M2b room list as last rebuilt (rev -1 = none) and whether the caller wants it (re-subscribed after a room). */
+  private readonly roomList = new Map<RoomId, RoomSummary>();
+  private listRev = -1;
+  private listWanted = false;
+  private queued: LobbyRequest[] = [];
+  private rid = 0;
+  private readonly storage: TokenStorage | null;
+  private readonly randomBytes: (n: number) => Uint8Array;
+  private token: string | null = null;
 
   private readonly createSocket: SocketFactory;
   private readonly now: () => number;
@@ -102,6 +191,14 @@ export class NetClient implements INetClient {
     this.now = opts.now ?? (() => performance.now());
     this.loc = opts.location ?? (typeof location !== 'undefined' ? location : undefined);
     this.warnings = new LogLimiter(this.now, opts.warnIntervalMs ?? 5000);
+    this.storage = opts.storage === undefined ? defaultStorage() : opts.storage;
+    this.randomBytes = opts.randomBytes ?? defaultRandomBytes;
+  }
+
+  /** The per-browser client token (loaded or created on first use). */
+  get clientToken(): string {
+    this.token ??= loadClientToken(this.storage, this.randomBytes);
+    return this.token;
   }
 
   get status(): ConnectionStatus {
@@ -142,7 +239,11 @@ export class NetClient implements INetClient {
       if (this.socket !== socket) return;
       this.opened = true;
       this.setStatus('connected');
-      this.sendMsg({ t: 'join', name, protocolVersion: PROTOCOL_VERSION, caps: [CAP_DELTA] });
+      this.sendMsg({ t: 'hello', name, protocolVersion: PROTOCOL_VERSION, clientToken: this.clientToken, caps: [CAP_DELTA] });
+      // Requests made while connecting follow the hello in order (the server handles frames in order).
+      const q = this.queued;
+      this.queued = [];
+      for (const m of q) this.sendMsg(m);
       this.startPings();
     };
     socket.onmessage = (ev) => {
@@ -180,6 +281,63 @@ export class NetClient implements INetClient {
     return this.clock.serverNow(this.now());
   }
 
+  // -------------------------------------------------------------------------------------------
+  // M2b rooms (ADR 0006). No-ops when idle or disconnected; queued while connecting.
+  // -------------------------------------------------------------------------------------------
+  listRooms(subscribe: boolean): void {
+    this.listWanted = subscribe;
+    this.request({ t: 'listRooms', subscribe, rid: this.nextRid() });
+  }
+  createRoom(settings: RoomSettingsInput): void {
+    this.request({ t: 'createRoom', settings, rid: this.nextRid() });
+  }
+  joinRoom(target: RoomJoinTarget): void {
+    const rid = this.nextRid();
+    this.request('roomId' in target ? { t: 'joinRoom', roomId: target.roomId, rid } : { t: 'joinRoom', code: target.code, rid });
+  }
+  leaveRoom(): void {
+    this.request({ t: 'leaveRoom', rid: this.nextRid() });
+  }
+  setRoomSettings(patch: Partial<RoomSettingsInput>): void {
+    this.request({ t: 'setRoomSettings', settings: patch, rid: this.nextRid() });
+  }
+  startMatch(): void {
+    this.request({ t: 'startMatch', rid: this.nextRid() });
+  }
+  cancelCountdown(): void {
+    this.request({ t: 'cancelCountdown', rid: this.nextRid() });
+  }
+  setReady(ready: boolean): void {
+    this.request({ t: 'setReady', ready });
+  }
+  vote(option: MapVoteOption | null): void {
+    this.request({ t: 'vote', choice: option });
+  }
+  kick(memberId: MemberId): void {
+    this.request({ t: 'kick', memberId, rid: this.nextRid() });
+  }
+
+  private nextRid(): number {
+    this.rid = (this.rid + 1) % 2 ** 31;
+    return this.rid;
+  }
+
+  private request(msg: LobbyRequest): void {
+    if (this._status === 'connecting' && !this.opened) {
+      if (this.queued.length < MAX_QUEUED_REQUESTS) this.queued.push(msg);
+      return;
+    }
+    if (this._status !== 'connected' || this.socket?.readyState !== OPEN) return;
+    this.sendMsg(msg);
+  }
+
+  /** Starts a new match's stream: a new World restarts ticks, so the old delta base and buffer are meaningless. */
+  private resetMatchStream(): void {
+    this.buffer.clear();
+    this.deltas.reset();
+    this.lastResyncAt = Number.NEGATIVE_INFINITY;
+  }
+
   getInterpolated(renderTime: number): InterpolatedWorld | null {
     return this.buffer.sample(renderTime);
   }
@@ -198,10 +356,59 @@ export class NetClient implements INetClient {
     }
     switch (msg.t) {
       case 'welcome':
+        this.resetMatchStream();
         this._playerId = msg.welcome.playerId;
         this.clock.roughSync(msg.welcome.serverTime, this.now());
         this.call(() => this.handlers.onWelcome(msg.welcome));
         return;
+      case 'hello': {
+        const hello = msg.hello;
+        this.clock.roughSync(hello.serverTime, this.now());
+        this.call(() => this.handlers.onHello?.(hello));
+        return;
+      }
+      case 'roomList':
+        this.roomList.clear();
+        for (const r of msg.rooms) this.roomList.set(r.id, r);
+        this.listRev = msg.rev;
+        this.emitRoomList();
+        return;
+      case 'roomListDelta':
+        if (msg.from !== this.listRev) {
+          // Missed a revision (or subscribed between flushes): ask for the full list again.
+          if (this.listWanted) this.sendMsg({ t: 'listRooms', subscribe: true, rid: this.nextRid() });
+          return;
+        }
+        for (const id of msg.remove) this.roomList.delete(id);
+        for (const r of msg.upsert) this.roomList.set(r.id, r);
+        this.listRev = msg.rev;
+        this.emitRoomList();
+        return;
+      case 'roomJoined': {
+        const { room, memberId } = msg;
+        this.listRev = -1; // the server stops the list while we are in a room
+        this.call(() => this.handlers.onRoomJoined?.(room, memberId));
+        return;
+      }
+      case 'room': {
+        const room = msg.room;
+        this.call(() => this.handlers.onRoom?.(room));
+        return;
+      }
+      case 'roomLeft': {
+        const reason = msg.reason;
+        this._playerId = null;
+        this.resetMatchStream();
+        this.call(() => this.handlers.onRoomLeft?.(reason));
+        // Back in the browser: resume the list if the caller had it open.
+        if (this.listWanted && reason !== 'closed') this.sendMsg({ t: 'listRooms', subscribe: true, rid: this.nextRid() });
+        return;
+      }
+      case 'reject': {
+        const { req, code, retryAfterMs } = msg;
+        this.call(() => this.handlers.onReject?.(req, code, retryAfterMs));
+        return;
+      }
       case 'snapshot': {
         const res = this.deltas.apply(msg.snap);
         if (!res.ok) {
@@ -293,7 +500,16 @@ export class NetClient implements INetClient {
     }
   }
 
+  private emitRoomList(): void {
+    const rooms = [...this.roomList.values()];
+    this.call(() => this.handlers.onRoomList?.(rooms));
+  }
+
   private resetSession(): void {
+    this.roomList.clear();
+    this.listRev = -1;
+    this.listWanted = false;
+    this.queued = [];
     this._playerId = null;
     this.opened = false;
     this.serverError = null;

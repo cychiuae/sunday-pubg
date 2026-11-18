@@ -38,7 +38,7 @@ npm logs `[server] SIGTERM: shutting down` and exits 0, port released.
 
 ## CI
 `.github/workflows/ci.yml`, two parallel jobs on ubuntu-24.04 with Node 24:
-- `check`: `npm ci`, `npm run typecheck`, `npx vitest run`, `npx vite build`, `npm run size`.
+- `check`: `npm ci`, `npx tsc --noEmit -p .` (any type error fails the job), `npx vitest run`, `npx vite build`, `npm run size`.
 - `e2e`: `npm ci`, `npx playwright install --with-deps chromium` (browser cache keyed on the lockfile),
   `npx playwright test`. On failure it uploads `playwright-report/` and `test-results/` (traces, screenshots,
   per-spec server/Vite logs from `test-results/stack-logs/`).
@@ -57,5 +57,7 @@ the platform binary comes from esbuild's optional dependency.
 ## Planned (not yet done)
 - ESLint/Prettier (REVIEW-M1 M2, deferred by the user): `no-restricted-imports` per ARCHITECTURE §3, the sim
   determinism globals rule with the `sim/tools/` exemption (REVIEW-M1 m6), and a `lint` step in `build` and CI.
+  M2b: the director overrode ARCHITECTURE §15.12's ESLint rule; no linter. The sim-purity static test covers the
+  `src/shared/sim/**` -> `src/shared/kits/**` import ban instead.
 - `server/Dockerfile`, and the asset pipeline (`scripts/assets/`). M1 uses procedural assets only.
 - A bundled server build (ADR 0002 §5, M2).

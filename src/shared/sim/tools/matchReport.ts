@@ -4,8 +4,12 @@
  *
  *   npx tsx src/shared/sim/tools/matchReport.ts [--matches N] [--seed S] [--override '<json>'] [--players P]
  *                                               [--variant idle|looter|both] [--end-when-no-humans] [--json]
+ *                                               [--map island01|office]
  *
  * --override deep-merges a JSON object into balance.json (e.g. '{"bots":{"reactionMs":600}}'); arrays are replaced.
+ * --map picks the level (default island01); the match uses balanceForMap(base + override, map) like the server.
+ * M2b: every match starts with the carrier drop. The idle human rides to the auto-eject; the looter jumps at a seeded
+ * time in the jump window. "landing s" is the median time from the match start to landing over all participants.
  * By default the match keeps running after the human dies (match.endWhenNoHumansAlive = false) so match length
  * measures the bots' natural pacing; pass --end-when-no-humans to use the shipped rule.
  *
@@ -15,12 +19,22 @@
  *            never aims or fires; walks to the next circle centre when there is nothing left to loot.
  */
 import type { Balance } from '../../balance';
-import { BALANCE, validateBalance } from '../../balance';
+import { BALANCE, balanceForMap, validateBalance } from '../../balance';
 import { SIM_DT } from '../../constants';
 import { createRng } from '../../math';
-import type { PlayerInput, SimEvent, WeaponId } from '../../types';
-import { ISLAND } from '../../../game/levels/island';
+import { isIndoor } from '../../maps';
+import type { AnyMapData, HeldId, PlayerInput, SimEvent } from '../../types';
+import { isArmorId } from '../../types';
+import { MAPS } from '../../../game/levels/index';
+
+/** Level by id (MAPS is AnyMapData; getMap is island-typed until the C-gate). */
+function mapById(id: string): AnyMapData {
+  const m = Object.prototype.hasOwnProperty.call(MAPS, id) ? MAPS[id] : undefined;
+  if (!m) throw new Error(`unknown map "${id}" (known: ${Object.keys(MAPS).join(', ')})`);
+  return m;
+}
 import { chooseHeal, isGun } from '../inventory';
+import { prepareMap } from '../movement';
 import { createDebugWorld, type DebugWorld } from '../World';
 
 type Variant = 'idle' | 'looter';
@@ -33,10 +47,11 @@ interface Args {
   variants: Variant[];
   endWhenNoHumans: boolean;
   json: boolean;
+  map: string;
 }
 
 function parseArgs(argv: string[]): Args {
-  const a: Args = { matches: 10, seed: 1, override: {}, players: null, variants: ['idle', 'looter'], endWhenNoHumans: false, json: false };
+  const a: Args = { matches: 10, seed: 1, override: {}, players: null, variants: ['idle', 'looter'], endWhenNoHumans: false, json: false, map: 'island01' };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     const v = argv[i + 1];
@@ -66,6 +81,10 @@ function parseArgs(argv: string[]): Args {
         break;
       case '--json':
         a.json = true;
+        break;
+      case '--map':
+        a.map = v ?? 'island01';
+        i++;
         break;
       default:
         throw new Error(`unknown argument ${k}`);
@@ -106,6 +125,13 @@ export interface MatchResult {
   aliveAtFinalPhase: number | null;
   aliveAtPhaseStart: (number | null)[];
   winnerIsHuman: boolean;
+  /** M2a grenade pipeline: stacks spawned at match start, pickups, pin pulls, throws, swap/death drops, blasts, kills. */
+  grenades: { spawned: number; pickups: number; cooks: number; thrown: number; dropped: number; explosions: number; kills: number };
+  /** M2a: armor pickups by id, and stance transitions started (all players). */
+  armorPickups: Record<string, number>;
+  stanceChanges: number;
+  /** M2b: seconds from the match start to landing, per participant that landed. */
+  landingS: number[];
 }
 
 /** Scripted looter human: chooses inputs from the same public information a player sees. */
@@ -118,10 +144,13 @@ class Looter {
   private detourUntil = 0;
   private detourYaw = 0;
   private readonly rng;
+  /** Fraction of the jump window at which the looter jumps (seeded). */
+  private readonly jumpFrac: number;
   pickups = 0;
 
   constructor(seed: number) {
     this.rng = createRng(seed ^ 0x5bd1e995);
+    this.jumpFrac = this.rng.next() * 0.8;
   }
 
   think(w: DebugWorld, id: number, b: Balance, seq: number): PlayerInput {
@@ -130,8 +159,14 @@ class Looter {
     const pos = p.move.pos;
     const inp: PlayerInput = {
       seq, dt: SIM_DT, moveForward: 0, moveRight: 0, yaw: p.yaw, pitch: 0, sprint: false, fire: false,
-      jump: false, reload: false, interact: false, useHeal: false, selectSlot: -1,
+      jump: false, reload: false, interact: false, useHeal: false, selectSlot: -1, ads: false, stanceToggle: null,
     };
+    if (p.aboard) {
+      const r = w.getMatch().route;
+      if (r) inp.jump = now + SIM_DT * 1000 >= r.noJumpUntil + (r.ejectAt - r.noJumpUntil) * this.jumpFrac;
+      return inp;
+    }
+    const indoor = isIndoor(w.map);
     const zone = w.debugZone()?.state ?? null;
     const loot = w.debugLoot();
     // Pick a loot target: inland, inside the current and the next circle, not ignored.
@@ -141,7 +176,7 @@ class Looter {
       let best = Infinity;
       for (const l of loot) {
         if (this.ignored.has(l.id)) continue;
-        if (Math.hypot(l.pos.x, l.pos.z) > 85) continue;
+        if (!indoor && Math.hypot(l.pos.x, l.pos.z) > 85) continue;
         // Don't ping-pong guns once both slots are full (a swap drops the held gun at our feet).
         if (isGun(l.item) && p.inv.slots[0] && p.inv.slots[1]) continue;
         if (zone) {
@@ -206,11 +241,19 @@ class Looter {
   }
 }
 
-export function playMatch(b0: Balance, seed: number, variant: Variant, players: number | null, endWhenNoHumans: boolean): MatchResult {
+export function playMatch(
+  b0: Balance,
+  seed: number,
+  variant: Variant,
+  players: number | null,
+  endWhenNoHumans: boolean,
+  map: AnyMapData = mapById('island01'),
+): MatchResult {
   const b = JSON.parse(JSON.stringify(b0)) as Balance;
   if (players !== null) b.match.targetPlayers = players;
   b.match.endWhenNoHumansAlive = endWhenNoHumans;
-  const w = createDebugWorld({ map: ISLAND, balance: b, seed, botNames: BOT_NAMES });
+  // Like the server (ADR 0005 §6): a prepared runtime per map (colliders + nav graph for indoor maps).
+  const w = createDebugWorld({ map, balance: b, seed, botNames: BOT_NAMES, runtime: prepareMap(map, b) });
   const human = w.addPlayer('Human')!;
   const looter = variant === 'looter' ? new Looter(seed) : null;
   const phases = b.zone.phases.length;
@@ -226,6 +269,12 @@ export function playMatch(b0: Balance, seed: number, variant: Variant, players: 
   let endedAt = -1;
   let winnerIsHuman = false;
   let seq = 0;
+  const grenades = { spawned: 0, pickups: 0, cooks: 0, thrown: 0, dropped: 0, explosions: 0, kills: 0 };
+  const armorPickups: Record<string, number> = {};
+  let stanceChanges = 0;
+  let lootCounted = false;
+  const landingS: number[] = [];
+  const falling = new Set<number>();
   const totalS =
     b.zone.phases.reduce((a, p) => a + p.waitSeconds + p.shrinkSeconds, 0) + b.zone.finalCollapseDelaySeconds + b.zone.finalCollapseSeconds;
   const limit = Math.ceil((b.match.countdownSeconds + totalS + 60) / SIM_DT);
@@ -236,17 +285,41 @@ export function playMatch(b0: Balance, seed: number, variant: Variant, players: 
       if (p && p.alive) w.applyInput(human, looter.think(w, human, b, ++seq));
     }
     const ev: SimEvent[] = w.step(SIM_DT);
+    if (w.getMatch().phase === 'playing') {
+      for (const e of ev) if (e.type === 'spawn') falling.add(e.playerId);
+      for (const id of [...falling]) {
+        const p = w.debugPlayer(id);
+        if (!p || !p.alive) falling.delete(id);
+        else if (!p.aboard && !p.move.dropping) {
+          falling.delete(id);
+          landingS.push((w.timeMs - startAt) / 1000);
+        }
+      }
+    }
+    if (!lootCounted && w.getMatch().phase === 'playing') {
+      lootCounted = true;
+      grenades.spawned = w.debugLoot().filter((l) => l.item === 'grenade').length;
+    }
     for (const e of ev) {
+      if (e.type === 'pickup' && e.item === 'grenade') grenades.pickups++;
+      else if (e.type === 'pickup' && isArmorId(e.item)) armorPickups[e.item] = (armorPickups[e.item] ?? 0) + 1;
+      else if (e.type === 'grenadeCook') grenades.cooks++;
+      else if (e.type === 'grenadeThrown') {
+        if (e.dropped) grenades.dropped++;
+        else grenades.thrown++;
+      } else if (e.type === 'explosion') grenades.explosions++;
+      else if (e.type === 'stanceChange') stanceChanges++;
+      if (e.type === 'kill' && e.weapon === 'grenade') grenades.kills++;
       if (e.type === 'spawn' && startAt < 0) startAt = w.timeMs;
       else if (e.type === 'kill') {
         const t = (w.timeMs - startAt) / 1000;
         if (firstKill === null) firstKill = t;
         deathsByCause[e.cause] = (deathsByCause[e.cause] ?? 0) + 1;
-        if (e.cause === 'weapon' && e.weapon) killsByWeapon[e.weapon] = (killsByWeapon[e.weapon] ?? 0) + 1;
+        if ((e.cause === 'weapon' || e.cause === 'explosion') && e.weapon) killsByWeapon[e.weapon] = (killsByWeapon[e.weapon] ?? 0) + 1;
         if (e.victimId === human) {
           humanDeath = t;
           humanPlacement = e.placement;
-          humanCause = e.cause === 'weapon' ? `weapon:${e.weapon as WeaponId}` : e.cause;
+          humanCause = e.cause === 'weapon' || e.cause === 'explosion' ? `weapon:${e.weapon as HeldId}` : e.cause;
         }
       } else if (e.type === 'pickup' && e.playerId === human && looter) looter.pickups++;
       else if (e.type === 'matchEnded') {
@@ -282,6 +355,10 @@ export function playMatch(b0: Balance, seed: number, variant: Variant, players: 
     aliveAtFinalPhase: aliveAtPhaseStart[phases - 1] ?? null,
     aliveAtPhaseStart,
     winnerIsHuman,
+    grenades,
+    armorPickups,
+    stanceChanges,
+    landingS,
   };
 }
 
@@ -305,6 +382,26 @@ const recStr = (r: Record<string, number>): string =>
     .map(([k, v]) => `${k} ${v}`)
     .join(', ') || '-';
 
+/** Share of weapon kills (guns, fists and grenades) per weapon, highest first. */
+const shareStr = (r: Record<string, number>): string => {
+  const total = Object.values(r).reduce((a, v) => a + v, 0);
+  if (total === 0) return '-';
+  return Object.entries(r)
+    .sort((a, c) => c[1] - a[1])
+    .map(([k, v]) => `${k} ${((100 * v) / total).toFixed(1)}%`)
+    .join(', ');
+};
+
+const grenadeStr = (rs: MatchResult[]): string => {
+  const keys = ['spawned', 'pickups', 'cooks', 'thrown', 'dropped', 'explosions', 'kills'] as const;
+  return keys
+    .map((k) => {
+      const t = rs.reduce((a, r) => a + r.grenades[k], 0);
+      return `${k} ${t} (${(t / rs.length).toFixed(2)})`;
+    })
+    .join(', ');
+};
+
 export function summarize(results: MatchResult[], variant: Variant): string {
   const rs = results.filter((r) => r.variant === variant);
   if (rs.length === 0) return '';
@@ -325,12 +422,16 @@ export function summarize(results: MatchResult[], variant: Variant): string {
     `== ${variant} human, ${rs.length} matches ==`,
     `match duration s (min/med/max): ${mmm(rs.map((r) => r.durationS))}`,
     `first kill s (min/med/max):     ${mmm(rs.map((r) => r.firstKillS).filter((x): x is number => x !== null))}`,
+    `landing s (median of medians):  ${median(rs.map((r) => median(r.landingS)).filter((x) => !Number.isNaN(x))).toFixed(1)}`,
     `human survival s (min/med/max): ${mmm(surv)}   >=45s ${pct(45)}  >=90s ${pct(90)}  wins ${rs.filter((r) => r.winnerIsHuman).length}`,
     `human placement (median):       ${median(rs.map((r) => r.humanPlacement)).toFixed(1)}   death causes: ${recStr(humanCauses)}` +
       (variant === 'looter' ? `   pickups (median) ${median(rs.map((r) => r.humanPickups)).toFixed(0)}` : ''),
     `tide phase at end:              ${recStr(phaseEnd)}`,
     `deaths by cause:                ${recStr(sumRec(rs.map((r) => r.deathsByCause)))}`,
     `kills per weapon:               ${recStr(sumRec(rs.map((r) => r.killsByWeapon)))}`,
+    `weapon kill share:              ${shareStr(sumRec(rs.map((r) => r.killsByWeapon)))}`,
+    `grenades (total / per match):   ${grenadeStr(rs)}`,
+    `armor pickups:                  ${recStr(sumRec(rs.map((r) => r.armorPickups)))}   stance changes/match ${(rs.reduce((a, r) => a + r.stanceChanges, 0) / rs.length).toFixed(1)}`,
     `alive at final phase start:     median ${finalAlive.length ? median(finalAlive).toFixed(1) : '-'} when reached (reached in ${finalAlive.length}/${rs.length})`,
     `alive at phase start (median):  ${alivePerPhase.join(' ')}`,
   ];
@@ -339,18 +440,19 @@ export function summarize(results: MatchResult[], variant: Variant): string {
 
 function main(): void {
   const args = parseArgs(process.argv.slice(2));
-  const balance = balanceWithOverride(args.override);
+  const map = mapById(args.map);
+  const balance = balanceForMap(balanceWithOverride(args.override), map.id);
   const results: MatchResult[] = [];
   const t0 = Date.now();
   for (const variant of args.variants) {
-    for (let m = 0; m < args.matches; m++) results.push(playMatch(balance, args.seed + m, variant, args.players, args.endWhenNoHumans));
+    for (let m = 0; m < args.matches; m++) results.push(playMatch(balance, args.seed + m, variant, args.players, args.endWhenNoHumans, map));
   }
   if (args.json) {
     console.log(JSON.stringify(results));
     return;
   }
   const players = args.players ?? balance.match.targetPlayers;
-  console.log(`players ${players} (1 human + ${players - 1} bots), seeds ${args.seed}..${args.seed + args.matches - 1}, override ${JSON.stringify(args.override)}`);
+  console.log(`map ${map.id}, players ${players} (1 human + ${players - 1} bots), seeds ${args.seed}..${args.seed + args.matches - 1}, override ${JSON.stringify(args.override)}`);
   for (const v of args.variants) console.log(summarize(results, v));
   console.log(`(${((Date.now() - t0) / 1000).toFixed(1)} s wall)`);
 }

@@ -6,8 +6,12 @@
  * - Losing the lock or window focus releases all held keys so nothing sticks (the server would otherwise keep
  *   repeating the last held input).
  * - Clicking the canvas while unlocked requests the lock when `shouldLockOnClick()` says so.
+ * - The context menu is suppressed on the canvas (RMB = aim down sights, M2a).
+ * - Mouse look goes through LookFilter: the first locked move after taking the lock (the browser's re-centring
+ *   spike) is dropped and single huge deltas are capped (BUG-002).
  */
 import { InputState } from './InputState';
+import { LookFilter } from './lookFilter';
 
 /** What ClientGame needs from an input source. Tests supply a fake. */
 export interface InputDriver {
@@ -21,16 +25,20 @@ export interface InputDriver {
 export interface InputControllerOptions {
   /** Called on canvas mousedown while unlocked. */
   shouldLockOnClick: () => boolean;
+  /** Mouse-look spike filter; default `new LookFilter()`. */
+  lookFilter?: LookFilter;
 }
 
 export class InputController implements InputDriver {
   private readonly cleanups: (() => void)[] = [];
+  private readonly lookFilter: LookFilter;
 
   constructor(
     readonly state: InputState,
     private readonly target: HTMLElement,
     private readonly options: InputControllerOptions,
   ) {
+    this.lookFilter = options.lookFilter ?? new LookFilter();
     const doc = target.ownerDocument;
     const win = doc.defaultView;
 
@@ -51,8 +59,9 @@ export class InputController implements InputDriver {
       e.preventDefault();
       this.state.buttonDown(e.button);
     });
+    // M2a: RMB is aim down sights, so the browser context menu never opens on the game canvas.
     listen(target, 'contextmenu', (e) => {
-      if (this.isLocked()) e.preventDefault();
+      e.preventDefault();
     });
     listen(target, 'wheel', (e) => {
       if (!this.isLocked()) return;
@@ -61,11 +70,13 @@ export class InputController implements InputDriver {
     });
 
     const onMouseMove = (e: MouseEvent): void => {
-      if (this.isLocked()) this.state.look(e.movementX, e.movementY);
+      const d = this.lookFilter.filter(e.movementX, e.movementY, this.isLocked());
+      if (d) this.state.look(d.dx, d.dy);
     };
     // Mouse up is tracked on the document so releasing outside the canvas still releases fire.
     const onMouseUp = (e: MouseEvent): void => this.state.buttonUp(e.button);
     const onLockChange = (): void => {
+      this.lookFilter.onLockChange();
       if (!this.isLocked()) this.state.releaseAll();
     };
     doc.addEventListener('mousemove', onMouseMove);

@@ -7,6 +7,8 @@
  *   └─ 'glow'  tier marker on the ground (unlit, no shadows):
  *        disc + ring + ink rim (all tiers), short beam (rare), double ring + tall beam + 'sparkles' (epic)
  *        'sparkles' is a Group of 4 diamonds the renderer may rotate.
+ * Item ids are plain strings with a safe fallback (mini crate), so M2a ids (dmr, sniper, lmg, ammo_sniper,
+ * vest_1..3, helmet_1..3, grenade) work before and after `ItemId` grows; legacy 'vest' draws vest_1.
  * Tier is shape-coded as well as colour-coded (colour-blind safe):
  *   common = 1 ring, no beam | rare = 1 ring + 1.2 m beam | epic = 2 rings + 2.4 m beam + sparkles.
  */
@@ -15,7 +17,9 @@ import type { ItemId, LootTier } from '../../shared/types';
 import { buildMerged, xf, type Merged, type Piece } from './builder';
 import { addOutline, OUTLINE, palette, vertexColorToon } from './materials';
 import { getPropParts } from './props';
+import { getGrenadeGeometry } from './grenade';
 import { getWeaponGeometry } from './weapons';
+import { armorFromItemId, getWearableGeometry } from './wearables';
 
 export const LOOT_HOVER_Y = 0.45;
 export const TIER_COLORS: Record<LootTier, number> = {
@@ -31,12 +35,26 @@ const LOOT_OUTLINE = OUTLINE.small * 1.5;
 const box = (w: number, h: number, d: number) => new THREE.BoxGeometry(w, h, d);
 const cyl = (r: number, h: number, seg = 6) => new THREE.CylinderGeometry(r, r, h, seg);
 
-function ammoPieces(kind: 'ammo_light' | 'ammo_heavy' | 'ammo_shell'): Piece[] {
+type AmmoKind = 'ammo_light' | 'ammo_heavy' | 'ammo_shell' | 'ammo_sniper';
+const AMMO_COLOR: Record<AmmoKind, number> = {
+  ammo_light: palette.ammoLight, ammo_heavy: palette.ammoHeavy, ammo_shell: palette.ammoShell, ammo_sniper: palette.ammoSniper,
+};
+
+function ammoPieces(kind: AmmoKind): Piece[] {
   const P: Piece[] = [];
-  const col = kind === 'ammo_light' ? palette.ammoLight : kind === 'ammo_heavy' ? palette.ammoHeavy : palette.ammoShell;
-  const w = kind === 'ammo_heavy' ? 0.4 : 0.34;
+  const col = AMMO_COLOR[kind];
+  const w = kind === 'ammo_heavy' ? 0.4 : kind === 'ammo_sniper' ? 0.3 : 0.34;
   P.push({ geo: box(w, 0.2, 0.24), color: col, matrix: xf([0, -0.05, 0]) });
   P.push({ geo: box(w + 0.006, 0.06, 0.246), color: palette.gunDark, matrix: xf([0, -0.05, 0]), outline: false });
+  if (kind === 'ammo_sniper') {
+    // two extra-long slim cartridges with a pink band and a sharp copper tip (only ammo with 2 rounds)
+    for (const x of [-0.065, 0.065]) {
+      P.push({ geo: cyl(0.026, 0.2, 8), color: palette.brass, matrix: xf([x, 0.15, 0]) });
+      P.push({ geo: cyl(0.0275, 0.03, 8), color: palette.ammoSniper, matrix: xf([x, 0.2, 0]), outline: false });
+      P.push({ geo: new THREE.ConeGeometry(0.026, 0.08, 8), color: 0xd9844a, matrix: xf([x, 0.29, 0]) });
+    }
+    return P;
+  }
   for (const x of [-0.1, 0, 0.1]) {
     if (kind === 'ammo_light') {
       // short round-nose
@@ -83,34 +101,27 @@ function medkitPieces(): Piece[] {
   ];
 }
 
-function vestPieces(): Piece[] {
-  const c = palette.vest, s = palette.vestStrap;
-  return [
-    { geo: new THREE.CapsuleGeometry(0.17, 0.16, 3, 10), color: c, matrix: xf([0, 0, 0], [0, 0, 0], [1, 1, 0.55]) },
-    { geo: new THREE.SphereGeometry(0.07, 8, 4), color: palette.gunDark, matrix: xf([0, 0.2, 0], [0, 0, 0], [1, 0.4, 0.8]), outline: false }, // neck hole
-    { geo: box(0.1, 0.06, 0.2), color: c, matrix: xf([-0.12, 0.2, 0]) },
-    { geo: box(0.1, 0.06, 0.2), color: c, matrix: xf([0.12, 0.2, 0]) },
-    { geo: box(0.36, 0.045, 0.2), color: s, matrix: xf([0, -0.02, 0]), outline: false },
-    { geo: box(0.35, 0.045, 0.2), color: s, matrix: xf([0, -0.14, 0]), outline: false },
-    { geo: box(0.05, 0.05, 0.012), color: palette.brass, matrix: xf([0, -0.02, -0.1]), outline: false },
-    { geo: box(0.05, 0.05, 0.012), color: palette.brass, matrix: xf([0, -0.14, -0.1]), outline: false },
-  ];
-}
+/** Ground scale per gun: shown side-on and enlarged so they read at range; the long guns less so. */
+const GUN_LOOT_SCALE: Record<string, number> = { pistol: 1.9, dmr: 1.2, lmg: 1.2, sniper: 1.05 };
 
 const itemCache = new Map<string, Merged>();
+/** Shared geometry of a loot item mesh (also used for held heal items in the first-person viewmodel). */
+export function getLootItemGeometry(item: string): { merged: Merged; scale: number; rotY: number } | null {
+  return itemGeometry(item);
+}
 function itemGeometry(item: string): { merged: Merged; scale: number; rotY: number } | null {
   const gun = getWeaponGeometry(item);
-  if (gun) {
-    // Guns are shown side-on and enlarged so they read at range.
-    return { merged: gun.merged, scale: item === 'pistol' ? 1.9 : 1.35, rotY: Math.PI / 2 };
-  }
+  if (gun) return { merged: gun.merged, scale: GUN_LOOT_SCALE[item] ?? 1.35, rotY: Math.PI / 2 };
+  // Armor: 'vest_1'..'vest_3', 'helmet_1'..'helmet_3' and legacy 'vest' (= vest_1). Same geometry as the wearable.
+  const armor = armorFromItemId(item);
+  if (armor) return { merged: getWearableGeometry(armor.kind, armor.tier), scale: armor.kind === 'vest' ? 1.15 : 0.95, rotY: 0.5 };
+  if (item === 'grenade') return { merged: getGrenadeGeometry(true), scale: 2.4, rotY: 0.4 };
   let m = itemCache.get(item);
   if (!m) {
     let pieces: Piece[] | null = null;
-    if (item === 'ammo_light' || item === 'ammo_heavy' || item === 'ammo_shell') pieces = ammoPieces(item);
+    if (item === 'ammo_light' || item === 'ammo_heavy' || item === 'ammo_shell' || item === 'ammo_sniper') pieces = ammoPieces(item);
     else if (item === 'bandage') pieces = bandagePieces();
     else if (item === 'medkit') pieces = medkitPieces();
-    else if (item === 'vest') pieces = vestPieces();
     if (!pieces) return null;
     m = buildMerged(pieces, `loot:${item}`);
     itemCache.set(item, m);

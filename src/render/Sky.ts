@@ -110,9 +110,45 @@ export class Sky {
   }
 }
 
+/**
+ * M2b: the per-map light and atmosphere (island = late-morning sun; office = STYLE.md §19.4 fluorescent key light).
+ * Applied by Renderer on a map change.
+ */
+export interface SceneLook {
+  /** Direction TO the key light (normalised by the rig). */
+  sunDir: THREE.Vector3;
+  sunColor: number;
+  sunIntensity: number;
+  hemiSky: number;
+  hemiGround: number;
+  hemiIntensity: number;
+  fogColor: number;
+  fogNear: number;
+  fogFar: number;
+  /** Clear colour and scene background. */
+  background: number;
+  /** Shadow depth bias and normal bias (the office's tall walls under an overhead light need more). */
+  shadowBias?: number;
+  shadowNormalBias?: number;
+}
+
+export const ISLAND_LOOK: SceneLook = {
+  sunDir: SUN_DIRECTION,
+  sunColor: palette.sunLight,
+  sunIntensity: LIGHTING.sun,
+  hemiSky: palette.hemiSky,
+  hemiGround: palette.hemiGround,
+  hemiIntensity: LIGHTING.hemi,
+  fogColor: palette.fog,
+  fogNear: LIGHTING.fogNear,
+  fogFar: LIGHTING.fogFar,
+  background: palette.fog,
+};
+
 export class SunRig {
   readonly sun: THREE.DirectionalLight;
   readonly hemi: THREE.HemisphereLight;
+  private readonly dir = SUN_DIRECTION.clone();
   private halfExtent = 40;
   private mapSize = 2048;
   private readonly lightSpace = new THREE.Matrix4();
@@ -129,8 +165,26 @@ export class SunRig {
     this.sun.shadow.camera.far = 260;
     this.hemi = new THREE.HemisphereLight(palette.hemiSky, palette.hemiGround, LIGHTING.hemi);
     this.hemi.name = 'hemi';
-    // Light space basis (rotation only) for texel snapping.
-    this.lightSpace.lookAt(new THREE.Vector3(), SUN_DIRECTION.clone().negate(), new THREE.Vector3(0, 1, 0));
+    this.setBasis();
+  }
+
+  /** M2b: switch the key/fill light to a map's look (direction, colours, intensities). */
+  setLook(look: SceneLook): void {
+    this.dir.copy(look.sunDir).normalize();
+    this.sun.color.setHex(look.sunColor);
+    this.sun.intensity = look.sunIntensity;
+    this.hemi.color.setHex(look.hemiSky);
+    this.hemi.groundColor.setHex(look.hemiGround);
+    this.hemi.intensity = look.hemiIntensity;
+    this.sun.shadow.bias = look.shadowBias ?? -0.0004;
+    this.sun.shadow.normalBias = look.shadowNormalBias ?? 0.035;
+    this.setBasis();
+  }
+
+  private setBasis(): void {
+    // Light space basis (rotation only) for texel snapping. lookAt needs an up that is not parallel to the view.
+    const up = Math.abs(this.dir.y) > 0.99 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(0, 1, 0);
+    this.lightSpace.lookAt(new THREE.Vector3(), this.dir.clone().negate(), up);
     this.lightSpaceInv.copy(this.lightSpace).invert();
   }
 
@@ -159,7 +213,7 @@ export class SunRig {
     p.y = Math.round(p.y / texel) * texel;
     p.applyMatrix4(this.lightSpace);
     this.sun.target.position.copy(p);
-    this.sun.position.copy(p).addScaledVector(SUN_DIRECTION, 120);
+    this.sun.position.copy(p).addScaledVector(this.dir, 120);
     this.sun.target.updateMatrixWorld();
   }
 }

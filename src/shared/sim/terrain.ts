@@ -16,7 +16,13 @@
  * Angle convention for `coastlineRadius`: `angle = Math.atan2(z, x)` (standard math angle in the XZ plane), so the coast
  * point is `(cos(angle) * R, sin(angle) * R)` in (x, z).
  */
-import type { MapData, Surface } from '../types';
+import type { AnyMapData, IndoorMapData, IslandMapData, Surface } from '../types';
+
+/*
+ * M2b (ADR 0005 §2): every public function dispatches on the map kind. Indoor maps have a flat floor at y = 0 (no water,
+ * no heightfield), floor-material zones and a ceiling plane. `shoreNoise` / `coastlineRadius` are island only.
+ */
+const indoor = (map: AnyMapData): map is IndoorMapData => map.kind === 'indoor';
 
 /**
  * Asymptotic sea-floor depth (m) below sea level. Terrain-shape constant (the level doc asks for 0.5-1 m so the shallow
@@ -48,7 +54,7 @@ function hash01(seed: number, i: number): number {
 const harmonic = (frequency: number, mult: number): number => Math.max(1, Math.round(frequency * mult));
 
 /** Shore noise n(angle) in [-1, 1]. */
-export function shoreNoise(angle: number, map: MapData): number {
+export function shoreNoise(angle: number, map: IslandMapData): number {
   const { frequency, seed } = map.shoreNoise;
   const s0 = Math.sin(harmonic(frequency, HARMONIC_MULT_0) * angle + hash01(seed, 0) * TAU);
   const s1 = Math.sin(harmonic(frequency, HARMONIC_MULT_1) * angle + hash01(seed, 1) * TAU);
@@ -57,12 +63,12 @@ export function shoreNoise(angle: number, map: MapData): number {
 }
 
 /** Distance from the origin where terrain crosses y = 0 at `angle = Math.atan2(z, x)`. Used for the minimap. */
-export function coastlineRadius(angle: number, map: MapData): number {
+export function coastlineRadius(angle: number, map: IslandMapData): number {
   return map.islandRadius + map.shoreNoise.amplitude * shoreNoise(angle, map);
 }
 
 /** Terrain height without hills, as a function of signed distance inland of the coast (d = C - r). */
-function profile(d: number, map: MapData): number {
+function profile(d: number, map: IslandMapData): number {
   const bw = map.beachWidth;
   const base = map.baseHeight;
   if (bw <= 0) return d >= 0 ? base : -SEA_FLOOR_DEPTH * (1 - Math.exp(d));
@@ -75,8 +81,9 @@ function profile(d: number, map: MapData): number {
   return -SEA_FLOOR_DEPTH * (1 - Math.exp((d * slope) / SEA_FLOOR_DEPTH));
 }
 
-/** Terrain y at (x, z). Negative in the sea. */
-export function heightAt(x: number, z: number, map: MapData): number {
+/** Terrain y at (x, z). Negative in the sea. Indoor: the floor, 0. */
+export function heightAt(x: number, z: number, map: AnyMapData): number {
+  if (indoor(map)) return 0;
   const r = Math.sqrt(x * x + z * z);
   const c = coastlineRadius(Math.atan2(z, x), map);
   let h = profile(c - r, map);
@@ -93,8 +100,19 @@ export function heightAt(x: number, z: number, map: MapData): number {
   return h;
 }
 
-/** 'water' where heightAt < 0, 'sand' within beachWidth inland of the coast, 'grass' further inland. */
-export function surfaceAt(x: number, z: number, map: MapData): Surface {
+/**
+ * Island: 'water' where heightAt < 0, 'sand' within beachWidth inland of the coast, 'grass' further inland.
+ * Indoor: the material of the last floorZones entry containing (x, z), else the map's floorMaterial.
+ */
+export function surfaceAt(x: number, z: number, map: AnyMapData): Surface {
+  if (indoor(map)) {
+    const zones = map.floorZones;
+    for (let i = zones.length - 1; i >= 0; i--) {
+      const f = zones[i]!;
+      if (x >= f.minX && x <= f.maxX && z >= f.minZ && z <= f.maxZ) return f.material;
+    }
+    return map.floorMaterial;
+  }
   if (heightAt(x, z, map) < 0) return 'water';
   const r = Math.sqrt(x * x + z * z);
   const d = coastlineRadius(Math.atan2(z, x), map) - r;
@@ -110,6 +128,8 @@ const RAY_BISECT_ITERS = 8;
 /**
  * Ray-march against the heightfield. `dir` should be unit length. Returns the distance t of the first point where the
  * ray goes below the terrain, or -1 if it does not within `maxT`.
+ * Indoor: the ray against the floor plane y = 0 and the ceiling plane y = ceilingHeight (0 when the origin is outside
+ * the slab between them).
  */
 export function raycastTerrain(
   ox: number,
@@ -119,8 +139,9 @@ export function raycastTerrain(
   dy: number,
   dz: number,
   maxT: number,
-  map: MapData,
+  map: AnyMapData,
 ): number {
+  if (indoor(map)) return raycastIndoorPlanes(oy, dy, maxT, map.ceilingHeight);
   let t = 0;
   let f = oy - heightAt(ox, oz, map);
   if (f <= 0) return 0;
@@ -145,4 +166,19 @@ export function raycastTerrain(
     f = nf;
   }
   return -1;
+}
+
+/** Indoor floor / ceiling planes: distance to the first plane along the ray, or -1. */
+function raycastIndoorPlanes(oy: number, dy: number, maxT: number, ceiling: number): number {
+  if (oy <= 0 || oy >= ceiling) return 0;
+  let t: number;
+  if (dy < 0) t = -oy / dy;
+  else if (dy > 0) t = (ceiling - oy) / dy;
+  else return -1;
+  return t <= maxT ? t : -1;
+}
+
+/** Ceiling plane height (indoor), Infinity on the island. Shots and grenades stop there. */
+export function ceilingHeightOf(map: AnyMapData): number {
+  return indoor(map) ? map.ceilingHeight : Infinity;
 }

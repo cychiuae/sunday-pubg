@@ -85,10 +85,64 @@ describe('en.json content', () => {
   });
 
   it('names every item id', () => {
-    const ids = ['fists', 'pistol', 'smg', 'shotgun', 'rifle', 'ammo_light', 'ammo_heavy', 'ammo_shell', 'bandage', 'medkit', 'vest'];
+    const ids = [
+      'fists', 'pistol', 'smg', 'shotgun', 'rifle', 'dmr', 'sniper', 'lmg',
+      'ammo_light', 'ammo_heavy', 'ammo_shell', 'ammo_sniper', 'bandage', 'medkit',
+      'vest_1', 'vest_2', 'vest_3', 'helmet_1', 'helmet_2', 'helmet_3', 'grenade',
+      // M2c
+      'knife', 'machete', 'paddle', 'dbshotgun', 'revolver', 'rpg', 'ammo_rocket', 'smoke', 'vest_4', 'helmet_4',
+    ];
     for (const id of ids) {
       expect(hasKey(`item.${id}.name`), id).toBe(true);
+      expect(hasKey(`item.${id}.type`), id).toBe(true);
       expect(hasKey(`item.${id}.desc`), id).toBe(true);
+    }
+  });
+
+  it('labels every gear tier, 0 (none) to 4', () => {
+    expect(keysWithPrefix('gear.tier')).toEqual(['gear.tier.0', 'gear.tier.1', 'gear.tier.2', 'gear.tier.3', 'gear.tier.4']);
+  });
+
+  it('M2c: names every item level 1-4 with a short HUD-sized name and a numeral label', () => {
+    for (const n of [1, 2, 3, 4]) {
+      expect(hasKey(`level.${n}.name`), `level.${n}.name`).toBe(true);
+      expect(t(`level.${n}.name`).length, `level.${n}.name`).toBeLessThanOrEqual(10);
+      expect(t(`level.${n}.short`)).toContain(String(n));
+      expect(t(`level.${n}.short`)).toBe(t(`gear.tier.${n}`));
+    }
+    const names = [1, 2, 3, 4].map((n) => t(`level.${n}.name`));
+    expect(new Set(names).size).toBe(4);
+  });
+
+  it('M2c: names every look preset, with a loading line', () => {
+    const looks = [
+      'island01.morning', 'island01.noon', 'island01.golden', 'island01.overcast',
+      'office.day', 'office.evening', 'office.afterHours',
+    ];
+    for (const id of looks) {
+      expect(hasKey(`look.${id}`), id).toBe(true);
+      expect(hasKey(`look.${id}.line`), id).toBe(true);
+    }
+  });
+
+  it('M2c: new kill feed groups carry the right placeholders', () => {
+    for (const p of ['feed.meleeWeapon', 'feed.meleeHeadshot']) {
+      expect(tCount(p), p).toBeGreaterThan(0);
+      for (const k of keysWithPrefix(p)) {
+        for (const v of ['{killer}', '{victim}', '{weapon}']) expect(table[k], k).toContain(v);
+      }
+    }
+    for (const p of ['feed.knife', 'feed.machete', 'feed.paddle', 'feed.rocket', 'feed.rocketDirect', 'feed.smoke']) {
+      expect(tCount(p), p).toBeGreaterThan(0);
+      for (const k of keysWithPrefix(p)) {
+        expect(table[k], k).toContain('{killer}');
+        expect(table[k], k).toContain('{victim}');
+      }
+    }
+    expect(tCount('feed.rocketSelf')).toBeGreaterThan(0);
+    for (const k of keysWithPrefix('feed.rocketSelf')) {
+      expect(table[k], k).toContain('{victim}');
+      expect(table[k], k).not.toContain('{killer}');
     }
   });
 
@@ -97,6 +151,33 @@ describe('en.json content', () => {
     for (const id of ['dock', 'village', 'wreck', 'rocks', 'grove', 'tikibar', 'summit']) {
       expect(hasKey(`poi.${id}`), id).toBe(true);
     }
+  });
+
+  it('names the office map and every office POI, with a short label', () => {
+    expect(hasKey('map.office.name')).toBe(true);
+    expect(hasKey('map.office.tagline')).toBe(true);
+    const ids = [
+      'meeting', 'phone', 'corner', 'blue', 'yellow', 'pantry', 'admin', 'gym', 'games', 'tea', 'entrance',
+      'sales', 'design', 'eng', 'project',
+    ];
+    for (const id of ids) {
+      expect(hasKey(`poi.office_${id}`), id).toBe(true);
+      expect(hasKey(`poi.office_${id}.short`), id).toBe(true);
+    }
+  });
+
+  it('each zone theme mirrors the tide keys', () => {
+    for (const theme of ['tide', 'lightsOut', 'sprinklers']) {
+      for (const f of ['phase', 'wait', 'shrinking', 'final', 'outside']) {
+        expect(hasKey(`hud.${theme}.${f}`), `hud.${theme}.${f}`).toBe(true);
+      }
+      for (const f of ['warning', 'rising', 'final']) {
+        expect(hasKey(`announcer.${theme}.${f}`), `announcer.${theme}.${f}`).toBe(true);
+      }
+      expect(hasKey(`hint.${theme}`), theme).toBe(true);
+    }
+    expect(tCount('feed.lightsOut')).toBeGreaterThan(0);
+    expect(tCount('feed.sprinklers')).toBeGreaterThan(0);
   });
 
   it('bot names are unique and short', () => {
@@ -111,11 +192,20 @@ describe('en.json content', () => {
       expect(table[k], k).toContain('{victim}');
       expect(table[k], k).toContain('{weapon}');
     }
-    for (const k of keysWithPrefix('feed.melee')) {
+    for (const k of [...keysWithPrefix('feed.melee'), ...keysWithPrefix('feed.grenade')]) {
       expect(table[k], k).toContain('{killer}');
       expect(table[k], k).toContain('{victim}');
     }
-    for (const k of [...keysWithPrefix('feed.zone'), ...keysWithPrefix('feed.fall'), ...keysWithPrefix('feed.generic')]) {
+    expect(tCount('feed.grenade')).toBeGreaterThan(0);
+    expect(tCount('feed.grenadeSelf')).toBeGreaterThan(0);
+    for (const k of [
+      ...keysWithPrefix('feed.zone'),
+      ...keysWithPrefix('feed.fall'),
+      ...keysWithPrefix('feed.generic'),
+      ...keysWithPrefix('feed.grenadeSelf'),
+      ...keysWithPrefix('feed.lightsOut'),
+      ...keysWithPrefix('feed.sprinklers'),
+    ]) {
       expect(table[k], k).toContain('{victim}');
       expect(table[k], k).not.toContain('{killer}');
     }

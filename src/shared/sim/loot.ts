@@ -4,10 +4,11 @@
 import type { Balance } from '../balance';
 import { ammoFor } from '../balance';
 import type { Rng } from '../math';
-import type { ItemId, LootId, LootState, LootTier, MapData, Vec3 } from '../types';
-import { ITEM_IDS } from '../types';
+import type { AnyMapData, ItemId, LootId, LootState, LootTier, Vec3 } from '../types';
+import { isArmorId, ITEM_IDS } from '../types';
 import { forEachColliderNear, overlapsCircle, type ColliderSet } from './colliders';
-import { isAmmo, isGun, isHeal } from './inventory';
+import { isAmmo, isGrenade, isGun, isHeal } from './inventory';
+import { heightAt } from './terrain';
 
 /** Server-side loot entity (LootState + the gun's loaded mag). */
 export interface LootEntity {
@@ -16,17 +17,45 @@ export interface LootEntity {
   qty: number;
   mag: number | null;
   pos: Vec3;
-  /** Tier of the spawn point it came from; death drops and swap drops are 'common' (LootState.tier). */
+  /** Tier of the spawn point it came from; drops use dropTierOf(item) (LootState.tier). */
   tier: LootTier;
+  /** M2a: remaining durability of an armor pickup (null for every other item). */
+  durability: number | null;
 }
 
-export const toLootState = (l: LootEntity): LootState => ({
-  id: l.id,
-  item: l.item,
-  qty: l.qty,
-  pos: { x: l.pos.x, y: l.pos.y, z: l.pos.z },
-  tier: l.tier,
-});
+export function toLootState(l: LootEntity): LootState {
+  const s: LootState = { id: l.id, item: l.item, qty: l.qty, pos: { x: l.pos.x, y: l.pos.y, z: l.pos.z }, tier: l.tier };
+  if (l.durability !== null) s.durability = l.durability;
+  return s;
+}
+
+/**
+ * Rarity glow of dropped items (death, weapon swap and armor swap drops): a fixed per-item table (loot.md "UI",
+ * M2a). Spawned items keep their spawn point's tier.
+ */
+const DROP_TIERS: Readonly<Record<ItemId, LootTier>> = {
+  dmr: 'epic',
+  sniper: 'epic',
+  medkit: 'epic',
+  vest_3: 'epic',
+  helmet_3: 'epic',
+  ammo_sniper: 'epic',
+  rifle: 'rare',
+  lmg: 'rare',
+  smg: 'rare',
+  shotgun: 'rare',
+  vest_2: 'rare',
+  helmet_2: 'rare',
+  pistol: 'common',
+  bandage: 'common',
+  vest_1: 'common',
+  helmet_1: 'common',
+  grenade: 'common',
+  ammo_light: 'common',
+  ammo_heavy: 'common',
+  ammo_shell: 'common',
+};
+export const dropTierOf = (item: ItemId): LootTier => DROP_TIERS[item];
 
 /** Weighted pick from a tier table (ItemId -> weight, missing = 0). Null if the table is empty. */
 export function rollTier(balance: Balance, tier: LootTier, rng: Rng): ItemId | null {
@@ -46,14 +75,16 @@ export function rollTier(balance: Balance, tier: LootTier, rng: Rng): ItemId | n
   return null;
 }
 
-/** Quantity and mag of a freshly spawned item. */
-export function spawnQuantity(item: ItemId, balance: Balance): { qty: number; mag: number | null } {
+/** Quantity, mag and durability of a freshly spawned item (loot.md "Rules"). */
+export function spawnQuantity(item: ItemId, balance: Balance): { qty: number; mag: number | null; durability: number | null } {
   if (isGun(item)) {
-    return { qty: 1, mag: balance.loot.weaponSpawnsWithFullMag ? balance.weapons[item].magSize : 0 };
+    return { qty: 1, mag: balance.loot.weaponSpawnsWithFullMag ? balance.weapons[item].magSize : 0, durability: null };
   }
-  if (isAmmo(item)) return { qty: balance.items[item].pickupQty, mag: null };
-  if (isHeal(item)) return { qty: balance.items[item].spawnQty, mag: null };
-  return { qty: 1, mag: null };
+  if (isAmmo(item)) return { qty: balance.items[item].pickupQty, mag: null, durability: null };
+  if (isHeal(item)) return { qty: balance.items[item].spawnQty, mag: null, durability: null };
+  if (isGrenade(item)) return { qty: balance.items.grenade.spawnQty, mag: null, durability: null };
+  if (isArmorId(item)) return { qty: 1, mag: null, durability: balance.items[item].durability };
+  return { qty: 1, mag: null, durability: null };
 }
 
 /** Uniform point in a disc of radius `r` around (x, z). */
@@ -65,22 +96,24 @@ export function scatterInDisc(x: number, z: number, r: number, rng: Rng): { x: n
 
 /**
  * Rolls every map loot spawn: `spawnChance`, then a weighted item from its tier, plus `extraAmmoWithWeapon` ammo
- * stacks within `extraAmmoScatter` m of each gun. `groundY(x, z)` gives the resting height.
+ * stacks within `extraAmmoScatter` m of each gun. `groundY(x, z, y)` gives the resting height; `y` is the spawn's
+ * support-height hint (M2b `LootSpawn.y`, desk plateaus) or undefined for ground spawns. The World resolves it with
+ * groundHeightAt(ctx, x, z, y ?? terrain), so plateau loot lands on the desk, not under it.
  */
 export function spawnMatchLoot(
-  map: MapData,
+  map: AnyMapData,
   balance: Balance,
   rng: Rng,
   nextId: () => LootId,
-  groundY: (x: number, z: number) => number,
+  groundY: (x: number, z: number, y: number | undefined) => number,
 ): LootEntity[] {
   const out: LootEntity[] = [];
   for (const sp of map.lootSpawns) {
     if (rng.next() >= balance.loot.spawnChance) continue;
     const item = rollTier(balance, sp.tier, rng);
     if (!item) continue;
-    const { qty, mag } = spawnQuantity(item, balance);
-    out.push({ id: nextId(), item, qty, mag, pos: { x: sp.x, y: groundY(sp.x, sp.z), z: sp.z }, tier: sp.tier });
+    const { qty, mag, durability } = spawnQuantity(item, balance);
+    out.push({ id: nextId(), item, qty, mag, pos: { x: sp.x, y: groundY(sp.x, sp.z, sp.y), z: sp.z }, tier: sp.tier, durability });
     if (isGun(item)) {
       const ammo = ammoFor(balance, item);
       for (let i = 0; i < balance.loot.extraAmmoWithWeapon; i++) {
@@ -90,8 +123,9 @@ export function spawnMatchLoot(
           item: ammo,
           qty: balance.items[ammo].pickupQty,
           mag: null,
-          pos: { x: p.x, y: groundY(p.x, p.z), z: p.z },
+          pos: { x: p.x, y: groundY(p.x, p.z, sp.y), z: p.z },
           tier: sp.tier,
+          durability: null,
         });
       }
     }
@@ -99,13 +133,21 @@ export function spawnMatchLoot(
   return out;
 }
 
-/** Level-data check (loot.md edge case): indices of map.lootSpawns that sit inside a prop collider. */
-export function lootSpawnsInsideColliders(map: MapData, set: ColliderSet): number[] {
+/** A spawn counts as inside a collider when the footprint holds it and the prism spans this far above its support. */
+const INSIDE_PROBE_HEIGHT = 0.05;
+
+/**
+ * Level-data check (loot.md edge case): indices of map.lootSpawns that sit inside a prop collider. M2b: only colliders
+ * whose vertical span contains the spawn's support height (`y`, else the terrain / floor) count, so under-desk and
+ * desk-top spawns are not flagged by the desk top or the floor below.
+ */
+export function lootSpawnsInsideColliders(map: AnyMapData, set: ColliderSet): number[] {
   const bad: number[] = [];
   map.lootSpawns.forEach((sp, i) => {
     let inside = false;
+    const probe = (sp.y ?? heightAt(sp.x, sp.z, map)) + INSIDE_PROBE_HEIGHT;
     forEachColliderNear(set, sp.x, sp.z, 0, (c) => {
-      if (overlapsCircle(c, sp.x, sp.z, 0)) inside = true;
+      if (c.bottom <= probe && c.top > probe && overlapsCircle(c, sp.x, sp.z, 0)) inside = true;
     });
     if (inside) bad.push(i);
   });

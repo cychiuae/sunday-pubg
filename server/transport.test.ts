@@ -1,27 +1,35 @@
 /**
  * Real sockets, scripted world: exercises http/ws wiring, lag simulation, compression, heartbeat-free paths
  * and edge validation independently of the sim. server.integration.test.ts covers the real World.
+ *
+ * BUG-006: every wait below has its own timeout, and each test's Vitest timeout is larger than the sum of its
+ * waits, so a slow CI machine fails with a clear "timed out waiting for X" instead of a Vitest-level timeout.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { BALANCE } from '../src/shared/balance';
+import { loadBalance } from './config';
 import { WS_PATH } from '../src/shared/constants';
 import type { SnapshotMessage } from '../src/shared/protocol/messages';
 import { makeLocal, makeMatch, makePlayer, makeSnapshot } from '../src/shared/protocol/testing';
-import type { MapData, MatchState, PlayerId, PlayerInput, SimEvent, WorldSnapshot } from '../src/shared/types';
+import type { MatchState, PlayerId, PlayerInput, SimEvent, WorldSnapshot } from '../src/shared/types';
 import { startServer, type RunningServer } from './app';
+import { SILENT_LOGGER, type SimMap, type SimWorld } from './common';
 import { SAME_ORIGIN, parseOriginPolicy } from './origin';
-import { SILENT_LOGGER, type SimWorld } from './Room';
 import { TestClient } from './testClient';
 
-/** lobby -> countdown (2 humans) -> playing after 300 ms; echoes the last input seq per player. */
+/** A short countdown: the vote lock (3 s) is longer, so Start locks the map at once and the World starts at once. */
+const BALANCE = loadBalance('{"match":{"countdownSeconds":0.5}}');
+const T = { wait: 10_000, test: 45_000 } as const;
+
+/** Created at the lock: countdown -> playing after 300 ms; echoes the last input seq per player. */
 class ScriptedWorld implements SimWorld {
   tick = 0;
   timeMs = 0;
-  map = { id: 'island01' } as MapData;
+  map = { id: 'island01' } as SimMap;
+  readonly finished = false;
   private humans = new Map<PlayerId, { name: string; seq: number; x: number }>();
   private nextId = 1;
-  private phase: MatchState['phase'] = 'lobby';
-  private countdownEnds = 0;
+  private phase: MatchState['phase'] = 'countdown';
+  private countdownEnds = 300;
   addPlayer(name: string): PlayerId | null {
     if (this.humans.size >= 4) return null;
     const id = this.nextId++;
@@ -40,10 +48,6 @@ class ScriptedWorld implements SimWorld {
   step(dt: number): SimEvent[] {
     this.tick++;
     this.timeMs = this.tick * dt * 1000;
-    if (this.phase === 'lobby' && this.humans.size >= 2) {
-      this.phase = 'countdown';
-      this.countdownEnds = this.timeMs + 300;
-    }
     if (this.phase === 'countdown' && this.timeMs >= this.countdownEnds) {
       this.phase = 'playing';
       return [...this.humans.keys()].map((id) => ({ type: 'spawn' as const, playerId: id, pos: { x: 0, y: 30, z: 0 } }));
@@ -80,18 +84,21 @@ describe.each([0, 150])('transport with %i ms simulated RTT', (latencyMs) => {
       port: 0,
       host: '127.0.0.1',
       log: SILENT_LOGGER,
+      loopDelayP99Ms: () => 0, // server_busy is covered in rooms.test.ts; contention must not refuse creates here
       lag: { latencyMs, jitterMs: latencyMs ? 30 : 0 },
     });
   });
   afterAll(() => server.close());
 
-  it('join -> welcome -> playing; inputs acknowledged; RTT reflects the simulated lag', async () => {
+  it('hello -> room -> start -> welcome -> playing; inputs acknowledged; RTT reflects the simulated lag', async () => {
     const a = new TestClient(url());
     const b = new TestClient(url());
     await Promise.all([a.opened(), b.opened()]);
-    a.join('Alice');
-    b.join('Bob');
-    await Promise.all([a.waitFor((m) => m.t === 'welcome'), b.waitFor((m) => m.t === 'welcome')]);
+    await Promise.all([a.helloAndWait('Alice'), b.helloAndWait('Bob')]);
+    const room = await a.createAndWait({ visibility: 'private' });
+    await b.joinCodeAndWait(room.code);
+    a.startMatch();
+    await Promise.all([a.waitFor((m) => m.t === 'welcome', T.wait), b.waitFor((m) => m.t === 'welcome', T.wait)]);
 
     const t0 = performance.now();
     a.ping();
@@ -100,7 +107,7 @@ describe.each([0, 150])('transport with %i ms simulated RTT', (latencyMs) => {
     expect(rtt).toBeGreaterThanOrEqual(latencyMs);
     expect(rtt).toBeLessThan(latencyMs + 150);
 
-    await a.waitFor(playing, 3000);
+    await a.waitFor(playing, T.wait);
     let lastSeq = 0;
     const sentAt = new Map<number, number>();
     const acks: number[] = [];
@@ -123,7 +130,7 @@ describe.each([0, 150])('transport with %i ms simulated RTT', (latencyMs) => {
         }
       }, 1000 / 30);
     });
-    await a.waitFor((m) => m.t === 'snapshot' && (m.snap.local?.lastProcessedInputSeq ?? 0) >= lastSeq, 2000, false);
+    await a.waitFor((m) => m.t === 'snapshot' && (m.snap.local?.lastProcessedInputSeq ?? 0) >= lastSeq, T.wait, false);
     const sorted = acks.sort((x, y) => x - y);
     const p50 = sorted[Math.floor(sorted.length / 2)]!;
     // ack = RTT + up to one tick of queueing + up to one snapshot interval.
@@ -135,14 +142,14 @@ describe.each([0, 150])('transport with %i ms simulated RTT', (latencyMs) => {
     expect(a.tcp!.bytesRead).toBeLessThan(a.bytesIn);
     a.close();
     b.close();
-  });
+  }, T.test);
 
   it('rejects upgrades on other paths and serves /healthz', async () => {
     const bad = new TestClient(`ws://127.0.0.1:${server.port}/nope`);
     await expect(bad.opened()).rejects.toThrow(/404/);
     const res = await fetch(`http://127.0.0.1:${server.port}/healthz`);
     expect(res.status).toBe(200);
-  });
+  }, T.test);
 });
 
 describe('WebSocket origin policy (production default)', () => {
@@ -157,6 +164,7 @@ describe('WebSocket origin policy (production default)', () => {
       port: 0,
       host: '127.0.0.1',
       log: { ...SILENT_LOGGER, warn: (m: string) => warnings.push(m) },
+      loopDelayP99Ms: () => 0,
       originPolicy: SAME_ORIGIN,
     });
   });
@@ -165,10 +173,9 @@ describe('WebSocket origin policy (production default)', () => {
   it('accepts a same-origin upgrade (the page served by this process)', async () => {
     const ok = new TestClient(url()); // sends Origin http://127.0.0.1:<port>, like the served page would
     await ok.opened();
-    ok.join('Same');
-    await ok.waitFor((m) => m.t === 'welcome');
+    await ok.helloAndWait('Same');
     ok.close();
-  });
+  }, T.test);
 
   it('rejects cross-site and Origin-less upgrades with 403 and logs them', async () => {
     const evil = new TestClient(url(), true, 'https://evil.example');
@@ -178,8 +185,8 @@ describe('WebSocket origin policy (production default)', () => {
     const otherPort = new TestClient(url(), true, 'http://127.0.0.1:1');
     await expect(otherPort.opened()).rejects.toThrow(/403/);
     expect(warnings.filter((w) => w.includes('rejected upgrade'))).toHaveLength(3);
-    expect(server.room.stats().connections).toBe(0);
-  });
+    expect(server.manager.stats().connections).toBe(0);
+  }, T.test);
 
   it('an explicit list admits a separate client origin', async () => {
     const other = await startServer({
@@ -188,6 +195,7 @@ describe('WebSocket origin policy (production default)', () => {
       port: 0,
       host: '127.0.0.1',
       log: SILENT_LOGGER,
+      loopDelayP99Ms: () => 0, // server_busy is covered in rooms.test.ts; contention must not refuse creates here
       originPolicy: parseOriginPolicy('https://play.example.com', true),
     });
     try {
@@ -199,5 +207,5 @@ describe('WebSocket origin policy (production default)', () => {
     } finally {
       await other.close();
     }
-  });
+  }, T.test);
 });

@@ -4,7 +4,8 @@
  */
 import { t, type StringVars } from '../content/strings';
 import { h, retrigger } from './dom';
-import { killFeedPrefix, MessageQueue, pickVariantKey, splitTemplate, type KillInfo } from './logic';
+import { icon } from './icons';
+import { isGrenadeFeedPrefix, killFeedPrefix, MessageQueue, pickVariantKey, splitTemplate, type KillInfo } from './logic';
 
 const FEED_MAX = 5;
 const FEED_MS = 6000;
@@ -41,6 +42,11 @@ export class KillFeed {
     if (k.isLocalVictim) li.classList.add('is-me');
     if (k.headshot && prefix === 'feed.headshot') {
       li.appendChild(h('span', 'ui-glyph ui-glyph--target', { 'aria-hidden': 'true' }));
+    }
+    // M2a: grenade / explosion kills (and self-grenade lines) lead with the pineapple icon (STYLE.md §18).
+    if (isGrenadeFeedPrefix(prefix)) {
+      li.classList.add('is-grenade');
+      li.appendChild(icon('grenade', 'ui-feed__icon'));
     }
     for (const part of splitTemplate(t(key), vars)) {
       if (part.varName === 'killer' || part.varName === 'victim') {

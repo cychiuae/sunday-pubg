@@ -3,45 +3,145 @@
  * `stepMovement` never mutates its arguments and reads nothing outside them.
  */
 import type { Balance } from '../balance';
-import type { MapData, MovementInput, MovementState, MovementStepResult, PlayerInput } from '../types';
+import { isIndoor } from '../maps';
+import type {
+  AnyMapData,
+  DropPhase,
+  HeldId,
+  MovementInput,
+  MovementState,
+  MovementStepResult,
+  PlayerInput,
+  Stance,
+  StanceChange,
+  StanceRefusal,
+  StanceRequest,
+} from '../types';
+import { stanceTransitionKey } from '../types';
 import { buildColliders, platformHeightAt, resolveCircle, type ColliderSet, type PushOut } from './colliders';
+import {
+  headroomBlocked,
+  hitboxHeightOf,
+  isStanceSettled,
+  stanceAllowedAtDepth,
+  stanceWaterDepth,
+  toggleTarget,
+} from './stance';
+import { buildNavGraph, type NavGraph } from './nav';
 import { heightAt } from './terrain';
 
+/** Stance and ADS timers complete when within this many ms of zero (float accumulation of 1000/30 ms steps). */
+const STANCE_TIMER_EPSILON_MS = 1e-6;
+
 export interface MovementContext {
-  readonly map: MapData;
+  readonly map: AnyMapData;
   readonly balance: Balance;
   readonly colliders: ColliderSet;
 }
 
-export function createMovementContext(map: MapData, balance: Balance): MovementContext {
-  return { map, balance, colliders: buildColliders(map) };
+/** `balance` must be the effective (per-map) balance (balanceForMap). */
+export function createMovementContext(map: AnyMapData, balance: Balance): MovementContext {
+  return { map, balance, colliders: buildColliders(map, balance.movement.stepHeight) };
 }
+
+/**
+ * M2b (ADR 0005 §6): everything derived from one map and its effective balance, built once and shared by every World
+ * on that map (the server caches one per map id) and by ClientGame (which passes `{ nav: false }`). The nav graph is
+ * built only for indoor maps.
+ */
+export interface MapRuntime {
+  readonly map: AnyMapData;
+  readonly balance: Balance;
+  readonly ctx: MovementContext;
+  readonly nav: NavGraph | null;
+}
+
+export function prepareMap(map: AnyMapData, balance: Balance, opts: { nav?: boolean } = {}): MapRuntime {
+  const ctx = createMovementContext(map, balance);
+  const nav = isIndoor(map) && opts.nav !== false ? buildNavGraph(map, ctx.colliders, balance) : null;
+  return { map, balance, ctx, nav };
+}
+
+/** @deprecated Since the C-gate `MovementState` carries the drop fields; kept as an alias for existing imports. */
+export type DropAwareMovementState = MovementState;
 
 export interface MovementStatus {
   alive: boolean;
   healing: boolean;
   reloading: boolean;
+  /** M2a: item in hand (snapshot `weapon` / World active slot). */
+  held: HeldId;
+  /** M2a: a weapon swap is running (combat.swapMs). Blocks ADS. */
+  swapping: boolean;
+  /**
+   * M2a: within combat.fireMoveWindowMs of a shot with the held weapon (server-exact; ClientGame approximates it with
+   * fire held + mag > 0 + settled, ADR 0004 Consequences). Applies weapons[held].fireMoveMultiplier.
+   */
+  fireSlowed: boolean;
 }
+
+/** A valid stance request, else null (defensive: the protocol already rejects other values). */
+const stanceRequestOf = (v: unknown): StanceRequest | null => (v === 'crouch' || v === 'prone' ? v : null);
 
 /**
  * Maps a PlayerInput plus status to what the movement step reads.
- * - Dead: no movement.
- * - Healing: speed x movement.healMoveMultiplier, no sprint.
- * - Holding fire cancels sprint (GDD 7.3). Reloading does not block sprint.
- * - Sprint only counts while moving forward (checked in stepMovement).
+ * - Dead: no movement, no stance request, no ADS (adsBlocked).
+ * - Healing: speed x movement.healMoveMultiplier, no sprint. Fire window: x weapons[held].fireMoveMultiplier.
+ * - Holding fire cancels sprint (GDD 7.3). Reloading does not block sprint. ADS suppression is done by the step.
+ * - adsBlocked = reloading || healing || swapping (dropping, transitions and sight 'none' are the step's checks).
  */
 export function toMovementInput(input: PlayerInput, status: MovementStatus, balance: Balance): MovementInput {
   if (!status.alive) {
-    return { moveForward: 0, moveRight: 0, yaw: input.yaw, jump: false, sprint: false, speedMultiplier: 0, canSprint: false };
+    return {
+      moveForward: 0,
+      moveRight: 0,
+      yaw: input.yaw,
+      jump: false,
+      sprint: false,
+      speedMultiplier: 0,
+      canSprint: false,
+      stanceToggle: null,
+      ads: false,
+      held: status.held,
+      adsBlocked: true,
+    };
   }
+  const fireMult = status.fireSlowed && status.held !== 'grenade' ? balance.weapons[status.held].fireMoveMultiplier : 1;
   return {
     moveForward: finiteOr0(input.moveForward),
     moveRight: finiteOr0(input.moveRight),
     yaw: finiteOr0(input.yaw),
     jump: input.jump === true,
     sprint: input.sprint === true,
-    speedMultiplier: status.healing ? balance.movement.healMoveMultiplier : 1,
+    speedMultiplier: (status.healing ? balance.movement.healMoveMultiplier : 1) * fireMult,
     canSprint: !status.healing && !input.fire,
+    stanceToggle: stanceRequestOf(input.stanceToggle),
+    ads: input.ads === true,
+    held: status.held,
+    adsBlocked: status.reloading || status.healing || status.swapping,
+  };
+}
+
+/**
+ * Spawn / default movement state: standing, settled, not aiming. `dropping` with no phase = the M1 parachute-speed
+ * drop (drop-less test Worlds); pass `dropPhase: 'freefall'` for a carrier jump (drop.md).
+ */
+export function initialMovementState(
+  pos: { x: number; y: number; z: number },
+  dropping: boolean,
+  dropPhase: DropPhase | null = dropping ? 'chute' : null,
+): MovementState {
+  return {
+    pos: { x: pos.x, y: pos.y, z: pos.z },
+    vel: { x: 0, y: 0, z: 0 },
+    grounded: !dropping,
+    dropping,
+    stance: 'stand',
+    stanceFrom: 'stand',
+    stanceMs: 0,
+    adsMs: 0,
+    dropPhase: dropping ? dropPhase : null,
+    dropMs: 0,
   };
 }
 
@@ -59,7 +159,7 @@ export function isInWater(state: MovementState, balance: Balance): boolean {
   return state.pos.y < -balance.movement.waterDepthThreshold;
 }
 
-/** Ground under (x, z) for someone whose feet are at feetY: terrain or a walkable prop top (dock, crate, boat). */
+/** Ground under (x, z) for someone whose feet are at feetY: terrain / floor or a walkable prop top (dock, crate, desk). */
 export function groundHeightAt(ctx: MovementContext, x: number, z: number, feetY: number): number {
   const t = heightAt(x, z, ctx.map);
   const p = platformHeightAt(ctx.colliders, x, z, feetY, ctx.balance.movement.stepHeight);
@@ -80,6 +180,15 @@ function approach(vx: number, vz: number, tx: number, tz: number, maxDelta: numb
   return [vx + dx * k, vz + dz * k];
 }
 
+/**
+ * One movement tick. M2b drop phases (drop.md "Freefall and parachute", ADR 0005 §8), while `dropping`:
+ * - freefall: fall at drop.freefallSpeed, steer at drop.freefallSteerSpeed. Opens the parachute when the height above
+ *   the terrain or floor below (props ignored) is <= drop.chuteDeployHeight ('auto'), or on the jump edge at
+ *   dropMs >= drop.minFreefallMs when drop.manualDeploy ('manual'). Checked at the start of the step, so the
+ *   parachute speeds apply on the tick it opens.
+ * - chute (and a phase-less M1 drop): movement.dropFallSpeed / dropSteerSpeed.
+ * - dropMs advances by dt; landing on any walkable top ends the drop (no fall damage: the World skips it).
+ */
 export function stepMovement(
   state: MovementState,
   input: MovementInput,
@@ -100,6 +209,85 @@ export function stepMovement(
   let landed = false;
   let landingSpeed = 0;
   const step = dt > 0 && Number.isFinite(dt) ? dt : 0;
+  const b = ctx.balance;
+  const st = m.stances;
+
+  // ---- Stance (stance.md per-tick order) ----
+  let stance: Stance = state.stance;
+  let stanceFrom: Stance = state.stanceFrom;
+  let stanceMs = state.stanceMs > 0 ? state.stanceMs : 0;
+  let stanceChanged: StanceChange | null = null;
+  let stanceRefused: StanceRefusal | null = null;
+  let jumpConsumed = input.stanceToggle !== null;
+  const start = (to: Stance, forced: boolean): void => {
+    const durationMs = st.transitionMs[stanceTransitionKey(stance, to)];
+    stanceChanged = { from: stance, to, forced, durationMs };
+    stanceFrom = stance;
+    stance = to;
+    stanceMs = durationMs > 0 ? durationMs : 0;
+  };
+  const settledAtStart = !(stanceMs > 0);
+  const depth = stanceWaterDepth(ctx.map, state.pos);
+  // 1. Forced water stand-up (settled only; ignores headroom).
+  if (settledAtStart && stance !== 'stand' && !stanceAllowedAtDepth(stance, depth, b)) {
+    start('stand', true);
+  } else {
+    // 2. Request: stanceToggle, then Space when not standing, then held sprint when crouched.
+    let target: Stance | null = null;
+    let silent = false;
+    let fallback: Stance | null = null;
+    if (input.stanceToggle !== null) {
+      target = toggleTarget(stance, input.stanceToggle);
+      if (input.stanceToggle === 'prone' && stance === 'prone') fallback = 'crouch';
+    } else if (input.jump && stance !== 'stand') {
+      jumpConsumed = true;
+      target = stance === 'prone' ? 'crouch' : 'stand';
+    } else if (
+      stance === 'crouch' &&
+      input.sprint &&
+      input.canSprint &&
+      !input.ads &&
+      input.moveForward > 0 &&
+      input.speedMultiplier > 0
+    ) {
+      target = 'stand';
+      silent = true;
+    }
+    // 3. Validation (ignored silently while dropping, airborne, transitioning or when the target is the current).
+    if (target !== null && !state.dropping && state.grounded && settledAtStart && target !== stance) {
+      const hCur = st[stance].height;
+      if (!stanceAllowedAtDepth(target, depth, b)) {
+        if (!silent) stanceRefused = 'tooDeep';
+      } else if (headroomBlocked(ctx.colliders, state.pos, hCur, st[target].height, b)) {
+        if (fallback && fallback !== stance && !headroomBlocked(ctx.colliders, state.pos, hCur, st[fallback].height, b)) {
+          start(fallback, false);
+        } else if (!silent) {
+          stanceRefused = 'noHeadroom';
+        }
+      } else {
+        start(target, false);
+      }
+    }
+  }
+  // 4. Advance the transition timer.
+  if (stanceMs > 0) {
+    stanceMs -= step * 1000;
+    if (stanceMs <= STANCE_TIMER_EPSILON_MS) stanceMs = 0;
+  }
+  if (stanceMs === 0) stanceFrom = stance;
+  const settled = stanceMs === 0;
+  const stanceNow = { stance, stanceFrom, stanceMs };
+
+  // ---- ADS (combat.md "ADS") ----
+  const heldW = input.held === 'grenade' ? null : b.weapons[input.held];
+  const adsEngaged =
+    input.ads && heldW !== null && heldW.sight !== 'none' && !input.adsBlocked && !state.dropping && settled && stanceChanged === null;
+  const adsMs = adsEngaged && heldW ? Math.min(heldW.adsTimeMs, (state.adsMs > 0 ? state.adsMs : 0) + step * 1000) : 0;
+  const stanceMult = isStanceSettled(stanceNow)
+    ? st[stance].speedMultiplier
+    : Math.min(st[stanceFrom].speedMultiplier, st[stance].speedMultiplier);
+  const adsMult = adsEngaged && heldW ? heldW.adsMoveMultiplier : 1;
+  const bodyHeight = hitboxHeightOf(stanceNow, b);
 
   // Camera-relative wish direction (forward = (-sin, -cos), right = (cos, -sin)).
   let f = clamp1(input.moveForward);
@@ -116,15 +304,30 @@ export function stepMovement(
   const wishLen = Math.min(1, wl);
   const mult = Math.max(0, input.speedMultiplier);
 
+  /** Vertical velocity before this tick's gravity (non-drop airborne), for the exact landing speed. */
+  let vyStart: number | null = null;
+  // A dropping state without a phase is the M1 parachute-speed drop (drop-less test Worlds).
+  let dropPhase: DropPhase | null = dropping ? (state.dropPhase ?? 'chute') : null;
+  const dropMsIn = dropping && state.dropMs > 0 ? state.dropMs : 0;
+  let chuteOpened: 'manual' | 'auto' | null = null;
   if (dropping) {
-    const steer = m.dropSteerSpeed * mult;
+    const d = b.drop;
+    if (dropPhase === 'freefall') {
+      if (py - heightAt(px, pz, ctx.map) <= d.chuteDeployHeight) chuteOpened = 'auto';
+      else if (input.jump && d.manualDeploy && dropMsIn >= d.minFreefallMs) chuteOpened = 'manual';
+      if (chuteOpened !== null) dropPhase = 'chute';
+    }
+    const ff = dropPhase === 'freefall';
+    const steer = (ff ? d.freefallSteerSpeed : m.dropSteerSpeed) * mult;
     vx = wx * steer;
     vz = wz * steer;
-    vy = -m.dropFallSpeed;
+    vy = -(ff ? d.freefallSpeed : m.dropFallSpeed);
   } else {
     const inWater = py < -m.waterDepthThreshold;
-    const sprinting = input.sprint && input.canSprint && input.moveForward > 0;
-    const maxSpeed = (sprinting ? m.sprintSpeed : m.walkSpeed) * mult * (inWater ? m.waterSpeedMultiplier : 1);
+    const sprinting =
+      input.sprint && input.canSprint && !input.ads && input.moveForward > 0 && settled && stance === 'stand';
+    const maxSpeed =
+      (sprinting ? m.sprintSpeed : m.walkSpeed) * mult * stanceMult * adsMult * (inWater ? m.waterSpeedMultiplier : 1);
     const tx = wx * maxSpeed;
     const tz = wz * maxSpeed;
     if (grounded) {
@@ -135,7 +338,7 @@ export function stepMovement(
         vx *= k;
         vz *= k;
       }
-      if (input.jump && mult > 0) {
+      if (input.jump && !jumpConsumed && mult > 0 && settled && stance === 'stand') {
         vy = m.jumpVelocity;
         grounded = false;
         jumped = true;
@@ -146,6 +349,7 @@ export function stepMovement(
       [vx, vz] = approach(vx, vz, tx, tz, m.accel * m.airControl * step);
     }
     if (!grounded) {
+      vyStart = vy;
       vy -= m.gravity * step;
       if (vy < -m.terminalVelocity) vy = -m.terminalVelocity;
     }
@@ -155,7 +359,7 @@ export function stepMovement(
   const desiredX = px + vx * step;
   const desiredZ = pz + vz * step;
   const out: PushOut = { x: desiredX, z: desiredZ };
-  resolveCircle(ctx.colliders, desiredX, desiredZ, playerRadius, py, m.stepHeight, out, ctx.balance.player.height);
+  resolveCircle(ctx.colliders, desiredX, desiredZ, playerRadius, py, m.stepHeight, out, bodyHeight);
   let nx = out.x;
   let nz = out.z;
   const cx = nx - desiredX;
@@ -172,18 +376,41 @@ export function stepMovement(
     }
   }
 
-  // World boundary (hard wall).
-  const limit = ctx.map.worldRadius - playerRadius;
-  const rr = Math.hypot(nx, nz);
-  if (rr > limit && rr > 1e-9) {
-    const ux = nx / rr;
-    const uz = nz / rr;
-    nx = ux * limit;
-    nz = uz * limit;
-    const vn = vx * ux + vz * uz;
-    if (vn > 0) {
-      vx -= ux * vn;
-      vz -= uz * vn;
+  // World boundary (hard wall). Island: the worldRadius circle. Indoor: the floor rectangle inset by player.radius.
+  const map = ctx.map;
+  if (isIndoor(map)) {
+    const f = map.floor;
+    const loX = f.minX + playerRadius;
+    const hiX = f.maxX - playerRadius;
+    const loZ = f.minZ + playerRadius;
+    const hiZ = f.maxZ - playerRadius;
+    if (nx < loX) {
+      nx = loX;
+      if (vx < 0) vx = 0;
+    } else if (nx > hiX) {
+      nx = hiX;
+      if (vx > 0) vx = 0;
+    }
+    if (nz < loZ) {
+      nz = loZ;
+      if (vz < 0) vz = 0;
+    } else if (nz > hiZ) {
+      nz = hiZ;
+      if (vz > 0) vz = 0;
+    }
+  } else {
+    const limit = map.worldRadius - playerRadius;
+    const rr = Math.hypot(nx, nz);
+    if (rr > limit && rr > 1e-9) {
+      const ux = nx / rr;
+      const uz = nz / rr;
+      nx = ux * limit;
+      nz = uz * limit;
+      const vn = vx * ux + vz * uz;
+      if (vn > 0) {
+        vx -= ux * vn;
+        vz -= uz * vn;
+      }
     }
   }
 
@@ -200,23 +427,49 @@ export function stepMovement(
     }
   } else {
     const prevY = py;
-    py += vy * step;
+    // Under gravity: trapezoid (exact for constant gravity), so jump apex and fall heights match the spec's
+    // closed forms (apex v^2 / 2g, impact sqrt(2 g h); maps.md 2.4). Drops fall at a constant speed.
+    py += (vyStart === null ? vy : (vyStart + vy) * 0.5) * step;
     const ground = groundHeightAt(ctx, nx, nz, Math.max(prevY, py));
     if (py <= ground) {
       landed = true;
-      landingSpeed = Math.max(0, -vy);
+      // M2b (maps.md 2.4): the exact impact speed sqrt(v0^2 + 2 g (y0 - ground)) under gravity, so fall damage matches
+      // the spec's sqrt(2 g h) instead of the end-of-tick velocity. Drops fall at a constant speed.
+      // REVIEW-M2b L2: still rising at the end of the tick (snapped onto a ledge on the way up) = no downward impact.
+      landingSpeed = vyStart === null
+        ? Math.max(0, -vy)
+        : vy >= 0
+          ? 0
+          : Math.min(m.terminalVelocity, Math.sqrt(Math.max(0, vyStart * vyStart + 2 * m.gravity * (prevY - ground))));
       py = ground;
       vy = 0;
       grounded = true;
       dropping = false;
     }
   }
+  const dropMs = dropping ? dropMsIn + step * 1000 : 0;
+  if (!dropping) dropPhase = null;
 
   return {
-    state: { pos: { x: nx, y: py, z: nz }, vel: { x: vx, y: vy, z: vz }, grounded, dropping },
+    state: {
+      pos: { x: nx, y: py, z: nz },
+      vel: { x: vx, y: vy, z: vz },
+      grounded,
+      dropping,
+      stance,
+      stanceFrom,
+      stanceMs,
+      adsMs,
+      dropPhase,
+      dropMs,
+    },
+    chuteOpened,
     jumped,
     landed,
     landingSpeed,
+    stanceChanged,
+    stanceRefused,
+    adsEngaged,
   };
 }
 

@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { BALANCE } from '../src/shared/balance';
-import { deepMerge, loadBalance, readConfig } from './config';
+import { checkLevels } from './app';
+import { deepMerge, levelIds, loadBalance, parseMapPin, readConfig } from './config';
 import { createStaticHandler, safeJoin } from './static';
 
 describe('BALANCE_OVERRIDE', () => {
@@ -42,6 +43,36 @@ describe('BALANCE_OVERRIDE', () => {
     expect(c.seed).toBe(7);
     expect(c.production).toBe(false);
     expect(() => readConfig({ PORT: 'abc' })).toThrow(/PORT/);
+  });
+});
+
+describe('M2b room env (ADR 0006 §8)', () => {
+  it('MAX_ROOMS (8), MAX_CONNECTIONS (MAX_ROOMS x maxPlayers + 32), SEED absent = random room seeds', () => {
+    const c = readConfig({});
+    expect(c.maxRooms).toBe(8);
+    expect(c.maxConnections).toBe(8 * BALANCE.match.maxPlayers + 32);
+    expect(c.seed).toBeNull();
+    expect(c.mapPin).toBeNull();
+    const d = readConfig({ MAX_ROOMS: '3', MAX_CONNECTIONS: '50' });
+    expect([d.maxRooms, d.maxConnections]).toEqual([3, 50]);
+    expect(readConfig({ MAX_ROOMS: '2' }).maxConnections).toBe(2 * BALANCE.match.maxPlayers + 32);
+    expect(() => readConfig({ MAX_ROOMS: '0' })).toThrow(/MAX_ROOMS/);
+  });
+
+  it('MAP: a level id pins; an invalid value warns once and is ignored', () => {
+    const warnings: string[] = [];
+    expect(readConfig({ MAP: 'island01' }, (m) => warnings.push(m)).mapPin).toBe('island01');
+    expect(warnings).toHaveLength(0);
+    expect(readConfig({ MAP: 'bogus' }, (m) => warnings.push(m)).mapPin).toBeNull();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('bogus');
+    expect(parseMapPin('  ', ['a'], () => warnings.push('x'))).toBeNull();
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('startup level checks pass for the shipped levels and the balance', () => {
+    expect(levelIds()[0]).toBe('island01');
+    expect(() => checkLevels(BALANCE)).not.toThrow();
   });
 });
 

@@ -3,10 +3,16 @@
  * rigid-skinned colour mesh + ONE rigid-skinned outline mesh (2 draw calls, 1 shadow cast). The procedural pivots
  * (body, head, arms, legs) stay the animation joints: they are used directly as the skeleton bones, so all pose code
  * and the hand socket keep working. Geometry is cached per appearance. Owner: graphics-engineer.
+ *
+ * M2a: worn armor (`getWearableGeometry`) is merged into the same two skinned meshes, rigidly weighted to the hip
+ * (vest) or neck (helmet) bone, so armor adds no draw calls and gets hit flash, fade and outline LOD for free.
+ * The cache is keyed by appearance + helmet hair + tiers and ref-counted: unused entries beyond a small LRU are
+ * disposed (armor changes during a match would otherwise grow it without bound).
  */
 import * as THREE from 'three';
 import type { CharacterModel } from './procedural';
-import { OUTLINE, OUTLINE_NORMAL_ATTR, palette, vertexColorToon } from './procedural';
+import { chibiCoverMaterial } from './indoorFx';
+import { getWearableGeometry, OUTLINE, OUTLINE_NORMAL_ATTR, palette } from './procedural';
 
 const PART_KEYS = ['torso', 'head', 'armL', 'armR', 'legL', 'legR'] as const;
 
@@ -15,7 +21,66 @@ interface SkinGeos {
   outline: THREE.BufferGeometry;
 }
 
-const geoCache = new Map<string, SkinGeos>();
+/** Worn armor merged into the skinned chibi (0 = none). */
+export interface ChibiWear {
+  vest: number;
+  helmet: number;
+}
+const NO_WEAR: ChibiWear = { vest: 0, helmet: 0 };
+
+interface CacheEntry {
+  geos: SkinGeos;
+  refs: number;
+}
+const geoCache = new Map<string, CacheEntry>();
+/** Unreferenced keys, oldest first (kept for quick re-use, disposed beyond SPARE_ENTRIES). */
+const spare: string[] = [];
+const SPARE_ENTRIES = 12;
+
+/** Bone indices in PART_KEYS order: body (torso parent) 0, head 1. */
+const BONE_BODY = 0;
+const BONE_HEAD = 1;
+
+/**
+ * Skin geometry cache key for an appearance + worn armor. The helmet flag changes the hair (setVariant), so it is
+ * part of the key. Pure; exported for tests.
+ */
+export function skinKey(skin: number, outfit: number, hair: number, wear: ChibiWear = NO_WEAR): string {
+  const v = wear.vest | 0, h = wear.helmet | 0;
+  return `${skin}|${outfit}|${hair}|h${h > 0 ? 1 : 0}|v${v}|m${h}`;
+}
+
+function retain(key: string): void {
+  const e = geoCache.get(key);
+  if (!e) return;
+  if (e.refs === 0) {
+    const i = spare.indexOf(key);
+    if (i >= 0) spare.splice(i, 1);
+  }
+  e.refs++;
+}
+
+function release(key: string): void {
+  const e = geoCache.get(key);
+  if (!e || e.refs <= 0) return;
+  e.refs--;
+  if (e.refs > 0) return;
+  spare.push(key);
+  while (spare.length > SPARE_ENTRIES) {
+    const k = spare.shift()!;
+    const old = geoCache.get(k);
+    if (old && old.refs === 0) {
+      old.geos.colour.dispose();
+      old.geos.outline.dispose();
+      geoCache.delete(k);
+    }
+  }
+}
+
+/** Number of cached skinned geometries (tests / leak checks). */
+export function skinCacheSize(): number {
+  return geoCache.size;
+}
 let outlineMat: THREE.MeshBasicMaterial | null = null;
 
 /** Skinning-aware inverted-hull outline (same look as procedural outlineMaterial: world-metre width, min screen width). */
@@ -83,7 +148,13 @@ function restMatrices(model: CharacterModel): { meshRel: THREE.Matrix4[]; boneRe
   return { meshRel, boneRel };
 }
 
-function mergeSkinned(sources: (THREE.BufferGeometry | null)[], matrices: THREE.Matrix4[], dirAttr: string | null, keep: readonly string[]): THREE.BufferGeometry {
+function mergeSkinned(
+  sources: (THREE.BufferGeometry | null)[],
+  matrices: THREE.Matrix4[],
+  bones: readonly number[],
+  dirAttr: string | null,
+  keep: readonly string[],
+): THREE.BufferGeometry {
   let total = 0;
   for (const g of sources) if (g) total += g.getAttribute('position').count;
   const out = new THREE.BufferGeometry();
@@ -98,11 +169,12 @@ function mergeSkinned(sources: (THREE.BufferGeometry | null)[], matrices: THREE.
   const v = new THREE.Vector3();
   const nm = new THREE.Matrix3();
   let o = 0;
-  sources.forEach((g, bone) => {
+  sources.forEach((g, si) => {
     if (!g) return;
+    const bone = bones[si];
     const p = g.getAttribute('position');
     const d = dirAttr ? g.getAttribute(dirAttr) : null;
-    const m = matrices[bone];
+    const m = matrices[si];
     nm.getNormalMatrix(m);
     for (let i = 0; i < p.count; i++) {
       v.fromBufferAttribute(p, i).applyMatrix4(m);
@@ -133,10 +205,25 @@ function mergeSkinned(sources: (THREE.BufferGeometry | null)[], matrices: THREE.
   return out;
 }
 
-function buildGeos(model: CharacterModel, meshRel: THREE.Matrix4[]): SkinGeos {
+function buildGeos(model: CharacterModel, meshRel: THREE.Matrix4[], boneRel: THREE.Matrix4[], wear: ChibiWear): SkinGeos {
   const meshes = partMeshes(model);
-  const colour = mergeSkinned(meshes.map((m) => m.geometry), meshRel, 'normal', ['color']);
-  const outline = mergeSkinned(meshes.map((m) => outlineOf(m)?.geometry ?? null), meshRel, OUTLINE_NORMAL_ATTR, []);
+  const colourSrc: (THREE.BufferGeometry | null)[] = meshes.map((m) => m.geometry);
+  const outlineSrc: (THREE.BufferGeometry | null)[] = meshes.map((m) => outlineOf(m)?.geometry ?? null);
+  const matrices = meshRel.slice();
+  const bones = meshes.map((_, i) => i);
+  // Wearable geometry is authored in its bone's frame (WEARABLE_ATTACH is identity), so its rest matrix is the bone's.
+  const addWear = (kind: 'vest' | 'helmet', tier: number, bone: number) => {
+    if (tier <= 0) return;
+    const w = getWearableGeometry(kind, tier);
+    colourSrc.push(w.geometry);
+    outlineSrc.push(w.outline ?? null);
+    matrices.push(boneRel[bone]);
+    bones.push(bone);
+  };
+  addWear('vest', wear.vest, BONE_BODY);
+  addWear('helmet', wear.helmet, BONE_HEAD);
+  const colour = mergeSkinned(colourSrc, matrices, bones, 'normal', ['color']);
+  const outline = mergeSkinned(outlineSrc, matrices, bones, OUTLINE_NORMAL_ATTR, []);
   colour.name = 'chibi:skinned';
   outline.name = 'chibi:skinned:outline';
   return { colour, outline };
@@ -145,17 +232,25 @@ function buildGeos(model: CharacterModel, meshRel: THREE.Matrix4[]): SkinGeos {
 export interface SkinnedChibi {
   colour: THREE.SkinnedMesh;
   outline: THREE.SkinnedMesh;
-  /** Swap geometry after `model.chibi.setVariant(...)`. */
-  setAppearanceKey(key: string): void;
+  /**
+   * Swap geometry after `model.chibi.setVariant(...)`. `key` must come from `skinKey` with the same `wear`
+   * (and the chibi's helmet flag set to wear.helmet > 0). Releases the previous geometry.
+   */
+  setAppearanceKey(key: string, wear?: ChibiWear): void;
+  /** Current cache key. */
+  readonly key: string;
+  /** Release the cached geometry reference (view destroyed). */
+  dispose(): void;
 }
 
-const BOUNDS = new THREE.Sphere(new THREE.Vector3(0, 0.65, 0), 1.25);
+/** Covers stand, crouch and prone (lying along -Z with the gun forward) for frustum and shadow culling. */
+const BOUNDS = new THREE.Sphere(new THREE.Vector3(0, 0.5, -0.2), 1.75);
 
 /**
  * Hides the 12 per-part meshes of `model` and adds the two skinned meshes under `model.root`. `key` identifies the
  * appearance (geometry cache key).
  */
-export function skinChibi(model: CharacterModel, key: string): SkinnedChibi {
+export function skinChibi(model: CharacterModel, key: string, wear: ChibiWear = NO_WEAR): SkinnedChibi {
   const { meshRel, boneRel } = restMatrices(model);
   const meshes = partMeshes(model);
   for (const m of meshes) m.visible = false; // hides the outline child too
@@ -164,12 +259,14 @@ export function skinChibi(model: CharacterModel, key: string): SkinnedChibi {
   const inverses = boneRel.map((b) => b.clone().invert());
   const skeleton = new THREE.Skeleton(bones, inverses);
 
-  const geos = (k: string): SkinGeos => {
-    let g = geoCache.get(k);
-    if (!g) geoCache.set(k, (g = buildGeos(model, meshRel)));
-    return g;
+  const geos = (k: string, w: ChibiWear): SkinGeos => {
+    let e = geoCache.get(k);
+    if (!e) geoCache.set(k, (e = { geos: buildGeos(model, meshRel, boneRel, w), refs: 0 }));
+    retain(k);
+    return e.geos;
   };
-  const g0 = geos(key);
+  let current = key;
+  const g0 = geos(key, wear);
   const make = (geo: THREE.BufferGeometry, mat: THREE.Material, name: string): THREE.SkinnedMesh => {
     const s = new THREE.SkinnedMesh(geo, mat);
     s.name = name;
@@ -178,7 +275,8 @@ export function skinChibi(model: CharacterModel, key: string): SkinnedChibi {
     model.root.add(s);
     return s;
   };
-  const colour = make(g0.colour, vertexColorToon(), 'chibiSkin');
+  // M2b: the vertex-colour toon look plus the indoor under-desk darkening (inert outdoors).
+  const colour = make(g0.colour, chibiCoverMaterial(), 'chibiSkin');
   colour.castShadow = true;
   colour.receiveShadow = false;
   const outline = make(g0.outline, skinnedOutlineMaterial(), 'outline');
@@ -188,20 +286,31 @@ export function skinChibi(model: CharacterModel, key: string): SkinnedChibi {
   return {
     colour,
     outline,
-    setAppearanceKey(k: string) {
+    get key() {
+      return current;
+    },
+    setAppearanceKey(k: string, w: ChibiWear = NO_WEAR) {
+      if (k === current) return;
       // setVariant swapped the part geometries; rebuild from them (cached per key).
-      const g = geos(k);
+      const g = geos(k, w);
+      release(current);
+      current = k;
       colour.geometry = g.colour;
       outline.geometry = g.outline;
+    },
+    dispose() {
+      release(current);
+      current = '';
     },
   };
 }
 
 /** Free cached skinned geometries (renderer dispose / map change). */
 export function disposeSkinCache(): void {
-  for (const g of geoCache.values()) {
-    g.colour.dispose();
-    g.outline.dispose();
+  for (const e of geoCache.values()) {
+    e.geos.colour.dispose();
+    e.geos.outline.dispose();
   }
   geoCache.clear();
+  spare.length = 0;
 }

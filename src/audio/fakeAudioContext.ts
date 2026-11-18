@@ -70,6 +70,7 @@ export class FakeNode {
   panningModel = 'equalpower';
   distanceModel = 'inverse';
   rolloffFactor = 1;
+  normalize = true;
   refDistance = 1;
   maxDistance = 10000;
   onended: (() => void) | null = null;
@@ -169,6 +170,9 @@ export class FakeAudioContext {
   }
   createDelay(): FakeNode {
     return this.make('delay');
+  }
+  createConvolver(): FakeNode {
+    return this.make('convolver');
   }
   createDynamicsCompressor(): FakeNode {
     return this.make('compressor');

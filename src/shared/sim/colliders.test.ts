@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { BALANCE } from '../balance';
 import { createRng } from '../math';
 import { ISLAND } from '../../game/levels/island';
 import {
@@ -55,7 +56,7 @@ describe('colliders', () => {
 
   it('hut roof blocks shots up to the thatch and narrows toward the peak', () => {
     const m = flatMap({}, [{ kind: 'hut', x: 0, z: -10, rotY: 0.3, scale: 1 }]);
-    const set = buildColliders(m);
+    const set = buildColliders(m, BALANCE.movement.stepHeight);
     const g = m.baseHeight;
     const ray = (y: number, x = 0) => raycastColliders(set, { x, y: g + y, z: 0 }, { x: 0, y: 0, z: -1 }, 30);
     expect(ray(1)).not.toBeNull(); // walls
@@ -69,7 +70,7 @@ describe('colliders', () => {
   it('leaning palm: upper trunk follows the lean (rotY) and floats, so it neither blocks low shots nor walkers', () => {
     // rotY = pi/2: local +X (the lean) points to world -Z.
     const m = flatMap({}, [{ kind: 'palm', x: 0, z: 0, rotY: Math.PI / 2, scale: 1 }]);
-    const set = buildColliders(m);
+    const set = buildColliders(m, BALANCE.movement.stepHeight);
     const g = m.baseHeight;
     const parts = collidersForProp(m.props[0]!, 0, m);
     expect(parts.length).toBe(3);
@@ -91,7 +92,7 @@ describe('colliders', () => {
       { kind: 'rock', x: 0, z: 0, rotY: 0, scale: 1 },
       { kind: 'crate', x: 10, z: 0, rotY: 0.7, scale: 1 },
     ]);
-    const set = buildColliders(m);
+    const set = buildColliders(m, BALANCE.movement.stepHeight);
     const out = { x: 0, z: 0 };
     resolveCircle(set, 1, 0.2, 0.45, 2, 0.3, out);
     expect(Math.hypot(out.x, out.z)).toBeCloseTo(1.85, 5);
@@ -101,7 +102,7 @@ describe('colliders', () => {
 
   it('crate blocks a ray at body height but not one passing above it', () => {
     const m = flatMap({}, [{ kind: 'crate', x: 0, z: -5, rotY: 0, scale: 1 }]);
-    const set = buildColliders(m);
+    const set = buildColliders(m, BALANCE.movement.stepHeight);
     const low = raycastColliders(set, { x: 0, y: 2.5, z: 0 }, { x: 0, y: 0, z: -1 }, 20);
     expect(low?.t).toBeCloseTo(4.5, 5);
     expect(raycastColliders(set, { x: 0, y: 3.2, z: 0 }, { x: 0, y: 0, z: -1 }, 20)).toBeNull();
@@ -110,7 +111,7 @@ describe('colliders', () => {
   });
 
   it('grid DDA ray cast matches brute force on the island', () => {
-    const set = buildColliders(ISLAND);
+    const set = buildColliders(ISLAND, BALANCE.movement.stepHeight);
     const rng = createRng(7);
     for (let i = 0; i < 400; i++) {
       const o = { x: rng.range(-100, 100), y: rng.range(2, 6), z: rng.range(-100, 100) };
@@ -129,7 +130,7 @@ describe('colliders', () => {
   });
 
   it('island data: no player spawn or loot spawn inside a prop collider', () => {
-    const set = buildColliders(ISLAND);
+    const set = buildColliders(ISLAND, BALANCE.movement.stepHeight);
     expect(lootSpawnsInsideColliders(ISLAND, set)).toEqual([]);
     for (const s of ISLAND.playerSpawns) {
       for (const c of set.colliders) expect(overlapsCircle(c, s.x, s.z, 0.45)).toBe(false);

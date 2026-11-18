@@ -21,6 +21,8 @@ describe('client messages', () => {
   const samples: ClientMessage[] = [
     { t: 'join', name: 'Coco', protocolVersion: 1 },
     { t: 'input', input: makeInput({ seq: 7, moveForward: 1, yaw: 2.5, fire: true, selectSlot: 2 }) },
+    { t: 'input', input: makeInput({ seq: 8, ads: true, stanceToggle: 'prone', selectSlot: 3 }) },
+    { t: 'input', input: makeInput({ seq: 9, stanceToggle: 'crouch' }) },
     { t: 'ping', clientTime: 1234.5 },
   ];
   it.each(samples)('round-trips $t', (msg) => {
@@ -59,7 +61,8 @@ describe('client messages', () => {
     ['input string move', JSON.stringify({ t: 'input', input: { ...makeInput(), moveRight: '1' } })],
     ['input missing bool', JSON.stringify({ t: 'input', input: { ...makeInput(), fire: undefined } })],
     ['input bool as number', JSON.stringify({ t: 'input', input: { ...makeInput(), jump: 1 } })],
-    ['input selectSlot 3', JSON.stringify({ t: 'input', input: { ...makeInput(), selectSlot: 3 } })],
+    ['input selectSlot 4', JSON.stringify({ t: 'input', input: { ...makeInput(), selectSlot: 4 } })],
+    ['input selectSlot -2', JSON.stringify({ t: 'input', input: { ...makeInput(), selectSlot: -2 } })],
     ['input selectSlot "1"', JSON.stringify({ t: 'input', input: { ...makeInput(), selectSlot: '1' } })],
     ['oversize frame', JSON.stringify({ t: 'ping', clientTime: 1, pad: 'x'.repeat(MAX_CLIENT_FRAME_CHARS) })],
   ];
@@ -97,7 +100,7 @@ describe('server messages', () => {
     },
     {
       type: 'damage', victimId: 2, attackerId: 1, amount: 20, headshot: false, cause: 'weapon', sourcePos: v3,
-      hpAfter: 80, armorAfter: 0,
+      hpAfter: 80, vest: null, helmet: null,
     },
     { type: 'kill', victimId: 2, killerId: null, weapon: null, cause: 'zone', placement: 3 },
     { type: 'pickup', playerId: 1, lootId: 4, item: 'ammo_light', qty: 30, pos: v3 },
@@ -119,7 +122,7 @@ describe('server messages', () => {
   const { loot: _loot, ...snapNoLoot } = snapWithLocal;
 
   const samples: ServerMessage[] = [
-    { t: 'welcome', welcome: { playerId: 3, mapId: 'island01', serverTime: 100, matchId: 1 } },
+    { t: 'welcome', welcome: { playerId: 3, mapId: 'island01', serverTime: 100, matchId: 1, roomId: 'r1' } },
     { t: 'snapshot', snap: snapWithLocal },
     { t: 'snapshot', snap: snapNoLoot },
     { t: 'events', tick: 5, serverTime: 166.6, events },
@@ -177,14 +180,14 @@ describe('encodeQuantized', () => {
 describe('Contract revision 1 fields', () => {
   const damage = {
     type: 'damage', victimId: 2, attackerId: 1, amount: 20, headshot: false, cause: 'weapon', sourcePos: v3,
-    hpAfter: 80, armorAfter: 0,
+    hpAfter: 80, vest: null, helmet: null,
   } as const;
   const kill = { type: 'kill', victimId: 2, killerId: 1, weapon: 'rifle', cause: 'weapon', placement: 3 } as const;
   const failed: SimEvent = { type: 'actionFailed', playerId: 1, action: 'heal', reason: 'fullHp' };
   const loot = { id: 1, item: 'medkit', qty: 1, pos: v3 } as const;
 
   it('accepts the new optional fields when present and when absent', () => {
-    for (const ev of [damage, { ...damage, armorBefore: 25 }, { ...damage, armorBefore: 0 }, kill, { ...kill, headshot: true }]) {
+    for (const ev of [damage, { ...damage, grenadeId: 4, cause: 'explosion' }, kill, { ...kill, headshot: true }]) {
       expect(isSimEvent(ev)).toBe(true);
     }
     for (const l of [loot, { ...loot, tier: 'common' }, { ...loot, tier: 'rare' }, { ...loot, tier: 'epic' }]) {
@@ -193,9 +196,9 @@ describe('Contract revision 1 fields', () => {
   });
 
   it.each([
-    ['armorBefore string', { ...damage, armorBefore: '25' }],
-    ['armorBefore null', { ...damage, armorBefore: null }],
-    ['armorBefore NaN', { ...damage, armorBefore: NaN }],
+    ['grenadeId string', { ...damage, grenadeId: '4' }],
+    ['grenadeId null', { ...damage, grenadeId: null }],
+    ['grenadeId float', { ...damage, grenadeId: 1.5 }],
     ['kill headshot number', { ...kill, headshot: 1 }],
     ['kill headshot null', { ...kill, headshot: null }],
   ])('rejects a mistyped optional field: %s', (_label, ev) => {
@@ -210,7 +213,7 @@ describe('Contract revision 1 fields', () => {
     const snap = makeSnapshot(4, [makePlayer(1)], { loot: [{ ...loot, tier: 'epic' }, { ...loot, id: 2 }] });
     const msg = decodeServerMessage(encodeQuantized({ t: 'snapshot', snap }));
     expect(msg?.t === 'snapshot' && msg.snap.loot).toEqual([{ ...loot, tier: 'epic' }, { ...loot, id: 2 }]);
-    const events: SimEvent[] = [{ ...damage, armorBefore: 10 }, { ...kill, headshot: true }, failed];
+    const events: SimEvent[] = [{ ...damage, grenadeId: 10 }, { ...kill, headshot: true }, failed];
     const ev = decodeServerMessage(encodeQuantized({ t: 'events', tick: 9, serverTime: 300, events }));
     expect(ev).toEqual({ t: 'events', tick: 9, serverTime: 300, events });
   });
@@ -221,8 +224,8 @@ describe('Contract revision 1 fields', () => {
   });
 
   it('decodes actionFailed for every action and reason instead of filtering it', () => {
-    const actions = ['heal', 'pickup', 'reload', 'fire'];
-    const reasons = ['noHeals', 'fullHp', 'inventoryFull', 'betterArmor', 'noAmmo'];
+    const actions = ['heal', 'pickup', 'reload', 'fire', 'swap', 'stance'];
+    const reasons = ['noHeals', 'fullHp', 'inventoryFull', 'betterArmor', 'noAmmo', 'noGrenades', 'tooDeep', 'noHeadroom'];
     const events = actions.flatMap((action) => reasons.map((reason) => ({ type: 'actionFailed', playerId: 3, action, reason })));
     const msg = decodeServerMessage(JSON.stringify({ t: 'events', tick: 1, serverTime: 1, events }));
     expect(msg?.t === 'events' && msg.events).toHaveLength(events.length);

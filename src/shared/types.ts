@@ -11,15 +11,47 @@
  */
 
 // ---------------------------------------------------------------------------------------------
-// Map data (fixed by the M1 brief; verbatim)
+// Map data. M2b (ADR 0005): a discriminated union on `kind`. The island fields are the M1 brief's, unchanged.
+// MapData is never sent on the wire (clients and server look it up by id with getMap), so it may hold larger tables.
 // ---------------------------------------------------------------------------------------------
 export type Vec2 = { x: number; z: number };
 export type PropKind = 'palm' | 'rock' | 'bush' | 'crate' | 'hut' | 'dock' | 'umbrella' | 'boat' | 'tikiTorch' | 'driftwood';
 export interface PropPlacement { kind: PropKind; x: number; z: number; rotY: number; scale: number }
 export type LootTier = 'common' | 'rare' | 'epic';
-export interface MapData {
+
+/** M2b: which geometry model a map uses. 'island' = M1 heightfield + sea; 'indoor' = flat floor, walls, prop kit. */
+export type MapKind = 'island' | 'indoor';
+export const MAP_KINDS: readonly MapKind[] = ['island', 'indoor'];
+
+/**
+ * M2b: a loot spawn. `y` (optional) is the support height hint for spawns on raised tops (office desk plateaus): the
+ * sim places the item on the highest walkable top at or below y + stepHeight (groundHeightAt with feetY = y). Absent =
+ * the ground (terrain or floor).
+ */
+export interface LootSpawn { x: number; z: number; tier: LootTier; y?: number }
+export interface MapPoi { id: string; nameKey: string; x: number; z: number; radius: number }
+
+/** Fields every map kind has. */
+export interface MapBase {
   id: string;
-  nameKey: string;              // string key in en.json
+  /** String key in en.json (`map.<id>.name`). */
+  nameKey: string;
+  /**
+   * M2b: no longer used for the match start (the carrier drop replaces it, ADR 0005 §8). Kept as level data for
+   * fallback placement (a dev/test World option, bot nav reachability tests) and for level-design review.
+   */
+  playerSpawns: Vec2[];
+  lootSpawns: LootSpawn[];
+  /** Candidate final-circle centres. */
+  zoneCenters: Vec2[];
+  pois: MapPoi[];
+  /** M2b: which carrier model flies the drop route (render/audio only; route numbers are balance `drop.*`). */
+  carrier: CarrierModel;
+}
+
+/** The M1 island (docs/design/levels/island.md). */
+export interface IslandMapData extends MapBase {
+  kind: 'island';
   islandRadius: number;         // where sand meets sea level (y=0), metres from origin
   worldRadius: number;          // hard boundary, out in shallow water
   baseHeight: number;           // terrain height near island centre before hills
@@ -27,11 +59,114 @@ export interface MapData {
   shoreNoise: { amplitude: number; frequency: number; seed: number }; // makes coastline irregular
   hills: { x: number; z: number; radius: number; height: number }[];
   props: PropPlacement[];
-  playerSpawns: Vec2[];
-  lootSpawns: (Vec2 & { tier: LootTier })[];
-  zoneCenters: Vec2[];          // candidate final-circle centres
-  pois: { id: string; nameKey: string; x: number; z: number; radius: number }[];
 }
+
+/** M2b: axis-aligned rectangle on the XZ plane, metres. min < max. */
+export interface Rect { minX: number; minZ: number; maxX: number; maxZ: number }
+
+/** M2b: indoor floor finish. Footstep and landing sound, decals. Gameplay-neutral. */
+export type FloorMaterial = 'wood' | 'carpet' | 'tile';
+export const FLOOR_MATERIALS: readonly FloorMaterial[] = ['wood', 'carpet', 'tile'];
+
+/**
+ * M2b: wall material. Both are solid in the sim (block movement, bullets, grenades, blast LOS and bot sight;
+ * maps.md 2.5). 'glass' only changes rendering (see-through), the impact surface ('glass') and its sound.
+ */
+export type WallMaterial = 'solid' | 'glass';
+
+/**
+ * M2b: one straight wall, a box prism from (x1, z1) to (x2, z2) along its centre line, `thickness` across, spanning
+ * y in [bottom, top]. Doorways are gaps between segments. A lintel over a doorway is a segment with bottom > 0.
+ */
+export interface WallSegment {
+  x1: number;
+  z1: number;
+  x2: number;
+  z2: number;
+  thickness: number;
+  /** 0 for a floor-standing wall. */
+  bottom: number;
+  top: number;
+  material: WallMaterial;
+}
+
+/** M2b: a floor finish area. Later entries win where zones overlap; outside every zone the floor's own material. */
+export interface FloorZone extends Rect { material: FloorMaterial }
+
+/**
+ * M2b: an indoor prop. `kind` is a key of the map's `kit` (validated by validateIndoorMap). Position is the kit
+ * entry's origin (floor centre, surface centre, wall back face or ceiling top; see PropKitEntry.origin), `y` is that
+ * origin's height (0 on the floor, the desk-top height for 'surface' props on a desk). Uniform `scale` (1 = as authored).
+ */
+export interface IndoorPropPlacement { kind: string; x: number; y: number; z: number; rotY: number; scale: number }
+
+/** M2b: [x, y, z] in metres (kit data is authored as tuples, like src/render/procedural/office.ts). */
+export type KitV3 = readonly [number, number, number];
+
+/**
+ * M2b: one collider part of a kit entry, at scale 1 and rotY 0, relative to the prop origin. The sim turns boxes and
+ * cylinders into prisms (vertical extrusions with a flat top and a bottom) and a ramp into a stair of flat boxes with
+ * rises <= 0.8 x movement.stepHeight (ADR 0005 §3). `glass` parts are solid with impact surface 'glass'.
+ */
+export type KitCollider =
+  /** Box (min/max corners), axis-aligned before the placement's rotY. */
+  | { type: 'box'; name: string; min: KitV3; max: KitV3; glass?: boolean }
+  /** Vertical cylinder at (x, z) from y0 to y1. */
+  | { type: 'cylinder'; name: string; x: number; z: number; r: number; y0: number; y1: number }
+  /** Ramp over min..max: the walkable top rises from min.y at z = max.z to max.y at z = min.z (climbs toward -Z). */
+  | { type: 'ramp'; name: string; min: KitV3; max: KitV3 };
+
+/** M2b: collision and placement data of one indoor prop kind (pure data; no three.js). */
+export interface PropKitEntry {
+  origin: 'floor' | 'surface' | 'wall' | 'ceiling';
+  /** Footprint width (x), height (y) and depth (z) at scale 1 (render culling, minimap, nav). */
+  size: KitV3;
+  /** Empty = visual only (no collision, never blocks shots or sight). */
+  colliders: readonly KitCollider[];
+}
+export type PropKit = Readonly<Record<string, PropKitEntry>>;
+
+/**
+ * M2b: a climb route from a lower walkable surface to a higher one (office desk plateaus). Waypoints in order from the
+ * bottom; consecutive rises are <= movement.stepHeight (walk) or <= 0.95 m (jump; maps.md 2.4). Bots follow them
+ * (nav graph climb links); level tests check them.
+ */
+export interface ClimbRoute {
+  id: string;
+  points: Vec3[];
+  /** office.md 4.3: 'walk' (every rise <= stepHeight, ramps) or 'jump'. Informational; bots derive jumps from rises. */
+  mode?: 'walk' | 'jump';
+  /** office.md 4.3: plateau label (tests, debug views). */
+  plateau?: string;
+}
+
+/** M2b: an indoor level (docs/design/levels/office.md). Flat floor at y = 0, no water, no heightfield. */
+export interface IndoorMapData extends MapBase {
+  kind: 'indoor';
+  /** The walkable floor rectangle. Movement and grenades are bounded by it (the outer walls are also colliders). */
+  floor: Rect;
+  /** Floor finish outside every floorZones entry. */
+  floorMaterial: FloorMaterial;
+  floorZones: FloorZone[];
+  /** Shots and grenades stop at this height (grenades bounce with normal -Y). Renderer draws nothing above it. */
+  ceilingHeight: number;
+  walls: WallSegment[];
+  props: IndoorPropPlacement[];
+  /** Collider and placement table for `props[].kind` (the level module sets it, e.g. the office kit). */
+  kit: PropKit;
+  climbRoutes: ClimbRoute[];
+}
+
+/**
+ * M2b (ADR 0005 §1): every map. Branch on `map.kind` (or `isIndoor` in maps.ts); never read island-only fields
+ * without narrowing.
+ */
+export type AnyMapData = IslandMapData | IndoorMapData;
+/** M2b C-gate (2026-11-18): MapData is the union. `AnyMapData` stays as a synonym. */
+export type MapData = AnyMapData;
+
+/** M2b: carrier model of the drop (art and audio pick their model and engine loop from it). */
+export type CarrierModel = 'seaplane' | 'drone';
 
 // ---------------------------------------------------------------------------------------------
 // Basics and ids
@@ -43,30 +178,93 @@ export type PlayerId = number;
 /** Assigned by the sim. Positive integer, unique per match. */
 export type LootId = number;
 
-export type WeaponId = 'fists' | 'pistol' | 'smg' | 'shotgun' | 'rifle';
+/** M2a (ADR 0004): adds 'lmg' | 'dmr' | 'sniper'. Every WeaponId has a `balance.weapons.<id>` entry. */
+export type WeaponId = 'fists' | 'pistol' | 'smg' | 'shotgun' | 'rifle' | 'lmg' | 'dmr' | 'sniper';
 /** Weapons that occupy a slot and can lie on the ground (everything except fists). */
 export type GunId = Exclude<WeaponId, 'fists'>;
-export type AmmoId = 'ammo_light' | 'ammo_heavy' | 'ammo_shell';
+/** M2a: adds 'ammo_sniper' (sniper only). */
+export type AmmoId = 'ammo_light' | 'ammo_heavy' | 'ammo_shell' | 'ammo_sniper';
 export type HealId = 'bandage' | 'medkit';
-export type ArmorId = 'vest';
+/** M2a: armor is two worn pieces, each tier 1-3 (systems/armor.md). The M1 id 'vest' is gone. */
+export type VestId = 'vest_1' | 'vest_2' | 'vest_3';
+export type HelmetId = 'helmet_1' | 'helmet_2' | 'helmet_3';
+export type ArmorId = VestId | HelmetId;
+/** Which worn piece an ArmorId fills. Equals `balance.items.<id>.slot` (validated). */
+export type ArmorSlot = 'vest' | 'helmet';
+/** Equals `balance.items.<id>.tier` and the id suffix (validated). */
+export type ArmorTier = 1 | 2 | 3;
+/** 0 = no piece worn (snapshot `vestTier` / `helmetTier`). */
+export type ArmorTierOrNone = 0 | ArmorTier;
+/** M2a: the frag grenade. Stackable item; held in slot GRENADE_SLOT; numbers in `balance.items.grenade`. */
+export type ThrowableId = 'grenade';
 /** Anything that can exist as a ground loot item. Fists never appear as loot. */
-export type ItemId = GunId | AmmoId | HealId | ArmorId;
+export type ItemId = GunId | AmmoId | HealId | ArmorId | ThrowableId;
+/**
+ * M2a: what a player holds in hand. A WeaponId for slots 0-2, 'grenade' for slot 3. Used by PlayerState.weapon,
+ * weaponSwitch and kill events (kill feed weapon 'grenade'). `balance.weapons` is keyed by WeaponId only, so code
+ * must narrow (`held !== 'grenade'`) before indexing it.
+ */
+export type HeldId = WeaponId | ThrowableId;
+/**
+ * M2a: weapon sight (`balance.weapons.<id>.sight`, validated). Fists 'none'; every gun has a real sight.
+ * The grenade slot behaves as 'none' (no ADS). src/render/procedural/weapons.ts keeps its own mirror of the gun
+ * sights for model anchors; gameplay and camera code read the sight from Balance.
+ */
+export type SightType = 'none' | 'iron' | 'red_dot' | 'scope_4x' | 'scope_8x';
+/** M2a: player stance (systems/stance.md). */
+export type Stance = 'stand' | 'crouch' | 'prone';
+/** M2a: edge request from the C (crouch) and Z (prone) keys. Space stays the `jump` edge (the step interprets it). */
+export type StanceRequest = 'crouch' | 'prone';
+/** M2a: keys of `balance.movement.stances.transitionMs`, `<from>_<to>`. */
+export type StanceTransitionKey =
+  | 'stand_crouch' | 'stand_prone' | 'crouch_stand' | 'crouch_prone' | 'prone_stand' | 'prone_crouch';
 
-export const WEAPON_IDS: readonly WeaponId[] = ['fists', 'pistol', 'smg', 'shotgun', 'rifle'];
-export const GUN_IDS: readonly GunId[] = ['pistol', 'smg', 'shotgun', 'rifle'];
-export const AMMO_IDS: readonly AmmoId[] = ['ammo_light', 'ammo_heavy', 'ammo_shell'];
+export const WEAPON_IDS: readonly WeaponId[] = ['fists', 'pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper'];
+export const GUN_IDS: readonly GunId[] = ['pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper'];
+export const AMMO_IDS: readonly AmmoId[] = ['ammo_light', 'ammo_heavy', 'ammo_shell', 'ammo_sniper'];
 export const HEAL_IDS: readonly HealId[] = ['bandage', 'medkit'];
-export const ITEM_IDS: readonly ItemId[] = [...GUN_IDS, ...AMMO_IDS, ...HEAL_IDS, 'vest'];
+export const VEST_IDS: readonly VestId[] = ['vest_1', 'vest_2', 'vest_3'];
+export const HELMET_IDS: readonly HelmetId[] = ['helmet_1', 'helmet_2', 'helmet_3'];
+export const ARMOR_IDS: readonly ArmorId[] = [...VEST_IDS, ...HELMET_IDS];
+export const THROWABLE_IDS: readonly ThrowableId[] = ['grenade'];
+export const ITEM_IDS: readonly ItemId[] = [...GUN_IDS, ...AMMO_IDS, ...HEAL_IDS, ...ARMOR_IDS, ...THROWABLE_IDS];
+export const SIGHT_TYPES: readonly SightType[] = ['none', 'iron', 'red_dot', 'scope_4x', 'scope_8x'];
+export const STANCES: readonly Stance[] = ['stand', 'crouch', 'prone'];
+export const STANCE_TRANSITION_KEYS: readonly StanceTransitionKey[] = [
+  'stand_crouch', 'stand_prone', 'crouch_stand', 'crouch_prone', 'prone_stand', 'prone_crouch',
+];
+
+/** M2a: slot and tier encoded by an ArmorId (pure id data, not tuning). */
+export const ARMOR_PIECES: Readonly<Record<ArmorId, { slot: ArmorSlot; tier: ArmorTier }>> = {
+  vest_1: { slot: 'vest', tier: 1 },
+  vest_2: { slot: 'vest', tier: 2 },
+  vest_3: { slot: 'vest', tier: 3 },
+  helmet_1: { slot: 'helmet', tier: 1 },
+  helmet_2: { slot: 'helmet', tier: 2 },
+  helmet_3: { slot: 'helmet', tier: 3 },
+};
+/** M2a: inverse of ARMOR_PIECES, e.g. armorIdOf('helmet', 2) === 'helmet_2'. */
+export const armorIdOf = (slot: ArmorSlot, tier: ArmorTier): ArmorId => `${slot}_${tier}` as ArmorId;
+export const isArmorId = (v: unknown): v is ArmorId => typeof v === 'string' && v in ARMOR_PIECES;
+/** Transition key for a stance change, e.g. stanceTransitionKey('stand', 'prone') === 'stand_prone'. from !== to. */
+export const stanceTransitionKey = (from: Stance, to: Stance): StanceTransitionKey => `${from}_${to}` as StanceTransitionKey;
 
 /** Bot personality (server-only; never on the wire). Keys of balance `bots.personalities`. */
 export type BotPersonalityId = 'aggressive' | 'balanced' | 'cautious';
 export const BOT_PERSONALITY_IDS: readonly BotPersonalityId[] = ['aggressive', 'balanced', 'cautious'];
 
-/** 0 and 1 are the two weapon slots (keys 1 and 2). 2 is always fists (key 3). */
-export type SlotIndex = 0 | 1 | 2;
+/**
+ * 0 and 1 are the two weapon slots (keys 1 and 2). 2 is always fists (key 3).
+ * M2a: 3 is the grenade slot (key 4 or G); selectable only while carrying >= 1 grenade.
+ */
+export type SlotIndex = 0 | 1 | 2 | 3;
 export const FISTS_SLOT: SlotIndex = 2;
+/** M2a. */
+export const GRENADE_SLOT: SlotIndex = 3;
+export const SLOT_INDICES: readonly SlotIndex[] = [0, 1, 2, 3];
 
-export type Surface = 'sand' | 'grass' | 'water';
+/** M2b: indoor maps add the floor materials. */
+export type Surface = 'sand' | 'grass' | 'water' | IndoorSurface;
 
 /** Chibi variant indices. Small non-negative ints; the character factory wraps them. Assigned by the sim. */
 export interface Appearance { skin: number; outfit: number; hair: number }
@@ -94,42 +292,112 @@ export interface PlayerInput {
   pitch: number;
   // Held
   sprint: boolean;
+  /** Guns/fists: trigger held. M2a grenade slot: held = cook (pin pulled on the press), release = throw. */
   fire: boolean;
+  /**
+   * M2a: aim down sights held (RMB). The client turns the Settings "toggle" mode into this held flag. Read by the
+   * shared movement step (speed, adsMs) and by combat (spread), so it is part of prediction. Holding it suppresses
+   * sprint even when ADS itself is blocked (reload, heal, swap, transition, sight 'none').
+   */
+  ads: boolean;
   // Edge (pressed since the previous input)
+  /** Space. Standing + grounded: jump. M2a: crouch -> stand, prone -> crouch (never jumps from crouch/prone). */
   jump: boolean;
   reload: boolean;
   interact: boolean;
   useHeal: boolean;
-  /** -1 = no change. Otherwise the slot whose key was pressed this tick. */
+  /** -1 = no change. Otherwise the slot whose key was pressed this tick (M2a: 3 = grenade, keys 4 and G). */
   selectSlot: SlotIndex | -1;
+  /**
+   * M2a edge: C -> 'crouch', Z -> 'prone', else null. If both were pressed since the last input, the later press
+   * wins. Toggle semantics are applied by the movement step (stance.md "Keys"): 'crouch' from crouch = stand,
+   * 'prone' from prone = stand (falls back to crouch without headroom).
+   */
+  stanceToggle: StanceRequest | null;
 }
 
 // ---------------------------------------------------------------------------------------------
 // Movement (shared by server sim and client prediction)
 // ---------------------------------------------------------------------------------------------
-export interface MovementState {
+/** M2b: includes DropMovementFields (dropPhase, dropMs). */
+export interface MovementState extends DropMovementFields {
   /** Feet position. */
   pos: Vec3;
   vel: Vec3;
   grounded: boolean;
   /** True from spawn (in the air at match.dropHeight) until first ground contact. Uses drop fall/steer speeds. */
   dropping: boolean;
+  /**
+   * M2a (stance.md, ADR 0004 §1). Target stance; equals the current stance once settled. Spawn: 'stand'.
+   * Predicted by the client exactly like position (the step owns every stance rule: requests, water, headroom).
+   */
+  stance: Stance;
+  /** M2a: stance the current transition started from. Equals `stance` when settled (stanceMs === 0). */
+  stanceFrom: Stance;
+  /**
+   * M2a: remaining transition ms, 0 = settled. Starts at `movement.stances.transitionMs[stanceFrom_stance]` and
+   * counts down by dt x 1000 per step (clamped at 0). progress = 1 - stanceMs / transitionMs[key].
+   */
+  stanceMs: number;
+  /**
+   * M2a (combat.md "ADS"): ms aimed so far, in [0, weapons[held].adsTimeMs]. 0 = not engaged. Advanced by the step
+   * while engaged, reset to 0 the tick ADS is not engaged (instant exit). adsProgress = adsMs / adsTimeMs.
+   * ADR 0004 addendum A1.7: ADS never engages when adsTimeMs is 0 (adsMs stays 0); validateBalance requires
+   * adsTimeMs > 0 for every weapon with a sight, so only fists (sight 'none') have 0. Lives here so ADS is predicted
+   * and reconciled with movement.
+   */
+  adsMs: number;
 }
 
-/** The subset of input the movement step reads, plus status modifiers computed by `toMovementInput` in the sim. */
+/**
+ * The subset of input the movement step reads, plus status modifiers computed by `toMovementInput` in the sim.
+ * M2a: the step also owns stance and the ADS timer, so it receives the raw stance/ads intent plus the status it
+ * cannot see (held item, ADS blockers). Stance, ADS and water multipliers are applied INSIDE the step; callers
+ * must not fold them into speedMultiplier.
+ */
 export interface MovementInput {
   moveForward: number;
   moveRight: number;
   yaw: number;
+  /** Raw Space edge. The step turns it into a jump (standing, settled, grounded) or a stance request (crouch/prone). */
   jump: boolean;
+  /** Raw held sprint. While crouched with forward intent and every other sprint condition met, starts crouch_stand. */
   sprint: boolean;
-  /** 1 normally; e.g. movement.healMoveMultiplier while healing; 0 when dead. */
+  /**
+   * Product of the non-stance, non-ADS, non-water multipliers: movement.healMoveMultiplier while healing, the held
+   * weapon's fireMoveMultiplier within combat.fireMoveWindowMs of a shot (LMG). 1 normally; 0 when dead.
+   */
   speedMultiplier: number;
-  /** False while healing/reloading if the design forbids sprinting then. */
+  /** False while healing or while `fire` is held (includes cooking a grenade). ADS suppression is done by the step. */
   canSprint: boolean;
+  /** M2a: PlayerInput.stanceToggle (null when dead). */
+  stanceToggle: StanceRequest | null;
+  /** M2a: PlayerInput.ads (false when dead). Suppresses sprint whenever true. */
+  ads: boolean;
+  /** M2a: item in hand; the step reads weapons[held].sight/adsTimeMs/adsMoveMultiplier ('grenade' = sight 'none'). */
+  held: HeldId;
+  /**
+   * M2a: true while ADS may not engage for reasons outside movement: dead, reloading, healing, swapping.
+   * (Dropping, stance transitions and sight 'none' are checked by the step itself.)
+   */
+  adsBlocked: boolean;
 }
 
-export interface MovementStepResult {
+/** M2a: a stance transition that began this step. */
+export interface StanceChange {
+  from: Stance;
+  to: Stance;
+  /** True for the automatic water stand-up (stance.md step 1). */
+  forced: boolean;
+  /** movement.stances.transitionMs[from_to]. */
+  durationMs: number;
+}
+
+/** M2a: why a C/Z/Space stance request was refused (sprint-triggered stand-ups fail silently and never report). */
+export type StanceRefusal = 'tooDeep' | 'noHeadroom';
+
+/** M2b: includes DropStepFields (chuteOpened). */
+export interface MovementStepResult extends DropStepFields {
   state: MovementState;
   /** A jump started this step. */
   jumped: boolean;
@@ -137,6 +405,12 @@ export interface MovementStepResult {
   landed: boolean;
   /** Downward speed (m/s, >= 0) at the moment of landing; 0 if not landed. Used for fall damage and land SFX. */
   landingSpeed: number;
+  /** M2a: non-null when a stance transition started this step (World emits `stanceChange`). */
+  stanceChanged: StanceChange | null;
+  /** M2a: non-null when a C/Z/Space request was refused this step (World emits actionFailed 'stance' for humans). */
+  stanceRefused: StanceRefusal | null;
+  /** M2a: ADS engaged this step (adsMs advanced). False on the tick it ends. */
+  adsEngaged: boolean;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -152,10 +426,14 @@ export interface PlayerAnim {
   firing: boolean;
   reloading: boolean;
   healing: boolean;
+  /** M2a: ADS engaged (adsMs > 0). Drives the scope glint when the held weapon's sight is scope_4x/scope_8x. */
+  ads: boolean;
+  /** M2a: holding a cooking grenade (pin pulled, not yet thrown). */
+  cooking: boolean;
 }
 
 /** A player as every client sees it. Dead players stay in the list (alive = false) until the match ends. */
-export interface PlayerState {
+export interface PlayerState extends PlayerDropFields {
   id: PlayerId;
   name: string;
   /** Feet position. */
@@ -165,10 +443,22 @@ export interface PlayerState {
   yaw: number;
   pitch: number;
   hp: number;
-  armor: number;
+  /** M2a: worn vest tier, 0 = none (replaces the M1 `armor` number). Durability is owner-only (LocalPlayerState). */
+  vestTier: ArmorTierOrNone;
+  /** M2a: worn helmet tier, 0 = none. */
+  helmetTier: ArmorTierOrNone;
   alive: boolean;
-  /** Weapon currently in hand. */
-  weapon: WeaponId;
+  /** Item currently in hand. M2a: 'grenade' while the grenade slot is active. */
+  weapon: HeldId;
+  /** M2a: MovementState.stance (target stance). */
+  stance: Stance;
+  /** M2a: MovementState.stanceFrom (=== stance when settled). */
+  stanceFrom: Stance;
+  /**
+   * M2a: transition progress in [0, 1]; 1 = settled. = 1 - stanceMs / transitionMs[stanceFrom_stance].
+   * Lets remotes animate transitions and pick the transition hitbox without reading balance.
+   */
+  stanceProgress: number;
   anim: PlayerAnim;
   appearance: Appearance;
   isBot: boolean;
@@ -177,8 +467,15 @@ export interface PlayerState {
 
 export interface WeaponSlotState { weapon: GunId; mag: number }
 
+/** M2a: a worn armor piece (owner-only). The id is armorIdOf(slot, tier); max durability = items[id].durability. */
+export interface ArmorPieceState {
+  tier: ArmorTier;
+  /** Float, > 0 (a piece at 0 is destroyed and becomes null). The HUD shows ceil. */
+  durability: number;
+}
+
 /** Extra state only the owning client receives. */
-export interface LocalPlayerState {
+export interface LocalPlayerState extends LocalDropFields {
   id: PlayerId;
   /** Seq of the last input the server applied to this player. Inputs <= this are acknowledged. */
   lastProcessedInputSeq: number;
@@ -188,9 +485,23 @@ export interface LocalPlayerState {
    */
   movement: MovementState;
   slots: [WeaponSlotState | null, WeaponSlotState | null];
+  /** M2a: may be GRENADE_SLOT (3). */
   activeSlot: SlotIndex;
   ammo: Record<AmmoId, number>;
   heals: Record<HealId, number>;
+  /** M2a: worn vest, null = none. */
+  vest: ArmorPieceState | null;
+  /** M2a: worn helmet, null = none. */
+  helmet: ArmorPieceState | null;
+  /** M2a: carried (uncooked) grenades, 0..items.grenade.maxCarry. The cooking one is already subtracted. */
+  grenades: number;
+  /**
+   * M2a: server ms when the grenade in hand explodes (cook-out); null when not cooking.
+   * Fuse ring: remaining = cookExplodesAt - serverNow(), total = items.grenade.fuseMs.
+   */
+  cookExplodesAt: number | null;
+  /** M2a: ms until the next pin pull is allowed (items.grenade.throwRecoveryMs after a throw); 0 = ready. */
+  throwRecoveryMs: number;
   /** 0 when not reloading. */
   reloadRemainingMs: number;
   reloadTotalMs: number;
@@ -209,10 +520,38 @@ export interface LootState {
   /** Resting position on the ground (the renderer adds bob/spin). */
   pos: Vec3;
   /**
-   * M1-fix (producer: game-developer, sim loot spawn): tier of the spawn point this item came from; death drops use
-   * 'common'. Renderer draws the tier ring from it and only falls back to nearest-spawn inference when absent.
+   * Rarity glow (producer: game-developer, sim loot.ts). Spawned items: the tier of the spawn point they came from.
+   * M2a: dropped items (death, weapon swap and armor swap drops) use the fixed per-item rarity table in
+   * docs/design/systems/loot.md ("UI"; `dropTierOf` in sim loot.ts), e.g. sniper and vest_3 'epic', rifle 'rare'.
+   * Renderer draws the tier ring from it and only falls back to nearest-spawn inference when absent.
    */
   tier?: LootTier;
+  /**
+   * M2a: remaining durability of an armor pickup (present iff `item` is an ArmorId; qty is always 1 then).
+   * Spawned pieces have items[id].durability; dropped pieces keep what was left.
+   */
+  durability?: number;
+}
+
+/** M2a: assigned by the sim. Positive integer, unique per match. */
+export type GrenadeId = number;
+
+/**
+ * M2a (ADR 0004 §3): a live grenade entity, in the snapshot for every client. Everything the shared
+ * `stepGrenade` needs to continue the path deterministically, so clients extrapolate it exactly.
+ */
+export interface GrenadeState {
+  id: GrenadeId;
+  /** Thrower (kill credit). Kept even if the owner died or left. */
+  ownerId: PlayerId;
+  /** Centre, at the snapshot's serverTime. */
+  pos: Vec3;
+  /** m/s. All zero while resting. */
+  vel: Vec3;
+  /** Server ms of the fuse end (explosion tick). Drives the blink rate. */
+  explodesAt: number;
+  /** Has entered water (the one-off waterVelocityDamping was applied). Needed to continue the path exactly. */
+  inWater: boolean;
 }
 
 export interface ZoneState {
@@ -237,7 +576,7 @@ export interface ZoneState {
 
 export type MatchPhase = 'lobby' | 'countdown' | 'playing' | 'results';
 
-export interface MatchState {
+export interface MatchState extends MatchMapFields {
   /** Increments each time a new lobby opens. */
   matchId: number;
   phase: MatchPhase;
@@ -270,6 +609,8 @@ export interface WorldSnapshot {
    * re-fills it so consumers always see the full list.
    */
   loot: LootState[];
+  /** M2a: every live grenade, sorted by id. Empty outside 'playing'. Always present (no version gating). */
+  grenades: GrenadeState[];
   /** Per-recipient. null if the recipient is not a participant (lobby, mid-match spectator). */
   local: LocalPlayerState | null;
 }
@@ -283,21 +624,237 @@ export interface Standing {
   placement: number;
 }
 
+/**
+ * Sent at each match start (one World per match, ADR 0006) and when joining a room mid-match. M2b: the client loads
+ * `mapId` and resets per-match state on every welcome.
+ */
 export interface WelcomeInfo {
+  /** The local player's id in THIS match's World (changes every match; rooms use memberId, ADR 0006 §3). */
   playerId: PlayerId;
-  mapId: string;
+  mapId: MapId;
   /** Server clock ms when the welcome was sent. */
   serverTime: number;
   matchId: number;
+  /** M2b: the room this match belongs to. */
+  roomId: RoomId;
 }
+
+// ---------------------------------------------------------------------------------------------
+// M2b: maps, drop and rooms (ADR 0005, ADR 0006)
+// ---------------------------------------------------------------------------------------------
+/** Map id (`MapData.id`): 'island01' | 'office' today. A plain string on the wire; validated against the server's list. */
+export type MapId = string;
+/** A map vote: a map id or 'random' (maps.md 1). */
+export type MapVoteOption = MapId | 'random';
+/** Room map setting: a fixed map or a vote among the room's humans (rooms.md). */
+export type RoomMapMode = MapId | 'vote';
+/** How the match's map was chosen (UI banner). */
+export type MapPickVia = 'pinned' | 'fixed' | 'vote' | 'random' | 'rotation';
+
+/** M2b drop phase (drop.md). 'aboard' is not a movement phase: it is PlayerState.aboard. */
+export type DropPhase = 'freefall' | 'chute';
+
+/*
+ * M2b field blocks (ADR 0005 §1). Since the C-gate (2026-11-18) each is merged into its target with `extends`
+ * (MovementState, MovementStepResult, PlayerState, LocalPlayerState, MatchState; DropSimEvent into SimEvent) and every
+ * field is required. The block names stay exported for code that names them.
+ */
+
+/** → MovementState. Predicted like position. */
+export interface DropMovementFields {
+  /** Phase of the drop while `dropping`; null when not dropping (drop.md "Freefall and parachute"). */
+  dropPhase: DropPhase | null;
+  /** ms since the jump while dropping (manual deploy needs >= drop.minFreefallMs); 0 otherwise. */
+  dropMs: number;
+}
+
+/** → MovementStepResult. */
+export interface DropStepFields {
+  /**
+   * The parachute opened this step: 'manual' (jump edge in freefall at dropMs >= drop.minFreefallMs, when
+   * drop.manualDeploy) or 'auto' (height above the terrain or floor below <= drop.chuteDeployHeight; props ignored).
+   * World emits SimEvent `chuteOpen`; ClientGame emits the local GameEvent from prediction.
+   */
+  chuteOpened: 'manual' | 'auto' | null;
+}
+
+/** → PlayerState. */
+export interface PlayerDropFields {
+  /** Riding the carrier: pos = the carrier position; not drawn as a character, invulnerable, not targetable. */
+  aboard: boolean;
+  /** MovementState.dropPhase (freefall pose, open parachute); null when not dropping. */
+  dropPhase: DropPhase | null;
+}
+
+/** → LocalPlayerState. */
+export interface LocalDropFields {
+  /** Aboard: no prediction; ClientGame derives the view position from MatchState.route. */
+  aboard: boolean;
+}
+
+/** → MatchState. */
+export interface MatchMapFields {
+  /** Map of this World's match (one World per match, ADR 0006 §2). */
+  mapId: MapId;
+  /** The carrier route from the World's creation (= the room's map lock) to the match end; null in drop-less test Worlds. */
+  route: DropRoute | null;
+  /** Participants still aboard (HUD "N aboard"); 0 outside the flight. */
+  aboardCount: number;
+}
+
+/** → SimEvent (public; both also exist for bots). */
+export type DropSimEvent =
+  /** Left the carrier (jump edge, or `auto` = the eject point). pos = the carrier position on that tick. */
+  | { type: 'dropJump'; playerId: PlayerId; pos: Vec3; auto: boolean }
+  /** Parachute opened (manual or auto, see DropStepFields). */
+  | { type: 'chuteOpen'; playerId: PlayerId; pos: Vec3; manual: boolean };
+
+/** → ImpactSurface and GrenadeContactSurface ('glass' walls and glass kit parts, maps.md 2.5). */
+export type GlassSurface = 'glass';
+/** → Surface (indoor footsteps and landings). */
+export type IndoorSurface = FloorMaterial;
+
+/**
+ * M2b (drop.md "Route generation"): the carrier's straight route, drawn by the World's seeded RNG when the World is
+ * created (the room's map lock). Clients derive the carrier position: lerp(entry, exit, (now - startsAt) /
+ * (endsAt - startsAt)), clamped; y = altitude. No per-tick carrier sync.
+ */
+export interface DropRoute {
+  mapId: MapId;
+  /** Start of the flight (play area expanded by drop.routeEntryMargin). */
+  entry: Vec2;
+  /** End of the flight. */
+  exit: Vec2;
+  /** Auto-eject point (play area inset by drop.ejectInset). */
+  eject: Vec2;
+  /** Absolute y. */
+  altitude: number;
+  /** m/s. */
+  speed: number;
+  /** Server ms when the carrier leaves `entry` (first tick of 'playing'). */
+  startsAt: number;
+  /** Server ms before which jump edges are ignored (startsAt + drop.noJumpMs). */
+  noJumpUntil: number;
+  /** Server ms of the auto-eject (carrier at `eject`). */
+  ejectAt: number;
+  /** Server ms when the carrier reaches `exit` and despawns. */
+  endsAt: number;
+}
+
+/** M2b (ADR 0006): server-unique room id ('r' + counter, never reused). Not the shareable code. */
+export type RoomId = string;
+/** M2b: room-scoped member id (stable while the member stays in the room; not a World PlayerId). */
+export type MemberId = number;
+export type RoomVisibility = 'public' | 'private';
+/** M2b: room lifecycle (rooms.md "States"). 'countdown' covers both the vote-open part and the post-lock part. */
+export type RoomPhase = 'waiting' | 'countdown' | 'playing' | 'results';
+export const ROOM_PHASES: readonly RoomPhase[] = ['waiting', 'countdown', 'playing', 'results'];
+
+/** M2b (ADR 0006 §4): room code alphabet (28 symbols: no 0/O/1/I/L, no vowels). Codes are ROOM_CODE_LENGTH long. */
+export const ROOM_CODE_ALPHABET = '23456789BCDFGHJKMNPQRSTVWXYZ';
+export const ROOM_CODE_LENGTH = 5;
+/**
+ * M2b: canonical form of a typed or linked code: upper-cased, spaces and '-' removed. Returns null unless the result
+ * is exactly ROOM_CODE_LENGTH alphabet characters. Shared by Ui (?room= and the field), NetClient and the server.
+ */
+export function normalizeRoomCode(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw.length > 32) return null;
+  const c = raw.toUpperCase().replace(/[\s-]/g, '');
+  if (c.length !== ROOM_CODE_LENGTH) return null;
+  for (const ch of c) if (!ROOM_CODE_ALPHABET.includes(ch)) return null;
+  return c;
+}
+
+/** M2b: host-editable settings (rooms.md "Room settings"). */
+export interface RoomSettings {
+  /** null = default: clients render `room.create.name.default` with the host name (ADR 0006 §6, Q5). */
+  name: string | null;
+  visibility: RoomVisibility;
+  mapMode: RoomMapMode;
+  /** rooms.minMaxHumans..rooms.maxMaxHumans, never below the current member count. */
+  maxHumans: number;
+  /** Fill to match.targetPlayers with bots at match start (default rooms.fillWithBotsDefault). */
+  fillBots: boolean;
+}
+
+/** M2b: one public room in the browser list. Private rooms never appear. Never carries the code. */
+export interface RoomSummary {
+  id: RoomId;
+  name: string | null;
+  hostName: string;
+  mapMode: RoomMapMode;
+  /** Map of the running or locked match; null while a vote is open or before the first match. */
+  mapId: MapId | null;
+  humans: number;
+  maxHumans: number;
+  phase: RoomPhase;
+  /** Server ms when the current phase began (clients tick "In match 3:12" locally). */
+  phaseSince: number;
+}
+
+export interface RoomMember {
+  memberId: MemberId;
+  name: string;
+  /** Always false for the host (the host counts as ready, rooms.md). Reset after every match. */
+  ready: boolean;
+  /** Persists across matches while the member stays in the room (director ruling Q4). */
+  vote: MapVoteOption | null;
+  /** 'playing' = a participant of the running match (alive or dead); 'spectating' = joined mid-match. */
+  status: 'waiting' | 'playing' | 'spectating';
+  /** Server ms; host migration picks the oldest (ties: lower memberId). */
+  joinedAt: number;
+}
+
+/** M2b: full room state, sent to members on every change (coalesced <= 5/s). */
+export interface RoomState {
+  id: RoomId;
+  /** ROOM_CODE_LENGTH chars from ROOM_CODE_ALPHABET. Members only. */
+  code: string;
+  settings: RoomSettings;
+  hostId: MemberId;
+  hostName: string;
+  members: RoomMember[];
+  phase: RoomPhase;
+  phaseSince: number;
+  /** Server MAP env pin (votes disabled), else null. */
+  pinnedMap: MapId | null;
+  /** Map of the running or locked match and how it was chosen; null while the vote is open. */
+  map: { id: MapId; via: MapPickVia } | null;
+  /** Server ms when the countdown ends; null outside 'countdown'. */
+  countdownEndsAt: number | null;
+  /** Server ms of the map lock (countdownEndsAt - match.mapVoteLockSeconds); null outside 'countdown'. */
+  lockAt: number | null;
+  /** Auto-start timer (rooms.md): reason and server ms when it fires; null when none runs. */
+  autoStart: { reason: 'allReady' | 'timer'; at: number } | null;
+  /** Live vote tally (vote mode only, else null). Always island01, office, random order (server's map list + random). */
+  votes: { option: MapVoteOption; count: number }[] | null;
+  /** Bot seats that will be filled at start (fillBots ? max(0, targetPlayers - humans) : 0). */
+  botSeats: number;
+  /** The match in progress, if any (welcome.matchId of it). */
+  matchId: number | null;
+}
+
+/** M2b: non-fatal lobby refusal codes (ADR 0006 §3). */
+export type RejectCode =
+  | 'room_not_found' | 'bad_code' | 'room_full' | 'max_rooms' | 'server_busy'
+  | 'not_host' | 'bad_state' | 'bad_settings' | 'already_in_room' | 'not_in_room'
+  | 'kicked' | 'rate_limited' | 'vote_closed' | 'too_few_humans';
+
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'disconnected' | 'error';
 
 // ---------------------------------------------------------------------------------------------
 // Sim events (returned by World.step, broadcast by the server, translated to GameEvents by ClientGame)
 // ---------------------------------------------------------------------------------------------
-export type DeathCause = 'weapon' | 'zone' | 'fall';
-export type ImpactSurface = 'player' | 'terrain' | 'prop' | 'water' | 'none';
+/**
+ * Why a player took damage. M2a adds 'explosion' (grenades; the kill event's weapon is then 'grenade').
+ * Armor applies to 'weapon' (vest or helmet by hit zone) and 'explosion' (vest only); never to 'zone' or 'fall'.
+ */
+export type DeathCause = 'weapon' | 'zone' | 'fall' | 'explosion';
+/** M2b: 'glass' = glass walls and glass kit parts (solid; cosmetic difference only). */
+export type ImpactSurface = 'player' | 'terrain' | 'prop' | 'water' | 'none' | GlassSurface;
+/** M2a: what a grenade bounced off. 'edge' = the worldRadius wall. */
+export type GrenadeContactSurface = 'terrain' | 'prop' | 'water' | 'edge' | GlassSurface;
 
 export interface ShotImpact {
   /** End point of the ray (hit point, or origin + dir * range when it hit nothing). */
@@ -307,65 +864,121 @@ export interface ShotImpact {
   headshot: boolean;
 }
 
+/**
+ * M2a: what one armor piece did in one damage event (systems/armor.md). Present only when the victim wore that
+ * piece at the start of the event AND the event's damage was routed to it (helmet: head hits; vest: body hits and
+ * explosions). A shotgun event can carry both.
+ */
+export interface ArmorHit {
+  /** Tier of the piece before the hit (audio pitch by tier, hit-marker variant). */
+  tier: ArmorTier;
+  /** Durability removed by this event (> 0 unless the raw damage was 0). */
+  absorbed: number;
+  /** The piece reached 0 and was destroyed (snapshot tier becomes 0). */
+  broken: boolean;
+}
+
 export type SimEvent =
   /** A player entered the match world (spawned in the air for the drop). */
   | { type: 'spawn'; playerId: PlayerId; pos: Vec3 }
   /** One trigger pull. `impacts` has one entry per pellet (1 for non-shotguns). Fists: one short-range impact. */
   | { type: 'shot'; shooterId: PlayerId; weapon: WeaponId; origin: Vec3; impacts: ShotImpact[] }
-  /** One damage application (pellets of one shot are summed into a single event per victim). */
+  /**
+   * One damage application (pellets of one shot are summed into a single event per victim; one event per victim
+   * per explosion).
+   */
   | {
       type: 'damage';
       victimId: PlayerId;
+      /** Shooter, or the grenade owner for explosions (even if the owner is dead or gone); null for zone/fall. */
       attackerId: PlayerId | null;
+      /** Raw damage BEFORE armor (falloff and headshot multiplier applied). HP lost = amount - absorbed total. */
       amount: number;
       headshot: boolean;
       cause: DeathCause;
-      /** Attacker eye position, or the nearest zone-edge point for zone damage. */
+      /** Attacker eye position, the blast centre for explosions, or the nearest zone-edge point for zone damage. */
       sourcePos: Vec3;
       hpAfter: number;
-      armorAfter: number;
-      /**
-       * M1-fix (producer: game-developer): victim armor before this hit. Armor hit = armorBefore > 0;
-       * armor break = armorBefore > 0 && armorAfter === 0. Absent = unknown (consumers fall back to tracking).
-       */
-      armorBefore?: number;
+      /** M2a (replaces M1 armorAfter/armorBefore): vest involvement, null if no vest absorbed in this event. */
+      vest: ArmorHit | null;
+      /** M2a: helmet involvement (head hits only), null otherwise. */
+      helmet: ArmorHit | null;
+      /** M2a: explosion id when cause === 'explosion', else absent. */
+      grenadeId?: GrenadeId;
     }
   | {
       type: 'kill';
       victimId: PlayerId;
       killerId: PlayerId | null;
-      weapon: WeaponId | null;
+      /** M2a: HeldId so the kill feed can show 'grenade' (cause 'explosion'). null for zone/fall. */
+      weapon: HeldId | null;
       cause: DeathCause;
       /** Victim's final placement (aliveCount after death + 1). */
       placement: number;
-      /** M1-fix (producer: game-developer): the lethal hit was a headshot. Always false for zone/fall. */
+      /** M1-fix (producer: game-developer): the lethal hit was a headshot. Always false for zone/fall/explosion. */
       headshot?: boolean;
     }
-  | { type: 'pickup'; playerId: PlayerId; lootId: LootId; item: ItemId; qty: number; pos: Vec3 }
+  /** M2a: `durability` is set when `item` is an ArmorId (the worn piece's durability after the pickup). */
+  | { type: 'pickup'; playerId: PlayerId; lootId: LootId; item: ItemId; qty: number; pos: Vec3; durability?: number }
   | { type: 'reloadStart'; playerId: PlayerId; weapon: GunId; durationMs: number }
   | { type: 'reloadEnd'; playerId: PlayerId; weapon: GunId; completed: boolean }
   | { type: 'healStart'; playerId: PlayerId; item: HealId; durationMs: number }
   | { type: 'healEnd'; playerId: PlayerId; item: HealId; completed: boolean; hpAfter: number }
-  | { type: 'weaponSwitch'; playerId: PlayerId; weapon: WeaponId; slot: SlotIndex }
+  /** M2a: weapon is 'grenade' with slot 3. Also emitted for the auto-switch after the last grenade is thrown. */
+  | { type: 'weaponSwitch'; playerId: PlayerId; weapon: HeldId; slot: SlotIndex }
   | { type: 'matchEnded'; winnerId: PlayerId | null; standings: Standing[] }
+  /**
+   * M2a: a stance transition started (player request or forced water stand-up). Public: remotes play the cloth
+   * rustle. ClientGame emits the LOCAL player's GameEvent from prediction and ignores this echo for the local id.
+   */
+  | { type: 'stanceChange'; playerId: PlayerId; from: Stance; to: Stance; forced: boolean; durationMs: number }
+  /** M2a: pin pulled (cook started). Public (positional click ~10 m). */
+  | { type: 'grenadeCook'; playerId: PlayerId; pos: Vec3; explodesAt: number }
+  /**
+   * M2a: a grenade entity was created. `dropped` = released by a swap-away, death or disconnect while cooking (no
+   * throw whoosh). pos/vel at this tick's serverTime; the entity also appears in the next snapshot.
+   */
+  | {
+      type: 'grenadeThrown';
+      id: GrenadeId;
+      ownerId: PlayerId;
+      pos: Vec3;
+      vel: Vec3;
+      explodesAt: number;
+      dropped: boolean;
+    }
+  /** M2a: a contact with impact normal speed >= items.grenade.bounceEventMinSpeed, or the water entry. */
+  | { type: 'grenadeBounce'; id: GrenadeId; pos: Vec3; surface: GrenadeContactSurface; speed: number }
+  /**
+   * M2a: emitted BEFORE the damage events of the same blast; the entity is gone from the next snapshot.
+   * `inHand` = cook-out (exploded at the thrower's eye; `id` is still a fresh GrenadeId).
+   */
+  | { type: 'explosion'; id: GrenadeId; ownerId: PlayerId; pos: Vec3; radius: number; inHand: boolean }
   /** M1-fix (Contract revision 1 #5): translated by src/game/simEvents.ts, validated by protocol isSimEvent. */
-  | ActionFailedSimEvent;
+  | ActionFailedSimEvent
+  /** M2b: carrier jump and parachute (public). */
+  | DropSimEvent;
 
 /**
  * M1-fix (producer: game-developer). A human's edge action was refused. Emitted at most once per press (edge
- * inputs), never for bots, never for held `fire`. See ARCHITECTURE.md §12 "Contract revision 1" for the
- * reason -> string-key table.
+ * inputs), never for bots, never for held `fire`. See ARCHITECTURE.md §12 "Contract revision 1" and §14 for the
+ * reason -> string-key table. Private: sent only to `playerId`.
  */
 export interface ActionFailedSimEvent { type: 'actionFailed'; playerId: PlayerId; action: FailedAction; reason: ActionFailReason }
 
-/** M1-fix: actions that can be refused by the sim. */
-export type FailedAction = 'heal' | 'pickup' | 'reload' | 'fire';
+/** Actions that can be refused by the sim. M2a: 'swap' (slot 3 with no grenades), 'stance'. */
+export type FailedAction = 'heal' | 'pickup' | 'reload' | 'fire' | 'swap' | 'stance';
 /**
- * M1-fix: why an action was refused.
+ * Why an action was refused.
  * - noHeals: Q with no bandage/medkit.        - fullHp: Q when no carried heal would add HP (at/above healCap).
- * - inventoryFull: E on ammo/heal at maxCarry/maxStack.   - betterArmor: E on a vest with armor >= vest value.
+ * - inventoryFull: E on ammo/heal/grenades at maxCarry/maxStack.
+ * - betterArmor: E on an armor piece whose tier <= the worn piece's tier in that slot (armor.md "Equipping").
  * - noAmmo: R (or a fire press) with an empty mag and no reserve.
+ * - noGrenades (M2a): slot 3 selected with 0 grenades (action 'swap').
+ * - tooDeep (M2a): C/Z/Space stance request into a stance not allowed at this water depth (action 'stance').
+ * - noHeadroom (M2a): stance request to a taller stance blocked by a collider overhead (action 'stance').
  */
-export type ActionFailReason = 'noHeals' | 'fullHp' | 'inventoryFull' | 'betterArmor' | 'noAmmo';
+export type ActionFailReason =
+  | 'noHeals' | 'fullHp' | 'inventoryFull' | 'betterArmor' | 'noAmmo' | 'noGrenades' | 'tooDeep' | 'noHeadroom';
 
 export type SimEventType = SimEvent['type'];

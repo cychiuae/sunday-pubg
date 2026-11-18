@@ -8,21 +8,21 @@
 import { expect, test, type Page } from '@playwright/test';
 import {
   hpValue,
-  join,
+  jumpAndLand,
   lockPointer,
+  soloMatch,
   newPlayer,
   openTitle,
   renderStats,
   SHOTS,
   ui,
   unexpectedErrors,
-  waitForMatch,
 } from './support/game';
 import { dist2, Observer, wrap, yawTo, type ObsLoot, type ObsPlayer } from './support/observer';
 import { startStack, type Stack } from './support/stack';
 
 const NAME = 'QA Hands';
-const GUNS = new Set(['pistol', 'smg', 'shotgun', 'rifle']);
+const GUNS = new Set(['pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper']);
 
 let stack: Stack;
 
@@ -79,9 +79,8 @@ test('browser input drives the authoritative player: drop, move, look, loot, sho
   // Smaller viewport = more frames per second under SwiftShader (HUD layout is covered by other specs at 1280x720).
   await page.setViewportSize({ width: 960, height: 540 });
   await openTitle(page);
-  await join(page, NAME);
-  await waitForMatch(page);
-  const obs = await Observer.connect(stack.serverPort);
+  const code = await soloMatch(page, NAME, { map: 'island01' });
+  const obs = await Observer.connect(stack.serverPort, code);
   const notes: string[] = [];
 
   try {
@@ -96,39 +95,18 @@ test('browser input drives the authoritative player: drop, move, look, loot, sho
     // look step below re-measures it after landing.
     let radPerPx = 0.0022;
     let target: ObsLoot | null = null;
-    await test.step('drop: falls from ~dropHeight, W steers it onto the nearest gun, lands not dropping', async () => {
-      // The observer connected right after the HUD appeared, so its first snapshots show the drop start.
-      const first = obs.track(NAME, -1)[0]!;
-      expect(first.p.anim.dropping, 'player starts in the drop').toBe(true);
-      expect(first.p.pos.y, 'drop starts high above the beach').toBeGreaterThan(15);
-      const start = await me(obs);
-      // Nearest gun within drop-steering reach (dropSteerSpeed 9 m/s for ~3.5 s of fall).
+    await test.step('carrier drop (M2b): Space at the door, freefall, chute, land; then walk to the nearest gun', async () => {
+      // The M1 steered spawn drop is gone (drop.md); the carrier flow itself is covered by m2b-fp.spec.ts.
+      await jumpAndLand(page, 90_000);
+      const landed = await me(obs);
+      expect(landed.anim.dropping).toBe(false);
+      expect(landed.aboard).toBe(false);
       target =
         obs.latest!.loot
           .filter((l) => GUNS.has(l.item))
-          .sort((a, b) => dist2(start.pos, a.pos) - dist2(start.pos, b.pos))[0] ?? null;
+          .sort((a, b) => dist2(landed.pos, a.pos) - dist2(landed.pos, b.pos))[0] ?? null;
       expect(target, 'a gun exists').not.toBeNull();
-      const t = target!;
-      notes.push(`drop target ${t.item}#${t.id} at ${dist2(start.pos, t.pos).toFixed(1)} m`);
-      let maxSteer = 0;
-      while ((await me(obs)).anim.dropping) {
-        const p = await me(obs);
-        const d = dist2(p.pos, t.pos);
-        maxSteer = Math.max(maxSteer, dist2(start.pos, p.pos));
-        if (d < 0.6) {
-          await page.keyboard.up('w');
-        } else {
-          await turnTo(page, obs, yawTo(p.pos, t.pos), radPerPx);
-          await page.keyboard.down('w');
-        }
-      }
-      await page.keyboard.up('w');
-      const landed = await me(obs);
-      notes.push(`landed ${dist2(landed.pos, t.pos).toFixed(1)} m from target, steered ${maxSteer.toFixed(1)} m`);
-      expect(landed.anim.dropping).toBe(false);
-      expect(landed.pos.y).toBeLessThan(first.p.pos.y - 10);
-      if (start.anim.dropping) expect(maxSteer, 'drop steering moves horizontally').toBeGreaterThan(1);
-      else notes.push('page too slow: landed before steering started');
+      notes.push(`landed ${dist2(landed.pos, target!.pos).toFixed(1)} m from the nearest gun ${target!.item}#${target!.id}`);
       await page.screenshot({ path: `${SHOTS}/gameplay-landed.png` });
     });
 
@@ -152,10 +130,25 @@ test('browser input drives the authoritative player: drop, move, look, loot, sho
       const t = target!;
       // Short W pulses with settle time: the headless page applies key-up 0.5-1 s late, so holding W overshoots.
       const until = Date.now() + 40_000;
+      let best = Infinity;
+      let stuck = 0;
       while (Date.now() < until && obs.latest!.loot.some((l) => l.id === t.id)) {
         const p = await me(obs);
         const d = dist2(p.pos, t.pos);
         if (d < 1.5) break;
+        // Blocked by a prop (a palm or rock between us and the gun): side-step, alternating sides.
+        if (d > best - 0.2) stuck++;
+        else stuck = 0;
+        best = Math.min(best, d);
+        if (stuck >= 2) {
+          await page.keyboard.down(stuck % 4 < 2 ? 'd' : 'a');
+          await page.waitForTimeout(500);
+          await page.keyboard.up('d');
+          await page.keyboard.up('a');
+          await page.waitForTimeout(600);
+          best = Infinity;
+          notes.push(`side-step at ${d.toFixed(1)} m`);
+        }
         await turnTo(page, obs, yawTo(p.pos, t.pos), radPerPx);
         await page.keyboard.down('w');
         await page.waitForTimeout(Math.min(400, 40 + d * 40));
@@ -190,25 +183,28 @@ test('browser input drives the authoritative player: drop, move, look, loot, sho
 
     await test.step('walk and sprint speeds match balance (5.0 / 7.2 m/s of server time)', async () => {
       // Measured from the observer's snapshot history against serverTime, not wall clock: the headless page runs at
-      // ~9-13 fps under SwiftShader, so wall-clock sampling around Playwright calls is unreliable.
+      // ~9-13 fps under SwiftShader. Peak speed over 0.5 s windows, so a prop met later in the run does not count.
+      // Face the island centre first (open grass), away from the beach props around the loot.
+      const here = await me(obs);
+      await turnTo(page, obs, yawTo(here.pos, { x: 0, y: 0, z: 0 }), radPerPx);
       await page.keyboard.down('w');
-      await page.waitForTimeout(600); // accelerate (accel 50 m/s^2 reaches 5 m/s in 0.1 s)
+      await page.waitForTimeout(300);
       const t0 = obs.latest!.tick;
       await page.waitForTimeout(1500);
-      const walk = obs.speed(NAME, t0);
+      const walk = obs.peakSpeed(NAME, t0);
       await page.keyboard.down('Shift');
-      await page.waitForTimeout(600);
+      await page.waitForTimeout(300);
       const t1 = obs.latest!.tick;
       await page.waitForTimeout(1500);
-      const sprint = obs.speed(NAME, t1);
+      const sprint = obs.peakSpeed(NAME, t1);
       await page.keyboard.up('Shift');
       await page.keyboard.up('w');
-      notes.push(`walk ${walk.toFixed(2)} m/s, sprint ${sprint.toFixed(2)} m/s (server time)`);
-      // Slopes/props can only slow the player down; never faster than balance (+3% for snapshot quantisation).
+      notes.push(`peak walk ${walk.toFixed(2)} m/s, peak sprint ${sprint.toFixed(2)} m/s (server time)`);
+      // Never faster than balance (+3% for snapshot quantisation); reaches it on open ground.
       expect(walk).toBeLessThanOrEqual(5.0 * 1.03);
-      expect(walk).toBeGreaterThan(5.0 * 0.6);
+      expect(walk).toBeGreaterThan(5.0 * 0.85);
       expect(sprint).toBeLessThanOrEqual(7.2 * 1.03);
-      expect(sprint).toBeGreaterThan(walk);
+      expect(sprint).toBeGreaterThan(7.2 * 0.85);
     });
 
     await test.step('jump: Space (tap and hold) makes the player airborne ~v^2/2g high', async () => {
@@ -238,6 +234,7 @@ test('browser input drives the authoritative player: drop, move, look, loot, sho
       const magOf = async (): Promise<number> => Number(((await ui.ammo(page).textContent()) ?? '').split('/')[0]!.trim());
       const mag0 = await magOf();
       const shots0 = obs.eventsOf('shot').filter((e) => e.shooterId === id).length;
+      notes.push(`before LMB: HUD mag ${mag0}, server shots so far ${shots0}, reloads ${obs.eventsOf('reloadStart').filter((e) => e.playerId === id).length}, weapon ${(await me(obs)).weapon}`);
       // Note: the headless page thread runs at ~9-13 fps, so the DOM sees mouseup 0.5-1.3 s after mousedown and an
       // automatic weapon may fire many rounds; only "fired at least once" is asserted here.
       await page.mouse.down();
@@ -296,11 +293,11 @@ test('browser input drives the authoritative player: drop, move, look, loot, sho
         const b = tr[tr.length - 1]!;
         const secs = (b.serverTime - a.serverTime) / 1000;
         const lost = a.p.hp - b.p.hp;
-        notes.push(`tide drain ${a.p.hp} -> ${b.p.hp} over ${secs.toFixed(2)} s server time at 5 dps (armor ${a.p.armor} -> ${b.p.armor})`);
+        notes.push(`tide drain ${a.p.hp} -> ${b.p.hp} over ${secs.toFixed(2)} s server time at 5 dps (vest tier ${a.p.vestTier} -> ${b.p.vestTier})`);
         // Whole damage ticks of zone.damageTickMs (1 s): floor or ceil of elapsed seconds, 5 HP each.
         expect(lost).toBeGreaterThanOrEqual(Math.floor(secs) * 5);
         expect(lost).toBeLessThanOrEqual(Math.ceil(secs) * 5);
-        expect(b.p.armor).toBe(a.p.armor);
+        expect(b.p.vestTier).toBe(a.p.vestTier);
         // HUD agrees with the server within one damage tick (the HUD reads the same snapshots, ~100 ms later).
         const hud = await hpValue(page);
         expect(Math.abs(hud - obs.player(NAME)!.hp)).toBeLessThanOrEqual(5);

@@ -5,7 +5,7 @@
  */
 import * as THREE from 'three';
 import { BOAT_MIN_BASE_Y, boundingRadius, collidersForProp, DOCK_DECK_HEIGHT } from '../shared/sim/colliders';
-import type { MapData, PropKind, PropPlacement } from '../shared/types';
+import type { IslandMapData, PropKind, PropPlacement } from '../shared/types';
 import type { CameraCollider } from './cameraRig';
 import { extractParts, StaticInstanceSet } from './instancing';
 import { createProp, TIKI_FLAME_OFFSET } from './procedural';
@@ -22,7 +22,7 @@ const CAMERA_VISUAL_ONLY: Partial<Record<PropKind, { r: number; top: number; bot
 };
 
 /** Camera colliders for one placement (empty if the kind does not block the camera). Exported for tests. */
-export function cameraCollidersFor(p: PropPlacement, index: number, map: MapData, baseY: number): CameraCollider[] {
+export function cameraCollidersFor(p: PropPlacement, index: number, map: IslandMapData, baseY: number): CameraCollider[] {
   if (CAMERA_SIM_KINDS.has(p.kind)) {
     return collidersForProp(p, index, map).map((c): CameraCollider =>
       c.shape === 'circle'
@@ -71,7 +71,7 @@ export class PropLayer {
   private flameMaterial: THREE.MeshBasicMaterial | null = null;
   private readonly flameTime = { value: 0 };
 
-  constructor(map: MapData, heightAt: (x: number, z: number) => number) {
+  constructor(map: IslandMapData, heightAt: (x: number, z: number) => number) {
     this.group.name = 'props';
     const byKind = new Map<PropKind, PropPlacement[]>();
     for (const p of map.props) {

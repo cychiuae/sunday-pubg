@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import { getMap } from '../game/levels';
+import { isIndoor } from '../shared/maps';
+import type { AnyMapData } from '../shared/types';
 import { heightAt } from '../shared/sim/terrain';
 import type { PlayerAnim } from '../shared/types';
 import { computePose, DEATH_POOF_AT_S, makePose, type PoseInput } from './characterPose';
@@ -11,7 +13,12 @@ import { buildTerrain, terrainColor } from './TerrainMesh';
 import { linearRgb, makeSpec, ParticleSystem } from './vfx/Particles';
 import { visualHeight } from './visualTerrain';
 
-const map = getMap('island01');
+const map = (() => {
+  // C-gate: getMap returns AnyMapData; these tests are island-only.
+  const m = getMap('island01') as AnyMapData;
+  if (isIndoor(m)) throw new Error('island01 must be an island map');
+  return m;
+})();
 
 describe('radial mesh', () => {
   it('ring radii are monotonic and hit band edges', () => {
@@ -100,7 +107,7 @@ describe('loot tier lookup', () => {
 describe('character pose', () => {
   const anim = (over: Partial<PlayerAnim> = {}): PlayerAnim => ({
     moving: false, sprinting: false, airborne: false, dropping: false, inWater: false, firing: false, reloading: false,
-    healing: false, ...over,
+    healing: false, ads: false, cooking: false, ...over,
   });
   const input = (over: Partial<PoseInput> = {}): PoseInput => ({
     time: 1, anim: anim(), weapon: 'rifle', pitch: 0, speed: 0, sprintSpeed: 7.2, velY: 0, walkPhase: 0, recoil: 0, hit: 0,
@@ -119,11 +126,12 @@ describe('character pose', () => {
     expect(p.legRX).toBeCloseTo(-p.legLX, 6);
   });
 
-  it('spreads arms during the drop and hides the weapon', () => {
-    const p = computePose(input({ anim: anim({ dropping: true }) }), makePose());
+  it('spreads arms belly-down during the freefall (stance pivot) and hides the weapon', () => {
+    const p = computePose(input({ anim: anim({ dropping: true }), dropPhase: 'freefall' }), makePose());
     expect(p.armLZ).toBeLessThan(-1);
     expect(p.armRZ).toBeGreaterThan(1);
-    expect(p.rootTiltX).toBeLessThan(-0.5);
+    expect(p.stanceX).toBeLessThan(-1.2);
+    expect(p.rootTiltX).toBe(0);
     expect(p.weaponVisible).toBe(false);
   });
 

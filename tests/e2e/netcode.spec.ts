@@ -4,8 +4,8 @@
  * Uses the dev/E2E hook `window.__game` (src/game/devHook.ts).
  */
 import { expect, test, type Page } from '@playwright/test';
-import { join, lockPointer, newPlayer, openTitle, SHOTS, ui, unexpectedErrors, waitForMatch } from './support/game';
-import { CALM_BALANCE, startStack, waitForHealth, type Stack } from './support/stack';
+import { joinByCode, jumpAndLand, lockPointer, newPlayer, openTitle, SHOTS, soloMatch, startMatch, toBrowser, ui, unexpectedErrors, waitForMatch } from './support/game';
+import { CALM_BALANCE, onlyRoom, startStack, waitForHealth, type Stack } from './support/stack';
 
 interface DevState {
   phase: string;
@@ -33,11 +33,10 @@ test.describe('under 100 ms RTT + 20 ms jitter', () => {
     const { ctx, page, log } = await newPlayer(browser, stack.baseURL);
     await page.setViewportSize({ width: 960, height: 540 });
     await openTitle(page);
-    await join(page, 'Laggy');
-    await waitForMatch(page);
+    await soloMatch(page, 'Laggy', { map: 'island01' });
     expect(await lockPointer(page)).toBe(true);
-    await expect.poll(async () => (await dev(page)).localPos?.y ?? 99, { timeout: 15_000 }).toBeLessThan(15);
-    await page.waitForTimeout(4000); // landed
+    await jumpAndLand(page, 90_000);
+    await page.waitForTimeout(1000);
 
     const samples: DevState[] = [];
     await page.keyboard.down('w');
@@ -71,26 +70,26 @@ test.describe('connection edge cases', () => {
     await stack?.stop();
   });
 
-  test('joining mid-match: waits with "Match underway" and plays the next match', async ({ browser }) => {
+  test('joining a room mid-match: spectates, then (host migrated) starts the next match and plays it', async ({ browser }) => {
     test.setTimeout(150_000);
     const first = await newPlayer(browser, stack.baseURL);
     await openTitle(first.page);
-    await join(first.page, 'Early');
-    await waitForMatch(first.page);
+    const code = await soloMatch(first.page, 'Early', { map: 'island01' });
 
     const late = await newPlayer(browser, stack.baseURL);
     await openTitle(late.page);
-    await join(late.page, 'Late');
-    await expect(late.page.locator('.ui-waiting')).toBeVisible({ timeout: 15_000 });
+    await toBrowser(late.page, 'Late');
+    await joinByCode(late.page, code);
+    await expect.poll(async () => (await dev(late.page)).phase, { timeout: 15_000 }).toBe('playing');
     await late.page.screenshot({ path: `${SHOTS}/netcode-late-join.png` });
     const d = await dev(late.page);
-    expect(d.phase).toBe('playing');
     expect(d.localAlive).toBe(false);
 
-    // End the match: the only human leaves (endWhenNoHumansAlive), then the late joiner is in the next match.
-    const m0 = (await stack.health()).matchId;
+    // End the match: the only participant human leaves (endWhenNoHumansAlive); Late becomes host in the waiting room.
     await first.ctx.close();
-    await waitForHealth(stack, (h) => h.matchId > m0, 60_000);
+    await waitForHealth(stack, (h) => onlyRoom(h).phase === 'waiting', 60_000);
+    await expect(ui.room(late.page)).toBeVisible({ timeout: 15_000 });
+    await startMatch(late.page);
     await waitForMatch(late.page, 60_000);
     await expect.poll(async () => (await dev(late.page)).localAlive, { timeout: 15_000 }).toBe(true);
     expect(unexpectedErrors(late.log), late.log.all.join('\n')).toEqual([]);
@@ -98,11 +97,10 @@ test.describe('connection edge cases', () => {
   });
 
   test('server dies mid-match: "Lost at sea" with Rejoin', async ({ browser }) => {
-    await waitForHealth(stack, (h) => h.joined === 0, 15_000);
+    await waitForHealth(stack, (h) => h.rooms === 0, 15_000);
     const { ctx, page, log } = await newPlayer(browser, stack.baseURL);
     await openTitle(page);
-    await join(page, 'Castaway');
-    await expect(ui.lobby(page)).toBeVisible({ timeout: 15_000 });
+    await soloMatch(page, 'Castaway', { map: 'island01' });
     await stack.killServer();
     await expect(ui.connect(page)).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('.ui-connect__msg')).toContainText(/lost at sea/i);

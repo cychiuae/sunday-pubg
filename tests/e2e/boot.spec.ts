@@ -55,11 +55,13 @@ test('title: empty / whitespace name is rejected and does not connect', async ({
   const before = await stack.health();
   await ui.nameInput(page).fill('   ');
   await ui.nameInput(page).press('Enter');
-  await expect(page.locator('.ui-error__text')).toBeVisible();
+  await expect(page.locator('.ui-error__text').filter({ hasText: /\S/ })).toBeVisible();
   await expect(ui.title(page)).toBeVisible();
   await page.waitForTimeout(500);
   const after = await stack.health();
-  expect(after.joined).toBe(before.joined);
+  // M2b: no hello is sent, so no new session appears on the server.
+  expect(after.connections).toBe(before.connections);
+  expect(after.rooms).toBe(before.rooms);
   expect(unexpectedErrors(log)).toEqual([]);
   await ctx.close();
 });

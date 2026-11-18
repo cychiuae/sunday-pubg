@@ -4,7 +4,7 @@
  * Owner: graphics-engineer.
  */
 import * as THREE from 'three';
-import type { MapData } from '../shared/types';
+import type { IslandMapData } from '../shared/types';
 import type { HeightField } from './heightField';
 import { buildPolarGrid, geometricRadii, ringRadii } from './radialMesh';
 import { waterFragment, waterVertex } from './shaders/water';
@@ -21,7 +21,7 @@ export class Water {
   readonly mesh: THREE.Mesh;
   private readonly material: THREE.ShaderMaterial;
 
-  constructor(map: MapData, heightField: HeightField, sunDir: THREE.Vector3, opts: WaterOptions) {
+  constructor(map: IslandMapData, heightField: HeightField, sunDir: THREE.Vector3, opts: WaterOptions) {
     const start = Math.max(0, map.islandRadius - map.shoreNoise.amplitude - map.beachWidth * 0.5);
     const radii = [
       ...ringRadii(start, [

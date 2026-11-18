@@ -3,21 +3,30 @@
  *
  *   constructor(bus) subscribes to every GameEvent it voices, but creates NO AudioContext. Until unlock() succeeds,
  *   events are dropped silently. unlock() (first user gesture, called by main.ts) creates the context, the mix
- *   graph (sfx / ui / ambience -> duck -> master -> limiter -> destination) and starts the ambience beds.
+ *   graph (sfx / ambience -> duck -> world muffle low-pass -> master; ui -> duck -> master; master -> limiter ->
+ *   destination) and starts the ambience beds. The muffle is wide open (20 kHz) except after a close explosion.
  *
  * Flow: bus event -> AudioDirector (pure mapping) -> AudioCommand -> play/stop/duck here.
  * Every one-shot is a pooled voice (VoicePool: per-cue limits, priority stealing); its nodes are disconnected when
  * it ends (reaped in update()). Positional voices: per-voice gain (distance) -> optional low-pass (air) -> Panner
  * (direction only, rolloff 0) -> bus.
+ *
+ * M2b: mapChanged switches the ambience scene (island beach / indoor office) and the indoor reverb (a convolver send
+ * on the sfx bus), and hands the per-map balance to the director. The carrier drop runs persistent DropLayers driven
+ * by the director's DropTracker every frame; aboard, a cabin low-pass sits on the world (sfx + ambience). Grenade
+ * fuse ticks come from setGrenades (FrameView.grenades), whose serverTime is also the clock for the carrier position.
  */
-import type { IAudio, UiSoundId } from '../shared/contracts';
+import type { Balance } from '../shared/balance';
+import type { GrenadeView, IAudio, UiSoundId } from '../shared/contracts';
 import type { EventBus, GameEventName, GameEvents } from '../shared/events';
 import type { Vec3 } from '../shared/types';
 import { Ambience } from './Ambience';
 import { AudioDirector, type AudioCommand, type PlayCommand } from './AudioDirector';
 import { AUDIO_TUNING, CUES, type BusId, type CueId } from './cues';
+import { DropLayers } from './DropLayers';
 import { Ducker } from './Ducker';
-import { createNoiseBank, type NoiseBank } from './noise';
+import { FuseTicker } from './fuseTicks';
+import { createNoiseBank, createReverbBuffer, type NoiseBank } from './noise';
 import { RECIPES } from './recipes';
 import {
   AIR_FILTER_BYPASS_HZ,
@@ -30,7 +39,9 @@ import {
   variation,
   volumeToGain,
 } from './spatial';
+import type { AmbienceScene } from './soundMap';
 import type { Voice } from './synth';
+import type { ZoneTheme } from '../shared/balance';
 import { VoicePool, type PoolVoice } from './VoicePool';
 
 export interface AudioEngineOptions {
@@ -43,7 +54,15 @@ export interface AudioEngineOptions {
    * falls back to AUDIO_TUNING.lowHealthHp (30, matching the HUD).
    */
   lowHealthHp?: number;
+  /**
+   * Sniper bolt timing (weapons.sniper.fireIntervalMs) and grenade fuse (items.grenade.fuseMs) until the first
+   * mapChanged, whose per-map balance replaces it. No global fallback (REVIEW-M2a M5).
+   */
+  balance?: Balance;
 }
+
+/** Cutoff of the world muffle filter when idle (effectively bypassed). */
+const MUFFLE_OPEN_HZ = 20000;
 
 /** Low-health heartbeat threshold in HP: the injected value when it is a positive finite number, else the default. */
 export function resolveLowHealthHp(injected: number | undefined): number {
@@ -61,8 +80,17 @@ interface Graph {
   limiter: DynamicsCompressorNode;
   buses: Record<BusId, GainNode>;
   ducks: Record<BusId, GainNode>;
+  /** Low-pass shared by the sfx and ambience buses (close-explosion muffle). */
+  muffle: BiquadFilterNode;
+  /** M2b: low-pass after the muffle while the local player is aboard the carrier (idle 20 kHz). */
+  cabin: BiquadFilterNode;
+  /** M2b: 2D drop layers (cabin engine, door wind, freefall wind, flutter): sfx level, bypasses muffle and cabin. */
+  dropBus: GainNode;
+  /** M2b: indoor reverb (sfx level -> send -> convolver -> sfx duck), built for indoor scenes only. */
+  reverb: { send: GainNode; conv: ConvolverNode } | null;
   noise: NoiseBank;
   ambience: Ambience;
+  drop: DropLayers;
 }
 
 /** One playing sound: the Voice handed to its recipe plus the bookkeeping to stop and disconnect it. */
@@ -146,7 +174,18 @@ export class AudioEngine implements IAudio {
   private lowHealth = false;
   private heartbeatTimer = 0;
   private gullTimer: number;
+  private keysTimer: number;
   private readonly gullPos: Vec3 = { x: 0, y: 0, z: 0 };
+
+  // M2b
+  private scene: AmbienceScene = 'island';
+  private theme: ZoneTheme = 'tide';
+  private readonly fuseTicker = new FuseTicker();
+  /** Server clock estimate (ms): set by setGrenades each frame, advanced by update() otherwise. */
+  private serverNowMs = Number.NaN;
+  private clockFresh = false;
+  private cabinOn = false;
+  private cabinDuckUntil = 0;
 
   private readonly releaseVoice = (pv: PoolVoice<ActiveVoice>): void => {
     const v = pv.handle;
@@ -160,11 +199,23 @@ export class AudioEngine implements IAudio {
   ) {
     this.rand = options.rand ?? Math.random;
     this.gullTimer = this.nextGullDelay();
+    this.keysTimer = this.nextKeysDelay();
     this.director = new AudioDirector((cmd) => this.exec(cmd), {
       lowHealthHp: resolveLowHealthHp(options.lowHealthHp),
+      balance: options.balance,
     });
 
     const d = this.director;
+    // M2b map state is kept even before unlock (the context may be created after the welcome).
+    this.unsubs.push(bus.on('mapChanged', (e) => d.mapChanged(e)));
+    this.unsubs.push(
+      bus.on('carrierDeparted', (e) => {
+        d.carrierDeparted(e);
+        if (!Number.isFinite(this.serverNowMs)) this.serverNowMs = e.route.startsAt;
+      }),
+    );
+    this.sub(bus, 'playerJumped', (e) => d.playerJumped(e));
+    this.sub(bus, 'parachuteOpened', (e) => d.parachuteOpened(e));
     this.sub(bus, 'matchPhaseChanged', (e) => d.matchPhaseChanged(e));
     this.sub(bus, 'countdown', (e) => d.countdown(e));
     this.sub(bus, 'localPlayerSpawned', (e) => d.localPlayerSpawned(e));
@@ -187,6 +238,12 @@ export class AudioEngine implements IAudio {
     this.sub(bus, 'footstep', (e) => d.footstep(e));
     this.sub(bus, 'jump', (e) => d.jump(e));
     this.sub(bus, 'land', (e) => d.land(e));
+    this.sub(bus, 'stanceChanged', (e) => d.stanceChanged(e));
+    this.sub(bus, 'localAdsChanged', (e) => d.localAdsChanged(e));
+    this.sub(bus, 'grenadeCooked', (e) => d.grenadeCooked(e));
+    this.sub(bus, 'grenadeThrown', (e) => d.grenadeThrown(e));
+    this.sub(bus, 'grenadeBounced', (e) => d.grenadeBounced(e));
+    this.sub(bus, 'explosion', (e) => d.explosion(e));
     this.sub(bus, 'matchEnded', (e) => d.matchEnded(e));
     this.sub(bus, 'interactPromptChanged', (e) => d.interactPromptChanged(e));
     this.sub(bus, 'spectateTargetChanged', (e) => d.spectateTargetChanged(e));
@@ -248,6 +305,9 @@ export class AudioEngine implements IAudio {
       }
     }
 
+    g.ambience.update(now);
+    this.updateDrop(dt, now);
+
     for (const bus of BUS_IDS) {
       const db = this.ducker.targetDb(bus, now);
       if (db !== this.appliedDuckDb[bus]) {
@@ -266,6 +326,21 @@ export class AudioEngine implements IAudio {
         this.heartbeatTimer = AUDIO_TUNING.heartbeatIntervalS;
         this.play({ kind: 'play', cue: 'heartbeat', pos: null });
       }
+    }
+
+    if (this.scene === 'indoor') {
+      this.keysTimer -= step;
+      if (this.keysTimer <= 0) {
+        this.keysTimer = this.nextKeysDelay();
+        const T = AUDIO_TUNING;
+        const ang = this.rand() * Math.PI * 2;
+        const r = T.keysMinRadius + this.rand() * (T.keysMaxRadius - T.keysMinRadius);
+        this.gullPos.x = this.listenerPos.x + Math.cos(ang) * r;
+        this.gullPos.y = Math.max(0, this.listenerPos.y - 1);
+        this.gullPos.z = this.listenerPos.z + Math.sin(ang) * r;
+        this.play({ kind: 'play', cue: 'amb.keys', pos: this.gullPos });
+      }
+      return;
     }
 
     this.gullTimer -= step;
@@ -292,8 +367,13 @@ export class AudioEngine implements IAudio {
     this.loops.clear();
     if (this.graph) {
       this.graph.ambience.dispose();
+      this.graph.drop.dispose();
+      this.teardownReverb(this.graph);
+      this.graph.cabin.disconnect();
+      this.graph.dropBus.disconnect();
       this.graph.master.disconnect();
       this.graph.limiter.disconnect();
+      this.graph.muffle.disconnect();
       for (const b of BUS_IDS) {
         this.graph.buses[b].disconnect();
         this.graph.ducks[b].disconnect();
@@ -312,7 +392,41 @@ export class AudioEngine implements IAudio {
     if (cue) this.play({ kind: 'play', cue, pos: null });
   }
 
+  /**
+   * IAudio.setGrenades (ADR 0004 A2): positional fuse ticks for live grenades within ~8 m, faster as each fuse runs
+   * out. FrameView.grenades holds thrown grenades only, so the local in-hand cook (2D cook tick) never doubles here.
+   * `serverTime` also drives the carrier position. Nothing is kept from the array across frames.
+   */
+  setGrenades(grenades: readonly GrenadeView[], serverTime: number): void {
+    if (this.disposed || !Number.isFinite(serverTime)) return;
+    this.serverNowMs = serverTime;
+    this.clockFresh = true;
+    const ctx = this.ctx;
+    if (!ctx || !this.graph || ctx.state !== 'running') return;
+    this.fuseTicker.update(grenades, serverTime, this.listenerPos, this.director.fuseMs, this.onFuseTick);
+  }
+
   // --- Extra API (not on IAudio) -----------------------------------------------------------
+
+  /** Live pooled voices of one cue (tests and debugging). */
+  voicesOf(cue: CueId): number {
+    return this.pool.countOf(cue);
+  }
+
+  /** M2b: current ambience scene (tests and debugging). */
+  get ambienceScene(): AmbienceScene {
+    return this.scene;
+  }
+
+  /** M2b: drop layer groups holding nodes (tests and debugging). */
+  get dropLayers(): DropLayers | null {
+    return this.graph?.drop ?? null;
+  }
+
+  /** M2b: true while the indoor reverb exists. */
+  get reverbActive(): boolean {
+    return this.graph?.reverb != null;
+  }
 
   /** True once an AudioContext exists. */
   get unlocked(): boolean {
@@ -335,6 +449,11 @@ export class AudioEngine implements IAudio {
   }
 
   private exec(cmd: AudioCommand): void {
+    if (cmd.kind === 'map') {
+      // Remembered before unlock too: buildGraph starts in this scene.
+      this.applyMap(cmd.scene, cmd.theme);
+      return;
+    }
     const ctx = this.ctx;
     if (!ctx || !this.graph) return;
     switch (cmd.kind) {
@@ -354,8 +473,14 @@ export class AudioEngine implements IAudio {
         this.lowHealth = cmd.active;
         this.heartbeatTimer = 0;
         return;
-      case 'surf':
-        this.graph.ambience.setSurf(cmd.active);
+      case 'outside':
+        this.graph.ambience.setOutside(cmd.active);
+        return;
+      case 'zoneBed':
+        this.graph.ambience.setZoneBed(cmd.active);
+        return;
+      case 'muffle':
+        this.applyMuffle(cmd.cutoffHz, cmd.delayS, cmd.holdS);
         return;
     }
   }
@@ -445,12 +570,95 @@ export class AudioEngine implements IAudio {
     this.dying.push({ voice: v, at: now + fade + 0.05 });
   }
 
+  /** Sweeps the world low-pass down to `cutoffHz` after `delayS`, holds, then recovers (replaces any running muffle). */
+  private applyMuffle(cutoffHz: number, delayS: number, holdS: number): void {
+    const ctx = this.ctx;
+    const g = this.graph;
+    if (!ctx || !g || !(cutoffHz > 0)) return;
+    const now = ctx.currentTime;
+    const f = g.muffle.frequency;
+    const start = now + Math.max(0, delayS);
+    f.cancelScheduledValues(now);
+    f.setValueAtTime(f.value, now);
+    f.setValueAtTime(f.value, start);
+    f.setTargetAtTime(Math.min(MUFFLE_OPEN_HZ, cutoffHz), start, 0.03);
+    f.setTargetAtTime(MUFFLE_OPEN_HZ, start + Math.max(0.05, holdS), AUDIO_TUNING.muffleRecoverTc);
+  }
+
   private stopLoop(key: string, now: number, fade: number): void {
     const pv = this.loops.get(key);
     if (!pv) return;
     this.loops.delete(key);
     this.kill(pv, now, fade);
   }
+
+  private applyMap(scene: AmbienceScene, theme: ZoneTheme): void {
+    this.scene = scene;
+    this.theme = theme;
+    this.fuseTicker.reset();
+    this.serverNowMs = Number.NaN;
+    this.clockFresh = false;
+    const g = this.graph;
+    if (!g) return;
+    g.ambience.setScene(scene, theme);
+    if (scene === 'indoor') this.ensureReverb(g);
+    else this.teardownReverb(g);
+  }
+
+  private ensureReverb(g: Graph): void {
+    const ctx = this.ctx;
+    if (!ctx || g.reverb) return;
+    const c = ctx as unknown as { createConvolver?: () => ConvolverNode };
+    if (typeof c.createConvolver !== 'function') return; // very old engines: dry indoors
+    const conv = ctx.createConvolver();
+    conv.normalize = false;
+    conv.buffer = createReverbBuffer(ctx, AUDIO_TUNING.reverbSeconds, AUDIO_TUNING.reverbPreDelayS);
+    const send = ctx.createGain();
+    send.gain.value = AUDIO_TUNING.reverbSend;
+    g.buses.sfx.connect(send);
+    send.connect(conv);
+    conv.connect(g.ducks.sfx);
+    g.reverb = { send, conv };
+  }
+
+  private teardownReverb(g: Graph): void {
+    const r = g.reverb;
+    if (!r) return;
+    try {
+      g.buses.sfx.disconnect(r.send);
+    } catch {
+      // already disconnected
+    }
+    r.send.disconnect();
+    r.conv.disconnect();
+    g.reverb = null;
+  }
+
+  /** Per frame: clock, drop tracker mix, drop layers and the cabin filter. */
+  private updateDrop(dt: number, now: number): void {
+    const g = this.graph;
+    if (!g) return;
+    const step = Number.isFinite(dt) && dt > 0 ? dt : 0;
+    if (!this.clockFresh && Number.isFinite(this.serverNowMs)) this.serverNowMs += step * 1000;
+    this.clockFresh = false;
+    const mix = this.director.drop.frame(this.serverNowMs, this.listenerPos, step);
+    g.drop.apply(mix, this.listenerPos);
+    const aboard = mix.aboard > 0;
+    if (aboard !== this.cabinOn) {
+      this.cabinOn = aboard;
+      // Into the cabin slowly; the jump throws the door (and the world) open fast.
+      g.cabin.frequency.setTargetAtTime(aboard ? AUDIO_TUNING.cabinLowpassHz : MUFFLE_OPEN_HZ, now, aboard ? 0.4 : 0.08);
+    }
+    // Re-arm the cabin duck a few times a second (not every frame: no per-frame allocation).
+    if (aboard && now + 0.1 >= this.cabinDuckUntil) {
+      this.ducker.duck('ambience', AUDIO_TUNING.cabinAmbienceDb, now, 0.3);
+      this.cabinDuckUntil = now + 0.3;
+    }
+  }
+
+  private readonly onFuseTick = (pos: Vec3, urgency: number): void => {
+    this.play({ kind: 'play', cue: 'grenade.fuseTick', pos, intensity: urgency });
+  };
 
   private buildGraph(ctx: AudioContext): Graph {
     const limiter = ctx.createDynamicsCompressor();
@@ -465,10 +673,26 @@ export class AudioEngine implements IAudio {
     master.gain.value = volumeToGain(this.volume);
     master.connect(limiter);
 
+    const cabin = ctx.createBiquadFilter();
+    cabin.type = 'lowpass';
+    cabin.frequency.value = MUFFLE_OPEN_HZ;
+    cabin.Q.value = 0.6;
+    cabin.connect(master);
+
+    const muffle = ctx.createBiquadFilter();
+    muffle.type = 'lowpass';
+    muffle.frequency.value = MUFFLE_OPEN_HZ;
+    muffle.Q.value = 0.7;
+    muffle.connect(cabin);
+
+    const dropBus = ctx.createGain();
+    dropBus.gain.value = AUDIO_TUNING.busGain.sfx;
+    dropBus.connect(master);
+
     const mk = (bus: BusId): [GainNode, GainNode] => {
       const duck = ctx.createGain();
       duck.gain.value = 1;
-      duck.connect(master);
+      duck.connect(bus === 'ui' ? master : muffle);
       const level = ctx.createGain();
       level.gain.value = AUDIO_TUNING.busGain[bus];
       level.connect(duck);
@@ -479,15 +703,23 @@ export class AudioEngine implements IAudio {
     const [amb, ambDuck] = mk('ambience');
 
     const noise = createNoiseBank(ctx);
-    const ambience = new Ambience(ctx, noise, amb);
-    return {
+    const ambience = new Ambience(ctx, noise, amb, this.scene, this.theme);
+    const drop = new DropLayers(ctx, noise, sfx, dropBus, this.rand);
+    const graph: Graph = {
       master,
       limiter,
       buses: { sfx, ui, ambience: amb },
       ducks: { sfx: sfxDuck, ui: uiDuck, ambience: ambDuck },
+      muffle,
+      cabin,
+      dropBus,
+      reverb: null,
       noise,
       ambience,
+      drop,
     };
+    if (this.scene === 'indoor') this.ensureReverb(graph);
+    return graph;
   }
 
   private applyListener(): void {
@@ -530,6 +762,11 @@ export class AudioEngine implements IAudio {
       if (ctx.state === 'running') void ctx.suspend().catch(() => undefined);
     } else this.resumeIfSuspended();
   };
+
+  private nextKeysDelay(): number {
+    const { keysMinIntervalS: lo, keysMaxIntervalS: hi } = AUDIO_TUNING;
+    return lo + this.rand() * (hi - lo);
+  }
 
   private nextGullDelay(): number {
     const { gullMinIntervalS: lo, gullMaxIntervalS: hi } = AUDIO_TUNING;

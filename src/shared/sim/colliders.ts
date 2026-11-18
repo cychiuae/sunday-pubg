@@ -10,8 +10,25 @@
  * Part sizes at scale 1 are measured from the procedural models in src/render/procedural/props.ts (sizes listed in its
  * header and in docs/art/ASSET_LIST.md). If a model changes size, update PROP_SHAPES and the tests in
  * colliders.test.ts so bullets and feet keep lining up with what players see.
+ *
+ * M2b indoor maps (ADR 0005 §2): every wall segment is one oriented box (`wallFrame`), every kit part of every prop is a
+ * prism through the placement transform T(x, y, z) · R_y(rotY) · S(scale), kit ramps become stairs of flat boxes with
+ * rises <= RAMP_STEP_FRACTION x stepHeight, and glass walls / glass kit parts set `glass` (solid; impact kind 'glass').
+ * The kit is read from `map.kit` (the sim never imports src/shared/kits). The grid covers `mapBounds(map)`, and boxes
+ * are inserted by oriented-box cell coverage, so a 68 m wall fills only the cells it crosses.
  */
-import type { MapData, PropKind, PropPlacement, Vec3 } from '../types';
+import { isIndoor, mapBounds, wallFrame } from '../maps';
+import type {
+  AnyMapData,
+  IndoorMapData,
+  IndoorPropPlacement,
+  KitCollider,
+  PropKind,
+  PropKitEntry,
+  PropPlacement,
+  Vec3,
+  WallSegment,
+} from '../types';
 import { heightAt, raycastTerrain } from './terrain';
 
 export interface CircleCollider {
@@ -23,8 +40,10 @@ export interface CircleCollider {
   top: number;
   /** Absolute y of the bottom (-Infinity for ground-rooted parts). */
   bottom: number;
-  /** Index into map.props. */
+  /** Index into map.props (-1 for indoor wall segments). */
   prop: number;
+  /** M2b: glass (solid in the sim; impact and contact surface 'glass'). */
+  glass?: boolean;
 }
 
 export interface BoxCollider {
@@ -39,7 +58,10 @@ export interface BoxCollider {
   cos: number;
   top: number;
   bottom: number;
+  /** Index into map.props (-1 for indoor wall segments). */
   prop: number;
+  /** M2b: glass (solid in the sim; impact and contact surface 'glass'). */
+  glass?: boolean;
 }
 
 export type Collider = CircleCollider | BoxCollider;
@@ -114,19 +136,19 @@ export interface ColliderSet {
   readonly minZ: number;
   readonly cols: number;
   readonly rows: number;
-  /** cells[row * cols + col] = collider indices overlapping the cell (by bounding circle). */
+  /** cells[row * cols + col] = collider indices overlapping the cell (circles by bounding square, boxes by OBB coverage). */
   readonly cells: readonly (readonly number[])[];
 }
 
 /** Base y of a prop (part heights are measured from here). */
-export function propBaseY(p: PropPlacement, map: MapData): number {
+export function propBaseY(p: PropPlacement, map: AnyMapData): number {
   if (p.kind === 'dock') return 0;
   const ground = heightAt(p.x, p.z, map);
   return p.kind === 'boat' ? Math.max(BOAT_MIN_BASE_Y, ground) : ground;
 }
 
 /** All collider parts for one placement (empty for soft props). */
-export function collidersForProp(p: PropPlacement, index: number, map: MapData): Collider[] {
+export function collidersForProp(p: PropPlacement, index: number, map: AnyMapData): Collider[] {
   const s = p.scale;
   const sin = Math.sin(p.rotY);
   const cos = Math.cos(p.rotY);
@@ -144,22 +166,121 @@ export function collidersForProp(p: PropPlacement, index: number, map: MapData):
 }
 
 /** Main (first) collider part for one placement, or null for soft props. */
-export function colliderForProp(p: PropPlacement, index: number, map: MapData): Collider | null {
+export function colliderForProp(p: PropPlacement, index: number, map: AnyMapData): Collider | null {
   return collidersForProp(p, index, map)[0] ?? null;
 }
 
 export const boundingRadius = (c: Collider): number => (c.shape === 'circle' ? c.r : Math.hypot(c.hx, c.hz));
 
-export function buildColliders(map: MapData): ColliderSet {
-  const colliders: Collider[] = [];
+/**
+ * Kit ramps compile to stairs whose rises are at most this fraction of movement.stepHeight (ADR 0005 §3), so walking
+ * up never needs a jump and float error never pushes a rise over the step limit.
+ */
+export const RAMP_STEP_FRACTION = 0.8;
+
+/** Oriented box helper: centre, half extents, rotation (local X -> world (cos, -sin), local Z -> (sin, cos)). */
+function orientedBox(
+  x: number,
+  z: number,
+  hx: number,
+  hz: number,
+  rotY: number,
+  bottom: number,
+  top: number,
+  prop: number,
+  glass: boolean,
+): BoxCollider {
+  const c: BoxCollider = { shape: 'box', x, z, hx, hz, sin: Math.sin(rotY), cos: Math.cos(rotY), top, bottom, prop };
+  if (glass) c.glass = true;
+  return c;
+}
+
+/** One indoor wall segment as a box collider (ADR 0005 §2: through `wallFrame`, shared with render and the minimap). */
+export function wallCollider(w: WallSegment): BoxCollider {
+  const f = wallFrame(w);
+  return orientedBox(f.cx, f.cz, f.halfLength, f.halfThickness, f.rotY, w.bottom, w.top, -1, w.material === 'glass');
+}
+
+/**
+ * Collider prisms of one kit part under a placement: boxes and cylinders map 1:1, a ramp becomes
+ * n = ceil(rise / (RAMP_STEP_FRACTION x stepHeight)) flat steps of rise/n and depth/n climbing toward local -Z.
+ */
+export function kitPartColliders(
+  part: KitCollider,
+  p: IndoorPropPlacement,
+  index: number,
+  stepHeight: number,
+  out: Collider[] = [],
+): Collider[] {
+  const s = p.scale;
+  const sin = Math.sin(p.rotY);
+  const cos = Math.cos(p.rotY);
+  // Local (lx, lz) at scale s -> world: local X -> (cos, -sin), local Z -> (sin, cos).
+  const wx = (lx: number, lz: number): number => p.x + lx * s * cos + lz * s * sin;
+  const wz = (lx: number, lz: number): number => p.z - lx * s * sin + lz * s * cos;
+  if (part.type === 'cylinder') {
+    out.push({ shape: 'circle', x: wx(part.x, part.z), z: wz(part.x, part.z), r: part.r * s, bottom: p.y + part.y0 * s, top: p.y + part.y1 * s, prop: index });
+    return out;
+  }
+  const [x0, y0, z0] = part.min;
+  const [x1, y1, z1] = part.max;
+  const cx = (x0 + x1) / 2;
+  const hx = ((x1 - x0) / 2) * s;
+  if (part.type === 'box') {
+    const cz = (z0 + z1) / 2;
+    out.push(orientedBox(wx(cx, cz), wz(cx, cz), hx, ((z1 - z0) / 2) * s, p.rotY, p.y + y0 * s, p.y + y1 * s, index, part.glass === true));
+    return out;
+  }
+  // Ramp: walkable top rises from y0 at z1 to y1 at z0 (toward -Z).
+  const rise = (y1 - y0) * s;
+  const maxRise = RAMP_STEP_FRACTION * stepHeight;
+  const n = rise > 0 && maxRise > 0 ? Math.max(1, Math.ceil(rise / maxRise - 1e-9)) : 1;
+  const tread = (z1 - z0) / n;
+  for (let i = 1; i <= n; i++) {
+    const zFront = z1 - (i - 1) * tread;
+    const zBack = z1 - i * tread;
+    const cz = (zFront + zBack) / 2;
+    out.push(orientedBox(wx(cx, cz), wz(cx, cz), hx, (tread / 2) * s, p.rotY, p.y + y0 * s, p.y + y0 * s + (rise * i) / n, index, false));
+  }
+  return out;
+}
+
+/** Every collider of one indoor prop (empty for visual-only kinds or unknown keys). */
+export function kitPropColliders(entry: PropKitEntry | undefined, p: IndoorPropPlacement, index: number, stepHeight: number): Collider[] {
+  const out: Collider[] = [];
+  if (!entry) return out;
+  for (const part of entry.colliders) kitPartColliders(part, p, index, stepHeight, out);
+  return out;
+}
+
+function indoorColliders(map: IndoorMapData, stepHeight: number): Collider[] {
+  const out: Collider[] = [];
+  for (const w of map.walls) out.push(wallCollider(w));
   map.props.forEach((p, i) => {
-    for (const c of collidersForProp(p, i, map)) colliders.push(c);
+    const entry = Object.prototype.hasOwnProperty.call(map.kit, p.kind) ? map.kit[p.kind] : undefined;
+    for (const c of kitPropColliders(entry, p, i, stepHeight)) out.push(c);
   });
-  const extent = map.worldRadius + GRID_MARGIN;
-  const minX = -extent;
-  const minZ = -extent;
-  const cols = Math.ceil((2 * extent) / CELL_SIZE);
-  const rows = cols;
+  return out;
+}
+
+/**
+ * Static colliders of a map plus the spatial grid (sized from `mapBounds`). `stepHeight` = balance
+ * movement.stepHeight (indoor ramp stairs); island maps ignore it.
+ */
+export function buildColliders(map: AnyMapData, stepHeight: number): ColliderSet {
+  const colliders: Collider[] = [];
+  if (isIndoor(map)) {
+    for (const c of indoorColliders(map, stepHeight)) colliders.push(c);
+  } else {
+    map.props.forEach((p, i) => {
+      for (const c of collidersForProp(p, i, map)) colliders.push(c);
+    });
+  }
+  const bounds = mapBounds(map);
+  const minX = bounds.minX - GRID_MARGIN;
+  const minZ = bounds.minZ - GRID_MARGIN;
+  const cols = Math.max(1, Math.ceil((bounds.maxX + GRID_MARGIN - minX) / CELL_SIZE));
+  const rows = Math.max(1, Math.ceil((bounds.maxZ + GRID_MARGIN - minZ) / CELL_SIZE));
   const cells: number[][] = [];
   for (let i = 0; i < cols * rows; i++) cells.push([]);
   colliders.forEach((c, idx) => {
@@ -168,9 +289,36 @@ export function buildColliders(map: MapData): ColliderSet {
     const c1 = clampCell(Math.floor((c.x + br - minX) / CELL_SIZE), cols);
     const r0 = clampCell(Math.floor((c.z - br - minZ) / CELL_SIZE), rows);
     const r1 = clampCell(Math.floor((c.z + br - minZ) / CELL_SIZE), rows);
-    for (let r = r0; r <= r1; r++) for (let col = c0; col <= c1; col++) cells[r * cols + col]!.push(idx);
+    for (let r = r0; r <= r1; r++) {
+      for (let col = c0; col <= c1; col++) {
+        if (c.shape === 'box' && !boxOverlapsCell(c, minX + col * CELL_SIZE, minZ + r * CELL_SIZE, CELL_SIZE)) continue;
+        cells[r * cols + col]!.push(idx);
+      }
+    }
   });
   return { colliders, cellSize: CELL_SIZE, minX, minZ, cols, rows, cells };
+}
+
+/** 2D separating-axis test: oriented box footprint vs the axis-aligned cell [x0, x0 + size] x [z0, z0 + size]. */
+function boxOverlapsCell(c: BoxCollider, x0: number, z0: number, size: number): boolean {
+  const h = size / 2;
+  const ccx = x0 + h;
+  const ccz = z0 + h;
+  const dx = ccx - c.x;
+  const dz = ccz - c.z;
+  // Box axes in world: u = (cos, -sin) (local X), v = (sin, cos) (local Z).
+  const ux = c.cos;
+  const uz = -c.sin;
+  const vx = c.sin;
+  const vz = c.cos;
+  const eps = 1e-9;
+  // World axes.
+  if (Math.abs(dx) > h + c.hx * Math.abs(ux) + c.hz * Math.abs(vx) + eps) return false;
+  if (Math.abs(dz) > h + c.hx * Math.abs(uz) + c.hz * Math.abs(vz) + eps) return false;
+  // Box axes.
+  if (Math.abs(dx * ux + dz * uz) > c.hx + h * (Math.abs(ux) + Math.abs(uz)) + eps) return false;
+  if (Math.abs(dx * vx + dz * vz) > c.hz + h * (Math.abs(vx) + Math.abs(vz)) + eps) return false;
+  return true;
 }
 
 const clampCell = (v: number, n: number): number => (v < 0 ? 0 : v >= n ? n - 1 : v);
@@ -436,7 +584,8 @@ export function raycastColliders(
   return best ? { t: bestT, collider: best } : null;
 }
 
-export type StaticHitKind = 'terrain' | 'prop' | 'water';
+/** M2b: 'glass' = a glass wall or a glass kit part (solid). Indoor floor and ceiling hits are 'terrain'. */
+export type StaticHitKind = 'terrain' | 'prop' | 'water' | 'glass';
 
 export interface StaticHit {
   t: number;
@@ -444,10 +593,11 @@ export interface StaticHit {
 }
 
 /**
- * First static obstacle (prop or terrain) along a unit ray within maxT, or null. A terrain hit below sea level is
- * reported as 'water' (water itself does not block shots; the sea floor does).
+ * First static obstacle (prop, wall or terrain) along a unit ray within maxT, or null. A terrain hit below sea level
+ * is reported as 'water' (water itself does not block shots; the sea floor does). Indoor: the floor and the ceiling
+ * planes are 'terrain' (shots stop at the ceiling), glass colliders are 'glass'.
  */
-export function raycastStatic(set: ColliderSet, map: MapData, o: Vec3, dir: Vec3, maxT: number): StaticHit | null {
+export function raycastStatic(set: ColliderSet, map: AnyMapData, o: Vec3, dir: Vec3, maxT: number): StaticHit | null {
   const prop = raycastColliders(set, o, dir, maxT);
   const limit = prop ? prop.t : maxT;
   const tt = raycastTerrain(o.x, o.y, o.z, dir.x, dir.y, dir.z, limit, map);
@@ -455,11 +605,11 @@ export function raycastStatic(set: ColliderSet, map: MapData, o: Vec3, dir: Vec3
     const y = o.y + dir.y * tt;
     return { t: tt, kind: y < 0 ? 'water' : 'terrain' };
   }
-  return prop ? { t: prop.t, kind: 'prop' } : null;
+  return prop ? { t: prop.t, kind: prop.collider.glass === true ? 'glass' : 'prop' } : null;
 }
 
 /** True when nothing static blocks the segment a -> b. */
-export function lineOfSight(set: ColliderSet, map: MapData, a: Vec3, b: Vec3): boolean {
+export function lineOfSight(set: ColliderSet, map: AnyMapData, a: Vec3, b: Vec3): boolean {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const dz = b.z - a.z;

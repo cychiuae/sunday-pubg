@@ -3,12 +3,17 @@
  * shotFired -> muzzle flash + tracer per impact (impact puff when the tracer arrives); playerDamaged -> hit react,
  * headshot star; playerKilled -> topple then poof; itemPickedUp -> sparkle; land/jump/footstep -> dust or splash;
  * zoneChanged -> tide wall pulse. Everything pooled: no allocation per shot.
+ * M2a: explosion -> cartoon boom (flash star, smoke balls, shock ring, sand chunks or water spray, fading sand disc,
+ * camera shake by localDistance); grenadeBounced on water and forced stance changes (water stand-up) -> splash;
+ * grenadeThrown / grenadeCooked -> throw pose and fuse clock; armor break (playerDamaged vest/helmet.broken) ->
+ * shard burst at the chest or head.
  */
 import type * as THREE from 'three';
 import type { EventBus, GameEvents } from '../../shared/events';
-import type { ImpactSurface, Surface, Vec3 } from '../../shared/types';
+import type { ArmorTier, GlassSurface, ImpactSurface, IndoorSurface, Surface, Vec3, WeaponId } from '../../shared/types';
 import { PARTICLE_SHAPE } from '../shaders/particles';
 import { palette } from '../procedural';
+import { ExplosionDecals, explosionShake } from './Explosions';
 import { linearRgb, makeSpec, ParticleSystem, type ParticleSpec } from './Particles';
 import { TracerSystem } from './Tracers';
 
@@ -20,14 +25,38 @@ export interface VfxHost {
   onDamaged(playerId: number): void;
   /** Returns true if a view will topple and poof by itself. */
   onKilled(playerId: number): boolean;
-  surfaceAt(x: number, z: number): Surface;
+  surfaceAt(x: number, z: number): Surface | IndoorSurface;
   pulseTide(): void;
   /** Player body height (balance player.height), for head/chest effect anchors. */
   playerHeight: number;
+  /** M2a: sim terrain height (explosion over water when < 0). */
+  heightAt?(x: number, z: number): number;
+  /** M2a: grenade throw follow-through on the thrower's view. */
+  onThrow?(playerId: number): void;
+  /** M2a: pin pulled; explodesAt is server ms. */
+  onCooked?(playerId: number, explodesAt: number): void;
+  /** M2a: stop drawing an exploded grenade. */
+  onExploded?(grenadeId: number): void;
+  /** M2a: camera shake, amount 0..1. */
+  shake?(amount: number): void;
 }
 
-const SURFACE_CODE: Record<ImpactSurface, number> = { none: 0, player: 1, terrain: 2, prop: 3, water: 4 };
+/** Muzzle flash scale and tracer width (m) per weapon. */
+const FLASH_SCALE: Record<WeaponId, number> = { fists: 1, pistol: 0.8, smg: 0.9, shotgun: 1.4, rifle: 1, dmr: 1.15, sniper: 1.35, lmg: 1.05 };
+const TRACER_WIDTH: Record<WeaponId, number> = { fists: 0.04, pistol: 0.045, smg: 0.045, shotgun: 0.035, rifle: 0.06, dmr: 0.065, sniper: 0.08, lmg: 0.055 };
+/** Explosion: smoke balls drift out to radius x SMOKE_REACH over SMOKE_LIFE (STYLE.md §15). */
+const SMOKE_LIFE = 0.6;
+const SMOKE_REACH = 0.5;
+const SMOKE_DRAG = 4;
+const EXPLOSION_FX_DIST2 = 260 * 260;
+
+/** Impact codes packed in 3 tracer-tag bits. M2b: 'glass' (C-gate member of ImpactSurface). */
+const SURFACE_CODE: Record<ImpactSurface | GlassSurface, number> = { none: 0, player: 1, terrain: 2, prop: 3, water: 4, glass: 5 };
+/** Ground the dust takes its colour from (island sand / grass, M2b office floors). */
+type GroundSurface = Surface | IndoorSurface;
 const MAX_FX_DIST2 = 160 * 160;
+/** Canopy centre above the feet (parachute model, carrier.ts). */
+const CANOPY_HEIGHT = 2.7;
 const FOOTSTEP_FX_DIST2 = 35 * 35;
 
 type Rgb = [number, number, number];
@@ -39,6 +68,8 @@ export class Vfx {
   private readonly spec: ParticleSpec = makeSpec();
   private readonly muzzle: Vec3 = { x: 0, y: 0, z: 0 };
   private readonly C: Record<string, Rgb>;
+  readonly decals = new ExplosionDecals();
+  private readonly armorRgb: Record<ArmorTier, Rgb>;
 
   constructor(
     bus: EventBus<GameEvents>,
@@ -64,7 +95,17 @@ export class Vfx {
       tracer: linearRgb(palette.muzzleFlash),
       epic: linearRgb(palette.tierEpic),
       rare: linearRgb(palette.tierRare),
+      smoke: linearRgb(0xfff3d6),
+      boomEdge: linearRgb(palette.muzzleFlashEdge),
+      fuse: linearRgb(palette.flowerCenter),
+      glass: linearRgb(0xbfe6f0),
+      plank: linearRgb(0xcb9c66),
+      carpet: linearRgb(0x5e6f8a),
+      tile: linearRgb(0xe6eef0),
+      rain: linearRgb(0xf4fbff),
+      cream: linearRgb(0xfff4e2),
     };
+    this.armorRgb = { 1: linearRgb(palette.armor1), 2: linearRgb(palette.armor2), 3: linearRgb(palette.armor3) };
 
     this.unsubs.push(
       bus.on('shotFired', (e) => this.onShot(e)),
@@ -79,6 +120,20 @@ export class Vfx {
         if (e.sprinting || e.surface === 'water') this.footPuff(e.pos, e.surface === 'water' ? 2 : 1, e.surface);
       }),
       bus.on('zoneChanged', () => this.host.pulseTide()),
+      bus.on('explosion', (e) => this.explosion(e)),
+      bus.on('grenadeBounced', (e) => {
+        if (e.surface === 'water') this.splash(e.pos.x, Math.max(e.pos.y, 0.02), e.pos.z, 4, 0.45 + Math.min(0.6, e.speed / 20));
+      }),
+      bus.on('grenadeThrown', (e) => {
+        if (!e.dropped) this.host.onThrow?.(e.ownerId);
+      }),
+      bus.on('grenadeCooked', (e) => this.host.onCooked?.(e.playerId, e.explodesAt)),
+      bus.on('stanceChanged', (e) => {
+        if (e.forced) this.splash(e.pos.x, Math.max(e.pos.y, 0.02), e.pos.z, 7, 0.8);
+      }),
+      // M2b drop: a cream puff at the hatch, and the parachute "pop" (4 cream smoke balls at the canopy, STYLE §20.2).
+      bus.on('playerJumped', (e) => this.hatchPuff(e.pos.x, e.pos.y, e.pos.z)),
+      bus.on('parachuteOpened', (e) => this.chutePop(e.pos.x, e.pos.y + CANOPY_HEIGHT, e.pos.z)),
     );
   }
 
@@ -133,14 +188,14 @@ export class Vfx {
       const l = Math.hypot(dx, dy, dz) || 1;
       fx = dx / l; fy = dy / l; fz = dz / l;
     }
-    const big = e.weapon === 'shotgun' ? 1.4 : e.weapon === 'pistol' ? 0.8 : 1;
+    const big = FLASH_SCALE[e.weapon] ?? 1;
     this.p(m.x + fx * 0.06, m.y + fy * 0.06, m.z + fz * 0.06, 0, 0, 0, 0.06, 0.42 * big, 0.55 * big, this.C.flash, PARTICLE_SHAPE.flash, 0, 0);
     for (let i = 0; i < 3; i++) {
       const sp = 5 + Math.random() * 4;
       this.p(m.x, m.y, m.z, fx * sp + (Math.random() - 0.5) * 2, fy * sp + Math.random(), fz * sp + (Math.random() - 0.5) * 2,
         0.12, 0.07, 0.02, this.C.flashEdge, PARTICLE_SHAPE.spark, 6, 2);
     }
-    const width = e.weapon === 'shotgun' ? 0.035 : e.weapon === 'rifle' ? 0.06 : 0.045;
+    const width = TRACER_WIDTH[e.weapon] ?? 0.045;
     const t = this.C.tracer;
     for (let i = 0; i < e.impacts.length; i++) {
       const im = e.impacts[i];
@@ -160,14 +215,22 @@ export class Vfx {
         this.p(x, y, z, 0, 0.6, 0, 0.22, 0.22, 0.45, this.C.white, PARTICLE_SHAPE.puff, 0, 2);
         if (headshot) this.p(x, y + 0.15, z, 0, 1.4, 0, 0.5, 0.32, 0.5, this.C.star, PARTICLE_SHAPE.star, 0, 1.5);
         break;
+      case SURFACE_CODE.glass:
+        // Toon glass chip: pale blue-white shards and a white flash ring (no shattering in M2b).
+        for (let i = 0; i < 6; i++) {
+          this.p(x, y, z, (r() - 0.5) * 5, r() * 3 + 1, (r() - 0.5) * 5, 0.35, 0.08, 0.03, i % 2 ? this.C.white : this.C.glass, PARTICLE_SHAPE.spark, 14, 0.6);
+        }
+        this.p(x, y, z, 0, 0, 0, 0.18, 0.15, 0.4, this.C.white, PARTICLE_SHAPE.ring, 0, 1, 0.8);
+        break;
       case SURFACE_CODE.terrain: {
-        const grass = this.host.surfaceAt(x, z) === 'grass';
-        const c = grass ? this.C.grass : this.C.sand;
+        const surf = this.host.surfaceAt(x, z);
+        const grass = surf === 'grass';
+        const c = this.dustColour(surf);
         for (let i = 0; i < 3; i++) {
           this.p(x, y + 0.05, z, (r() - 0.5) * 1.5, r() * 1.5 + 0.5, (r() - 0.5) * 1.5, 0.45, 0.16, 0.38, c, PARTICLE_SHAPE.puff, 2, 2.5);
         }
         for (let i = 0; i < 3; i++) {
-          this.p(x, y + 0.05, z, (r() - 0.5) * 3, r() * 3 + 2, (r() - 0.5) * 3, 0.4, 0.06, 0.04, grass ? this.C.grass : this.C.sandDark, PARTICLE_SHAPE.spark, 14, 0.5);
+          this.p(x, y + 0.05, z, (r() - 0.5) * 3, r() * 3 + 2, (r() - 0.5) * 3, 0.4, 0.06, 0.04, grass ? this.C.grass : surf === 'sand' ? this.C.sandDark : c, PARTICLE_SHAPE.spark, 14, 0.5);
         }
         break;
       }
@@ -207,6 +270,76 @@ export class Vfx {
       // Star above the head even if the impact puff is far from the camera ray.
       this.p(v.x, v.y + this.host.playerHeight + 0.15, v.z, 0, 1.2, 0, 0.55, 0.3, 0.45, this.C.star, PARTICLE_SHAPE.star, 0, 1.5);
     }
+    // Armor break: a burst of tier-coloured shards (vest at the chest, helmet at the head).
+    if (e.vest?.broken) this.shards(v.x, v.y + this.host.playerHeight * 0.5, v.z, this.armorRgb[e.vest.tier] ?? this.C.white);
+    if (e.helmet?.broken) this.shards(v.x, v.y + this.host.playerHeight * 0.85, v.z, this.armorRgb[e.helmet.tier] ?? this.C.white);
+  }
+
+  private shards(x: number, y: number, z: number, c: Rgb): void {
+    const r = Math.random;
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * Math.PI * 2 + r() * 0.4;
+      const sp = 2.2 + r() * 2;
+      this.p(x, y, z, Math.cos(a) * sp, 1.5 + r() * 2.5, Math.sin(a) * sp, 0.55, 0.11, 0.06, i % 3 === 0 ? this.C.white : c, PARTICLE_SHAPE.spark, 14, 0.6);
+    }
+    this.p(x, y, z, 0, 0.5, 0, 0.25, 0.3, 0.6, this.C.white, PARTICLE_SHAPE.ring, 0, 1);
+  }
+
+  /** In-hand or in-flight fuse spark: 2-3 tiny yellow / white stars that pop (STYLE.md §15). */
+  fuseSpark(x: number, y: number, z: number): void {
+    if (this.far(x, y, z, FOOTSTEP_FX_DIST2 * 4)) return;
+    const r = Math.random;
+    const n = 2 + (r() < 0.5 ? 1 : 0);
+    for (let i = 0; i < n; i++) {
+      this.p(x, y, z, (r() - 0.5) * 1.6, 0.8 + r() * 1.2, (r() - 0.5) * 1.6, 0.18, 0.07, 0.02, i === 0 ? this.C.white : this.C.fuse, PARTICLE_SHAPE.star, 4, 1);
+    }
+  }
+
+  /** Grenade flight trail: small cream puffs with ink rims, fading over 300 ms. */
+  trailPuff(x: number, y: number, z: number): void {
+    if (this.far(x, y, z)) return;
+    this.p(x, y, z, 0, 0.15, 0, 0.3, 0.1, 0.05, this.C.smoke, PARTICLE_SHAPE.puff, 0, 1, 0.8);
+  }
+
+  /** Cartoon boom (STYLE.md §15), sized to the blast radius; water spray when the ground under it is below sea level. */
+  private explosion(e: GameEvents['explosion']): void {
+    this.host.onExploded?.(e.id);
+    const amount = explosionShake(e.localDistance, e.radius);
+    if (amount > 0) this.host.shake?.(amount);
+    const { x, y, z } = e.pos;
+    if (this.far(x, y, z, EXPLOSION_FX_DIST2)) return;
+    const R = Math.max(1, e.radius);
+    const ground = this.host.heightAt ? this.host.heightAt(x, z) : y - 0.1;
+    const water = ground < 0;
+    const gy = Math.max(ground, 0);
+    const r = Math.random;
+    // 0.15 s flash star (core + hot edge), then the smoke balls.
+    this.p(x, y + 0.3, z, 0, 0, 0, 0.15, R * 0.45, R * 0.7, this.C.flash, PARTICLE_SHAPE.star, 0, 0, 1);
+    this.p(x, y + 0.3, z, 0, 0, 0, 0.15, R * 0.6, R * 0.8, this.C.boomEdge, PARTICLE_SHAPE.flash, 0, 0, 0.9);
+    const n = 7;
+    const v0 = (R * SMOKE_REACH * SMOKE_DRAG) / (1 - Math.exp(-SMOKE_DRAG * SMOKE_LIFE));
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2 + r() * 0.5;
+      const up = 0.25 + r() * 0.5;
+      const sp = v0 * (0.75 + r() * 0.35);
+      this.p(x, y + 0.4, z, Math.cos(a) * sp * (1 - up * 0.5), sp * up * 0.6, Math.sin(a) * sp * (1 - up * 0.5),
+        SMOKE_LIFE, R * 0.16, R * 0.32, i % 2 ? this.C.boomEdge : this.C.smoke, PARTICLE_SHAPE.puff, -0.5, SMOKE_DRAG);
+    }
+    this.p(x, y + 0.6, z, 0, 0.8, 0, SMOKE_LIFE * 1.2, R * 0.25, R * 0.4, this.C.smoke, PARTICLE_SHAPE.puff, -0.5, 2);
+    if (water) {
+      this.splash(x, 0.05, z, 14, 2.2);
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2;
+        this.p(x, 0.1, z, Math.cos(a) * 3, 6 + r() * 3, Math.sin(a) * 3, 0.8, 0.35, 0.2, this.C.foam, PARTICLE_SHAPE.puff, 14, 0.3);
+      }
+    } else {
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2 + r() * 0.6;
+        const sp = 4 + r() * 4;
+        this.p(x, gy + 0.2, z, Math.cos(a) * sp, 4 + r() * 4, Math.sin(a) * sp, 0.7, 0.2, 0.12, this.C.sandDark, PARTICLE_SHAPE.spark, 16, 0.4);
+      }
+    }
+    this.decals.spawn(x, gy, z, R, !water);
   }
 
   /** Death poof (also called by PlayerViews when a toppled body vanishes). */
@@ -233,14 +366,52 @@ export class Vfx {
     }
   }
 
-  private landDust(pos: Vec3, fallSpeed: number, surface: Surface, isLocal: boolean): void {
+  /** Dust colour for a ground surface (island sand / grass; M2b wood, carpet, tile). */
+  private dustColour(surface: GroundSurface): Rgb {
+    switch (surface) {
+      case 'grass': return this.C.grass;
+      case 'wood': return this.C.plank;
+      case 'carpet': return this.C.carpet;
+      case 'tile': return this.C.tile;
+      default: return this.C.sand;
+    }
+  }
+
+  /** M2b: cream puff where a player left the carrier. */
+  hatchPuff(x: number, y: number, z: number): void {
+    if (this.far(x, y, z)) return;
+    const r = Math.random;
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      this.p(x, y, z, Math.cos(a) * 1.4, (r() - 0.5) * 0.6, Math.sin(a) * 1.4, 0.5, 0.3, 0.7, this.C.cream, PARTICLE_SHAPE.puff, -0.3, 2.5, 0.9);
+    }
+  }
+
+  /** M2b: parachute pop, 4 cream cartoon smoke balls at the canopy (STYLE.md §20.2). */
+  chutePop(x: number, y: number, z: number): void {
+    if (this.far(x, y, z)) return;
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2 + 0.4;
+      this.p(x + Math.cos(a) * 1.2, y, z + Math.sin(a) * 1.2, Math.cos(a) * 1.8, 0.6, Math.sin(a) * 1.8, 0.45, 0.45, 0.85, this.C.cream, PARTICLE_SHAPE.puff, 0, 3, 0.95);
+    }
+  }
+
+  /** M2b sprinkler rain: a small white splash ring and two droplets on a floor or desk top. */
+  rainSplash(x: number, y: number, z: number): void {
+    if (this.far(x, y, z, FOOTSTEP_FX_DIST2 * 2)) return;
+    const r = Math.random;
+    this.p(x, y, z, 0, 0, 0, 0.3, 0.15, 0.6, this.C.rain, PARTICLE_SHAPE.ring, 0, 1, 0.7);
+    for (let i = 0; i < 2; i++) this.p(x, y, z, (r() - 0.5) * 1.2, 1.2 + r(), (r() - 0.5) * 1.2, 0.3, 0.06, 0.03, this.C.rain, PARTICLE_SHAPE.puff, 12, 0.3, 0.8);
+  }
+
+  private landDust(pos: Vec3, fallSpeed: number, surface: GroundSurface, isLocal: boolean): void {
     if (this.far(pos.x, pos.y, pos.z)) return;
     if (surface === 'water') {
       this.splash(pos.x, Math.max(pos.y, 0.02), pos.z, 6 + Math.min(10, Math.round(fallSpeed)), Math.min(1.6, 0.6 + fallSpeed / 12));
       return;
     }
     const n = Math.min(16, 5 + Math.round(fallSpeed * 0.8)) + (isLocal ? 2 : 0);
-    const c = surface === 'grass' ? this.C.grass : this.C.sand;
+    const c = this.dustColour(surface);
     const r = Math.random;
     for (let i = 0; i < n; i++) {
       const a = (i / n) * Math.PI * 2 + r() * 0.3;
@@ -250,13 +421,13 @@ export class Vfx {
     }
   }
 
-  private footPuff(pos: Vec3, n: number, surface: Surface): void {
+  private footPuff(pos: Vec3, n: number, surface: GroundSurface): void {
     if (this.far(pos.x, pos.y, pos.z, FOOTSTEP_FX_DIST2)) return;
     if (surface === 'water') {
       this.splash(pos.x, Math.max(pos.y, 0.02), pos.z, n + 1, 0.5);
       return;
     }
-    const c = surface === 'grass' ? this.C.grass : this.C.sand;
+    const c = this.dustColour(surface);
     const r = Math.random;
     for (let i = 0; i < n; i++) {
       this.p(pos.x + (r() - 0.5) * 0.3, pos.y + 0.05, pos.z + (r() - 0.5) * 0.3, (r() - 0.5) * 0.6, 0.3 + r() * 0.3, (r() - 0.5) * 0.6,
@@ -268,11 +439,13 @@ export class Vfx {
     const c = this.host.cameraPosition;
     this.tracers.update(dt, c.x, c.y, c.z);
     this.particles.update(dt);
+    this.decals.update(dt);
   }
 
   clear(): void {
     this.particles.clear();
     this.tracers.clear();
+    this.decals.clear();
   }
 
   dispose(): void {
@@ -280,5 +453,6 @@ export class Vfx {
     this.unsubs.length = 0;
     this.particles.dispose();
     this.tracers.dispose();
+    this.decals.dispose();
   }
 }

@@ -3,7 +3,8 @@
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { BALANCE, validateBalance, type Balance } from '../src/shared/balance';
+import { MAP_IDS } from '../src/game/levels';
+import { BALANCE, validateBalance, type Balance, type RoomsBalance } from '../src/shared/balance';
 import type { LagConfig } from './lag';
 import { parseOriginPolicy, type OriginPolicy } from './origin';
 
@@ -47,6 +48,35 @@ function num(env: NodeJS.ProcessEnv, key: string, fallback: number, min = 0, max
   return n;
 }
 
+/** Every level id, in display and rotation order (island01 first). */
+export function levelIds(): string[] {
+  return [...MAP_IDS];
+}
+
+/** The `rooms` balance block (ADR 0006). Required by the room server; balance.json carries it. */
+export function roomsBalance(b: Balance): RoomsBalance {
+  if (!b.rooms) throw new Error('balance: the "rooms" block is required by the room server (systems/rooms.md)');
+  return b.rooms;
+}
+
+/** `match.mapVoteLockSeconds` (maps.md 1.3). Required by the room server; balance.json carries it. */
+export function mapVoteLockSeconds(b: Balance): number {
+  const v = b.match.mapVoteLockSeconds;
+  if (v === undefined) throw new Error('balance: match.mapVoteLockSeconds is required by the room server (maps.md 1.3)');
+  return v;
+}
+
+/**
+ * MAP env (maps.md 1.4.1): a valid level id pins every room's map. An invalid value logs one warning and is ignored.
+ */
+export function parseMapPin(raw: string | undefined, ids: readonly string[], warn: (msg: string) => void): string | null {
+  const v = raw?.trim();
+  if (!v) return null;
+  if (ids.includes(v)) return v;
+  warn(`[server] MAP="${v.slice(0, 40)}" is not a map id (${ids.join(', ')}); ignored, rooms choose their maps`);
+  return null;
+}
+
 export interface ServerConfig {
   port: number;
   host: string | undefined;
@@ -56,7 +86,14 @@ export interface ServerConfig {
   balance: Balance;
   balanceOverridden: boolean;
   lag: LagConfig;
-  seed: number;
+  /** SEED env; null = random room seeds. */
+  seed: number | null;
+  /** MAX_ROOMS (default 8). */
+  maxRooms: number;
+  /** MAX_CONNECTIONS (default MAX_ROOMS x match.maxPlayers + 32). */
+  maxConnections: number;
+  /** MAP env pin (validated), else null. */
+  mapPin: string | null;
   /** Max sockets per remote address (0 = unlimited). */
   maxConnsPerIp: number;
   /** WebSocket upgrade Origin policy from ALLOWED_ORIGINS (server/origin.ts). Empty: `self` in production, `*` in dev. */
@@ -65,19 +102,27 @@ export interface ServerConfig {
   trustProxy: boolean;
 }
 
-export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
+export function readConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  warn: (msg: string) => void = (m) => console.warn(m),
+): ServerConfig {
   const seedRaw = env.SEED;
   const production = env.NODE_ENV === 'production';
+  const balance = loadBalance(env.BALANCE_OVERRIDE);
+  const maxRooms = num(env, 'MAX_ROOMS', 8, 1, 1000);
   return {
     port: num(env, 'PORT', 8797, 0, 65535),
     host: env.HOST?.trim() || undefined,
     production,
     distDir: resolve(process.cwd(), env.DIST_DIR?.trim() || 'dist'),
-    balance: loadBalance(env.BALANCE_OVERRIDE),
+    balance,
     balanceOverridden: Boolean(env.BALANCE_OVERRIDE?.trim()),
     lag: { latencyMs: num(env, 'LATENCY_MS', 0, 0, 10_000), jitterMs: num(env, 'JITTER_MS', 0, 0, 10_000) },
-    seed: seedRaw ? num(env, 'SEED', 0, 0, 0xffffffff) : Math.floor(Math.random() * 0xffffffff),
-    maxConnsPerIp: num(env, 'MAX_CONNS_PER_IP', 32, 0, 100_000),
+    seed: seedRaw?.trim() ? num(env, 'SEED', 0, 0, 0xffffffff) : null,
+    maxRooms,
+    maxConnections: num(env, 'MAX_CONNECTIONS', maxRooms * balance.match.maxPlayers + 32, 1, 1_000_000),
+    mapPin: parseMapPin(env.MAP, levelIds(), warn),
+    maxConnsPerIp: num(env, 'MAX_CONNS_PER_IP', 128, 0, 100_000),
     originPolicy: parseOriginPolicy(env.ALLOWED_ORIGINS, production),
     trustProxy: env.TRUST_PROXY === '1' || env.TRUST_PROXY === 'true',
   };

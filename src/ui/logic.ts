@@ -5,18 +5,34 @@
  * Angle convention (src/shared/types.ts): yaw 0 looks toward -Z, forward = (-sin yaw, 0, -cos yaw),
  * right = (cos yaw, 0, -sin yaw). The minimap is north-up with north = -Z.
  */
-import { keysWithPrefix, type StringVars } from '../content/strings';
+import { hasKey, keysWithPrefix, t, type StringVars } from '../content/strings';
+import { isScopeSight, type ZoneTheme } from '../shared/balance';
 import { MAX_NAME_LENGTH } from '../shared/constants';
-import type { GraphicsStatus, HudLocalView, HudZoneView } from '../shared/contracts';
 import type {
-  ActionFailReason,
-  ConnectionStatus,
-  DeathCause,
-  FailedAction,
-  ItemId,
-  MatchPhase,
-  Vec2,
-  WeaponId,
+  AdsView,
+  GraphicsStatus,
+  HudArmorView,
+  HudCookView,
+  HudDropView,
+  HudLocalView,
+  HudZoneView,
+} from '../shared/contracts';
+import {
+  ARMOR_PIECES,
+  isArmorId,
+  type ActionFailReason,
+  type ArmorSlot,
+  type ArmorTier,
+  type ConnectionStatus,
+  type DeathCause,
+  type FailedAction,
+  type HeldId,
+  type ItemId,
+  type MatchPhase,
+  type Rect,
+  type RoomPhase,
+  type Stance,
+  type Vec2,
 } from '../shared/types';
 
 // ---------------------------------------------------------------------------------------------
@@ -93,7 +109,20 @@ export function spreadToPx(spreadDeg: number, fovDeg: number, viewportHeightPx: 
 // ---------------------------------------------------------------------------------------------
 // Screen selection
 // ---------------------------------------------------------------------------------------------
-export type ScreenId = 'title' | 'connecting' | 'connectionLost' | 'lobby' | 'match' | 'results';
+/**
+ * M2b (UI.md §12.1): `lobby` is the legacy single-lobby screen, used only while ClientGame does not fill
+ * HudView.rooms (before the C-gate). With rooms: browser → room (waiting room, countdown) → match → results → room.
+ */
+export type ScreenId = 'title' | 'connecting' | 'connectionLost' | 'lobby' | 'browser' | 'room' | 'match' | 'results';
+
+/** M2b: the rooms part of the screen decision (from HudView.rooms). */
+export interface RoomScreenInputs {
+  location: 'none' | 'browser' | 'room';
+  /** RoomView.phase, null outside a room. */
+  roomPhase: RoomPhase | null;
+  /** RoomView.localSpectating. */
+  localSpectating: boolean;
+}
 
 export interface ScreenInputs {
   /** The player pressed Play (or Rejoin) at least once. */
@@ -103,12 +132,41 @@ export interface ScreenInputs {
   phase: MatchPhase;
   /** Player pressed "Play again" on this results screen. */
   resultsDismissed: boolean;
+  /** M2b: absent / null = legacy single lobby. */
+  rooms?: RoomScreenInputs | null;
+  /** M2b: HudView.local !== null (a participant of the running match). */
+  hasLocal?: boolean;
+  /** M2b: HudView.spectate !== null. */
+  spectating?: boolean;
+}
+
+/**
+ * M2b: is the room's match in its results? The room phase leads; the World phase only fills the moment where a
+ * room update lags a snapshot (room still 'playing', World already 'results'). A stale World phase after the room went
+ * back to 'waiting' never wins.
+ */
+export function roomInResults(phase: MatchPhase, roomPhase: RoomPhase | null): boolean {
+  return roomPhase === 'results' || (roomPhase === 'playing' && phase === 'results');
+}
+
+/** M2b: is the room's match being played? Same rule: the World's 'playing' only counts while the room is in countdown. */
+export function roomInPlay(phase: MatchPhase, roomPhase: RoomPhase | null): boolean {
+  return (roomPhase === 'playing' && phase !== 'results') || (roomPhase === 'countdown' && phase === 'playing');
 }
 
 /** Which full-screen state to show. In-match sub-states (alive / dead / spectating) are decided by the HUD. */
 export function selectScreen(s: ScreenInputs): ScreenId {
   if (!s.joinRequested) return 'title';
   if (s.connection === 'disconnected' || s.connection === 'error') return 'connectionLost';
+  const rooms = s.rooms ?? null;
+  if (rooms) {
+    if (rooms.location === 'none') return 'connecting';
+    if (rooms.location === 'browser') return 'browser';
+    const watching = s.hasLocal === true || s.spectating === true || rooms.localSpectating;
+    if (roomInResults(s.phase, rooms.roomPhase)) return s.resultsDismissed || !watching ? 'room' : 'results';
+    if (roomInPlay(s.phase, rooms.roomPhase)) return watching ? 'match' : 'room';
+    return 'room';
+  }
   if (!s.joined) return 'connecting';
   switch (s.phase) {
     case 'lobby':
@@ -141,17 +199,52 @@ export function connectionErrorKey(reason: string | undefined, wasJoined: boolea
 export interface KillInfo {
   killerName: string | null;
   victimName: string;
-  weapon: WeaponId | null;
+  /** M2a: HeldId ('grenade' for explosion kills). */
+  weapon: HeldId | null;
   cause: DeathCause;
+  /** M2a: the victim's own grenade killed them (see isSelfGrenadeKill). */
+  self?: boolean;
+}
+
+/**
+ * M2a: was this explosion death caused by the victim's own grenade? grenades.md: a self-kill credits the last enemy
+ * who hit the victim (or nobody), so `killerId` alone cannot tell. `lastBlastAttacker` is the attackerId of the
+ * victim's most recent explosion damage (playerDamaged arrives before playerKilled).
+ */
+export function isSelfGrenadeKill(
+  cause: DeathCause,
+  killerId: number | null,
+  victimId: number,
+  lastBlastAttacker: number | null | undefined,
+): boolean {
+  if (cause !== 'explosion') return false;
+  return killerId === null || killerId === victimId || lastBlastAttacker === victimId;
 }
 
 /** Which `feed.*` variant group describes a kill. */
 export function killFeedPrefix(k: KillInfo, headshot: boolean): string {
   if (k.cause === 'zone') return 'feed.zone';
   if (k.cause === 'fall') return 'feed.fall';
+  if (k.cause === 'explosion' || k.weapon === 'grenade') {
+    if (k.self === true) return 'feed.grenadeSelf';
+    return k.killerName === null ? 'feed.generic' : 'feed.grenade';
+  }
   if (k.killerName === null || k.weapon === null) return 'feed.generic';
   if (k.weapon === 'fists') return 'feed.melee';
   return headshot ? 'feed.headshot' : 'feed.kill';
+}
+
+/** M2a: feed lines that get the grenade glyph. */
+export function isGrenadeFeedPrefix(prefix: string): boolean {
+  return prefix === 'feed.grenade' || prefix === 'feed.grenadeSelf';
+}
+
+/** Death-card cause line key (+ whether it takes the killer's name). */
+export function deathCauseKey(cause: DeathCause, killerName: string | null, self: boolean): string | null {
+  if (cause === 'zone') return 'death.eliminatedByTide';
+  if (cause === 'fall') return 'death.eliminatedByFall';
+  if (cause === 'explosion' && self) return 'death.eliminatedBySelf';
+  return killerName ? 'death.eliminatedBy' : null;
 }
 
 /** Picks a numbered variant key under `prefix` (rng in [0, 1)). Returns the prefix when there are none. */
@@ -201,7 +294,7 @@ function mergeLiterals(parts: TemplatePart[]): TemplatePart[] {
 // ---------------------------------------------------------------------------------------------
 // Items / pickup prompt
 // ---------------------------------------------------------------------------------------------
-export type ItemCategory = 'gun' | 'ammo' | 'heal' | 'armor';
+export type ItemCategory = 'gun' | 'ammo' | 'heal' | 'armor' | 'throwable';
 
 export function itemCategory(item: ItemId): ItemCategory {
   switch (item) {
@@ -209,16 +302,27 @@ export function itemCategory(item: ItemId): ItemCategory {
     case 'smg':
     case 'shotgun':
     case 'rifle':
+    case 'lmg':
+    case 'dmr':
+    case 'sniper':
       return 'gun';
     case 'ammo_light':
     case 'ammo_heavy':
     case 'ammo_shell':
+    case 'ammo_sniper':
       return 'ammo';
     case 'bandage':
     case 'medkit':
       return 'heal';
-    case 'vest':
+    case 'vest_1':
+    case 'vest_2':
+    case 'vest_3':
+    case 'helmet_1':
+    case 'helmet_2':
+    case 'helmet_3':
       return 'armor';
+    case 'grenade':
+      return 'throwable';
   }
 }
 
@@ -231,14 +335,18 @@ export interface PromptChoice {
 }
 
 /** Local fields the prompt reads. The M1-fix carry limits are optional until every producer fills them. */
-export type PromptLocal = Pick<HudLocalView, 'slots' | 'armor' | 'maxArmor' | 'heals' | 'reserve'> &
-  Partial<Pick<HudLocalView, 'healMax' | 'reserveMax' | 'ammoType'>>;
+export type PromptLocal = Pick<HudLocalView, 'slots' | 'heals' | 'reserve'> &
+  Partial<Pick<HudLocalView, 'vest' | 'helmet' | 'grenades' | 'grenadeMax' | 'healMax' | 'reserveMax' | 'ammoType'>>;
 
 /** True when the pickup will be refused because that item is already at its carry limit (unknown limit = false). */
 export function isCarryFull(item: ItemId, local: PromptLocal): boolean {
   if (item === 'bandage' || item === 'medkit') {
     const max = local.healMax?.[item];
     return max !== undefined && max > 0 && (local.heals[item] ?? 0) >= max;
+  }
+  if (item === 'grenade') {
+    const max = local.grenadeMax;
+    return typeof max === 'number' && max > 0 && (local.grenades ?? 0) >= max;
   }
   if (itemCategory(item) === 'ammo') {
     // HudView only carries the reserve of the active weapon's ammo type, so other ammo types stay "unknown".
@@ -248,26 +356,88 @@ export function isCarryFull(item: ItemId, local: PromptLocal): boolean {
   return false;
 }
 
-/** Which prompt string to show for the loot in range. */
-export function pickupPromptChoice(item: ItemId, qty: number, local: PromptLocal | null): PromptChoice {
+/** The worn piece in the slot an armor item would fill. */
+export function wornPiece(local: Pick<PromptLocal, 'vest' | 'helmet'>, slot: ArmorSlot): HudArmorView | null {
+  return (slot === 'vest' ? local.vest : local.helmet) ?? null;
+}
+
+/** armor.md "Equipping": a same-or-lower tier is refused unless the worn piece is broken (broken pieces are removed). */
+export function armorRefused(item: ItemId, local: Pick<PromptLocal, 'vest' | 'helmet'>): boolean {
+  if (!isArmorId(item)) return false;
+  const piece = ARMOR_PIECES[item];
+  const worn = wornPiece(local, piece.slot);
+  return worn !== null && worn.durability > 0 && piece.tier <= worn.tier;
+}
+
+/** Refusal string for an armor item by its slot (ARCHITECTURE §14 table); generic when the item is unknown. */
+export function betterArmorKey(item: ItemId | null): string {
+  if (item !== null && isArmorId(item)) return ARMOR_PIECES[item].slot === 'vest' ? 'hud.vest.better' : 'hud.helmet.better';
+  return 'hud.armor.better';
+}
+
+/** "Carry full" string: the grenade pouch has its own line. */
+export function inventoryFullKey(item: ItemId | null): string {
+  return item === 'grenade' ? 'hud.grenade.full' : 'hud.inventory.full';
+}
+
+/**
+ * Which prompt string to show for the loot in range. `refusal` is ClientGame's prediction from
+ * interactPromptChanged (M2a); when absent the UI predicts from the HUD fields itself.
+ */
+export function pickupPromptChoice(
+  item: ItemId,
+  qty: number,
+  local: PromptLocal | null,
+  refusal: ActionFailReason | null = null,
+): PromptChoice {
   const cat = itemCategory(item);
+  if (refusal === 'betterArmor' || (cat === 'armor' && local !== null && armorRefused(item, local))) {
+    return { key: betterArmorKey(item), usesCount: false, blocked: true };
+  }
+  if (refusal === 'inventoryFull' || (local !== null && isCarryFull(item, local))) {
+    return { key: inventoryFullKey(item), usesCount: false, blocked: true };
+  }
   if (cat === 'gun') {
     const full = local !== null && local.slots[0].weapon !== null && local.slots[1].weapon !== null;
     return { key: full ? 'hud.pickup.swap' : 'hud.pickup', usesCount: false, blocked: false };
   }
-  if (cat === 'armor' && local !== null && local.maxArmor > 0 && local.armor >= local.maxArmor) {
-    return { key: 'hud.armor.better', usesCount: false, blocked: true };
+  if (cat === 'armor') {
+    const worn = local !== null && isArmorId(item) ? wornPiece(local, ARMOR_PIECES[item].slot) : null;
+    return { key: worn !== null ? 'hud.pickup.upgrade' : 'hud.pickup', usesCount: false, blocked: false };
   }
-  if (local !== null && isCarryFull(item, local)) return { key: 'hud.inventory.full', usesCount: false, blocked: true };
   if (cat === 'ammo' || qty > 1) return { key: 'hud.pickup.ammo', usesCount: true, blocked: false };
   return { key: 'hud.pickup', usesCount: false, blocked: false };
+}
+
+/** Tier + durability detail for an armor pickup ("Lv.2" and "31/55"); null for other items. */
+export function armorPromptDetail(
+  item: ItemId,
+  durability: number | null,
+  maxDurability: number | null,
+): { tier: ArmorTier; tierKey: string; durability: string | null } | null {
+  if (!isArmorId(item)) return null;
+  const tier = ARMOR_PIECES[item].tier;
+  const cur = durability !== null && Number.isFinite(durability) ? Math.max(0, Math.ceil(durability)) : null;
+  return {
+    tier,
+    tierKey: `gear.tier.${tier}`,
+    durability: cur === null ? null : maxDurability !== null && maxDurability > 0 ? `${cur}/${Math.ceil(maxDurability)}` : String(cur),
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
 // Refused actions (GameEvent actionFailed, ARCHITECTURE.md §12 "Contract revision 1")
 // ---------------------------------------------------------------------------------------------
-/** String key for a refused action, or null when the UI should stay silent (fire is covered by dryFire). */
-export function actionFailedKey(action: FailedAction, reason: ActionFailReason): string | null {
+/**
+ * String key for a refused action, or null when the UI should stay silent (fire is covered by dryFire).
+ * `promptItem` (the loot the prompt points at) picks the vest/helmet/grenade variants (ARCHITECTURE §14 table).
+ */
+export function actionFailedKey(
+  action: FailedAction,
+  reason: ActionFailReason,
+  promptItem: ItemId | null = null,
+  has: (key: string) => boolean = hasKey,
+): string | null {
   if (action === 'fire') return null;
   switch (reason) {
     case 'noHeals':
@@ -275,11 +445,17 @@ export function actionFailedKey(action: FailedAction, reason: ActionFailReason):
     case 'fullHp':
       return 'hud.heal.full';
     case 'inventoryFull':
-      return 'hud.inventory.full';
+      return inventoryFullKey(promptItem);
     case 'betterArmor':
-      return 'hud.armor.better';
+      return betterArmorKey(promptItem);
     case 'noAmmo':
       return 'hud.ammo.empty';
+    case 'noGrenades':
+      return 'hud.grenade.none';
+    case 'noHeadroom':
+      return 'hud.stance.noRoom';
+    case 'tooDeep':
+      return has('hud.stance.tooDeep') ? 'hud.stance.tooDeep' : 'hud.stance.proneWater';
   }
 }
 
@@ -352,12 +528,22 @@ export interface TideStatus {
   clock: string;
 }
 
-export function tideStatus(zone: HudZoneView | null): TideStatus | null {
+/**
+ * M2b (ADR 0005 §7): the zone's string family for the map's fiction: `hud.<theme>.*`, `announcer.<theme>.*` and
+ * `hint.<theme>`. Falls back to the tide key when a themed key is missing, so a new theme never shows raw keys.
+ */
+export function zoneKey(family: 'hud' | 'announcer' | 'hint', theme: ZoneTheme | undefined, suffix = ''): string {
+  const th = theme ?? 'tide';
+  const key = `${family}.${th}${suffix ? `.${suffix}` : ''}`;
+  return th === 'tide' || hasKey(key) ? key : `${family}.tide${suffix ? `.${suffix}` : ''}`;
+}
+
+export function tideStatus(zone: HudZoneView | null, theme?: ZoneTheme): TideStatus | null {
   if (!zone) return null;
   const clock = formatClock(zone.secondsLeft);
-  if (zone.isFinal) return { key: 'hud.tide.final', vars: {}, urgent: true, clock };
-  if (zone.shrinking) return { key: 'hud.tide.shrinking', vars: {}, urgent: true, clock };
-  return { key: 'hud.tide.wait', vars: { time: clock }, urgent: false, clock: '' };
+  if (zone.isFinal) return { key: zoneKey('hud', theme, 'final'), vars: {}, urgent: true, clock };
+  if (zone.shrinking) return { key: zoneKey('hud', theme, 'shrinking'), vars: {}, urgent: true, clock };
+  return { key: zoneKey('hud', theme, 'wait'), vars: { time: clock }, urgent: false, clock: '' };
 }
 
 /** 1-based phase label numbers, or null before the first phase. Final collapse shows count/count. */
@@ -439,6 +625,472 @@ export function fitProjection(worldRadius: number, sizePx: number, padPx: number
   return { scale: Math.max(0.01, (sizePx / 2 - padPx) / r), cx: sizePx / 2, cy: sizePx / 2 };
 }
 
+/**
+ * M2b: fits an axis-aligned rectangle (indoor floor) into a square of `sizePx`, centred, with `padPx` padding and the
+ * same scale on both axes (the longer side fills the square). North (-Z) is up.
+ */
+export function fitRectProjection(r: Rect, sizePx: number, padPx: number): MapProjection {
+  const w = Math.max(1, r.maxX - r.minX);
+  const d = Math.max(1, r.maxZ - r.minZ);
+  const scale = Math.max(0.01, (sizePx - 2 * padPx) / Math.max(w, d));
+  return { scale, cx: sizePx / 2 - ((r.minX + r.maxX) / 2) * scale, cy: sizePx / 2 - ((r.minZ + r.maxZ) / 2) * scale };
+}
+
+/**
+ * M2b: where a flight route first enters `r` (Liang-Barsky clip of from→to), or null when it never does. The route's
+ * entry lies outside the play area (drop.routeEntryMargin), so the waiting carrier icon is drawn here instead.
+ */
+export function routeEntryPoint(from: Vec2, to: Vec2, r: Rect): Vec2 | null {
+  const dx = to.x - from.x;
+  const dz = to.z - from.z;
+  let t0 = 0;
+  let t1 = 1;
+  const clip = (p: number, q: number): boolean => {
+    if (p === 0) return q >= 0;
+    const t = q / p;
+    if (p < 0) {
+      if (t > t1) return false;
+      if (t > t0) t0 = t;
+    } else {
+      if (t < t0) return false;
+      if (t < t1) t1 = t;
+    }
+    return true;
+  };
+  if (!clip(-dx, from.x - r.minX) || !clip(dx, r.maxX - from.x) || !clip(-dz, from.z - r.minZ) || !clip(dz, r.maxZ - from.z)) return null;
+  return { x: from.x + dx * t0, z: from.z + dz * t0 };
+}
+
 export function projectXZ(p: MapProjection, x: number, z: number): { px: number; py: number } {
   return { px: p.cx + x * p.scale, py: p.cy + z * p.scale };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Minimap labels (BUG-004): keep every drawn label fully inside the map, never overlapping another label or POI dot
+// ---------------------------------------------------------------------------------------------
+export interface LabelBox {
+  /** Top-left corner, CSS px. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface LabelRequest {
+  /** POI dot position, CSS px. */
+  px: number;
+  py: number;
+  /** Text block size (all lines), CSS px. */
+  w: number;
+  h: number;
+}
+
+export interface PlacedLabel {
+  /** Index into the request array. */
+  index: number;
+  box: LabelBox;
+}
+
+function boxesOverlap(a: LabelBox, b: LabelBox): boolean {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+/**
+ * Greedy label placement in request order (earlier = higher priority). Each label tries: above its dot, below, right,
+ * left, then the four corner anchors; each candidate is shifted inward to stay `pad` px inside the `size`-px square. The first candidate that does
+ * not overlap an already placed label or another POI dot wins; labels with no free spot (or wider than the map) are
+ * dropped rather than clipped.
+ */
+export function layoutMapLabels(items: readonly LabelRequest[], size: number, pad: number, gap = 3, dotR = 3): PlacedLabel[] {
+  // Greedy placement depends on order: also try rim-first (rim labels have the fewest in-bounds spots) and keep the
+  // order that fits the most labels. Ties keep the caller's priority order.
+  const c = size / 2;
+  const byIndex = items.map((_, i) => i);
+  const rimFirst = [...byIndex].sort((a, b) => {
+    const ia = items[a];
+    const ib = items[b];
+    if (!ia || !ib) return 0;
+    return Math.hypot(ib.px - c, ib.py - c) - Math.hypot(ia.px - c, ia.py - c);
+  });
+  let best: PlacedLabel[] = [];
+  for (const order of [byIndex, rimFirst]) {
+    const placed = placeLabelsInOrder(items, order, size, pad, gap, dotR);
+    if (placed.length > best.length) best = placed;
+  }
+  return best.sort((a, b) => a.index - b.index);
+}
+
+function placeLabelsInOrder(
+  items: readonly LabelRequest[],
+  order: readonly number[],
+  size: number,
+  pad: number,
+  gap: number,
+  dotR: number,
+): PlacedLabel[] {
+  const placed: PlacedLabel[] = [];
+  const dots: LabelBox[] = items.map((it) => ({ x: it.px - dotR, y: it.py - dotR, w: dotR * 2, h: dotR * 2 }));
+  const clampBox = (b: LabelBox): LabelBox => ({
+    w: b.w,
+    h: b.h,
+    x: Math.min(Math.max(b.x, pad), size - pad - b.w),
+    y: Math.min(Math.max(b.y, pad), size - pad - b.h),
+  });
+  for (const index of order) {
+    const it = items[index];
+    if (!it || it.w > size - 2 * pad || it.h > size - 2 * pad) continue;
+    const candidates: LabelBox[] = [
+      { x: it.px - it.w / 2, y: it.py - gap - it.h, w: it.w, h: it.h },
+      { x: it.px - it.w / 2, y: it.py + gap, w: it.w, h: it.h },
+      { x: it.px + gap + dotR, y: it.py - it.h / 2, w: it.w, h: it.h },
+      { x: it.px - gap - dotR - it.w, y: it.py - it.h / 2, w: it.w, h: it.h },
+      // Corner anchors: label edge flush with the dot, above or below.
+      { x: it.px - dotR, y: it.py - gap - it.h, w: it.w, h: it.h },
+      { x: it.px + dotR - it.w, y: it.py - gap - it.h, w: it.w, h: it.h },
+      { x: it.px - dotR, y: it.py + gap, w: it.w, h: it.h },
+      { x: it.px + dotR - it.w, y: it.py + gap, w: it.w, h: it.h },
+    ];
+    for (const c of candidates) {
+      const box = clampBox(c);
+      if (placed.some((p) => boxesOverlap(p.box, box))) continue;
+      if (dots.some((d, i) => i !== index && boxesOverlap(d, box))) continue;
+      placed.push({ index, box });
+      break;
+    }
+  }
+  return placed;
+}
+
+/** Splits a label into at most two lines that each fit `maxWidth` (word boundaries; the best split if none fits). */
+export function wrapLabel(text: string, maxWidth: number, measure: (s: string) => number): string[] {
+  if (measure(text) <= maxWidth) return [text];
+  const words = text.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length < 2) return [text];
+  let best: string[] = [text];
+  let bestWidth = Infinity;
+  for (let i = 1; i < words.length; i++) {
+    const lines = [words.slice(0, i).join(' '), words.slice(i).join(' ')];
+    const w = Math.max(...lines.map(measure));
+    if (w < bestWidth) {
+      bestWidth = w;
+      best = lines;
+    }
+  }
+  return best;
+}
+
+/** Minimap name for a POI: the short `<nameKey>.short` label when it exists, else the full name. */
+export function minimapPoiLabel(nameKey: string): string {
+  const short = `${nameKey}.short`;
+  return hasKey(short) ? t(short) : t(nameKey);
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2a: aim down sights (HudView.ads)
+// ---------------------------------------------------------------------------------------------
+export type ScopeSight = 'scope_4x' | 'scope_8x';
+export type DotSight = 'iron' | 'red_dot';
+
+export interface AdsReticle {
+  /** Hip crosshair opacity 0..1 (0 = hidden). */
+  hip: number;
+  /** Multiplier on the hip spread gap: the crosshair closes in toward the dot as the sight comes up. */
+  gapScale: number;
+  /** Over-shoulder sight reticle at the centre, or null. */
+  dot: DotSight | null;
+  dotOpacity: number;
+  /** Full-screen scope overlay, or null. */
+  scope: ScopeSight | null;
+}
+
+const q2 = (v: number): number => Math.round(Math.min(1, Math.max(0, Number.isFinite(v) ? v : 0)) * 50) / 50;
+
+/** REVIEW-M2a L2: the shared helper (balance.ts), re-exported for the Ui modules and tests. */
+export { isScopeSight };
+
+/**
+ * Crosshair state for this frame (STYLE.md §17, ARCHITECTURE §14 ui).
+ * - No ADS / no sight: the normal hip crosshair.
+ * - iron / red_dot: the hip crosshair closes and fades by `cameraBlend` while the sight dot fades in.
+ * - scope_4x / scope_8x: same small dot while zooming in, then the full-screen scope once `scoped`.
+ * M2b first person (UI.md §13.1): the viewmodel's own sight is the aim, so there is never a Ui dot; the hip reticle
+ * fades and closes by `1 - cameraBlend` for every sight; scoped is unchanged.
+ * Values are quantised (1/50) so the diffed DOM writes stay rare.
+ */
+export function adsReticle(ads: AdsView | null, firstPerson = false): AdsReticle {
+  if (!ads || ads.sight === 'none') return { hip: 1, gapScale: 1, dot: null, dotOpacity: 0, scope: null };
+  const b = q2(ads.cameraBlend);
+  if (isScopeSight(ads.sight)) {
+    if (ads.scoped) return { hip: 0, gapScale: 0, dot: null, dotOpacity: 0, scope: ads.sight };
+    if (firstPerson) return { hip: q2(1 - b), gapScale: q2(1 - b), dot: null, dotOpacity: 0, scope: null };
+    return { hip: q2(1 - b), gapScale: q2(1 - b), dot: b > 0 ? 'iron' : null, dotOpacity: b, scope: null };
+  }
+  if (firstPerson) return { hip: q2(1 - b), gapScale: q2(1 - b), dot: null, dotOpacity: 0, scope: null };
+  return { hip: q2(1 - b), gapScale: q2(1 - b), dot: b > 0 ? ads.sight : null, dotOpacity: b, scope: null };
+}
+
+/**
+ * M2b (UI.md §13.1): what the centre shows. 'full' = ticks + dot (a gun at the hip), 'dot' = the centre dot only
+ * (fists, grenade in hand), 'spectate' = a dim dot where an FP spectate target looks, 'none' = nothing (aboard, falling,
+ * chase / orbit cams, dead).
+ */
+export type ReticleMode = 'full' | 'dot' | 'spectate' | 'none';
+
+export function reticleMode(o: {
+  cameraView: 'firstPerson' | 'chase' | 'orbit' | undefined;
+  alive: boolean;
+  /** Aboard or dropping (freefall / chute). */
+  airborne: boolean;
+  /** HudLocalView.weapon, null when there is no local player. */
+  weapon: string | null;
+  spectating: boolean;
+}): ReticleMode {
+  if (o.alive && o.weapon !== null) {
+    if (o.airborne || o.cameraView === 'orbit' || o.cameraView === 'chase') return 'none';
+    return o.weapon === 'fists' || o.weapon === 'grenade' ? 'dot' : 'full';
+  }
+  return o.spectating && o.cameraView === 'firstPerson' ? 'spectate' : 'none';
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2a: armor pieces (vest + helmet icons with tier pips and durability)
+// ---------------------------------------------------------------------------------------------
+export interface GearView {
+  state: 'none' | 'worn' | 'broken';
+  tier: 0 | ArmorTier;
+  /** 0..1, quantised. */
+  ratio: number;
+  /** "31/55", "Broken" or '' (empty slot). */
+  text: string;
+  /** At or below a quarter left: the bar gets the striped "low" pattern. */
+  low: boolean;
+}
+
+/** `brokenTier` = tier of a piece that broke recently (shown crossed out for a moment), else 0. */
+export function gearView(piece: HudArmorView | null, brokenTier: 0 | ArmorTier = 0): GearView {
+  if (piece && piece.durability > 0) {
+    const r = ratio(piece.durability, piece.maxDurability);
+    return {
+      state: 'worn',
+      tier: piece.tier,
+      ratio: Math.round(r * 100) / 100,
+      text: t('hud.gear.durability', { current: Math.ceil(piece.durability), max: Math.ceil(piece.maxDurability) }),
+      low: r <= 0.25,
+    };
+  }
+  if (brokenTier > 0) return { state: 'broken', tier: brokenTier, ratio: 0, text: t('hud.gear.broken'), low: false };
+  return { state: 'none', tier: 0, ratio: 0, text: '', low: false };
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2a: stance indicator
+// ---------------------------------------------------------------------------------------------
+export interface StanceViewModel {
+  /** Icon to draw: the target stance (the transition animates toward it). */
+  stance: Stance;
+  moving: boolean;
+  /** 0..1, quantised. */
+  progress: number;
+  labelKey: string;
+}
+
+export function stanceView(stance: Stance, from: Stance, progress: number): StanceViewModel {
+  const p = q2(progress);
+  return { stance, moving: from !== stance && p < 1, progress: from === stance ? 1 : p, labelKey: `hud.stance.${stance}` };
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2a: grenade cook ring
+// ---------------------------------------------------------------------------------------------
+/** grenades.md: the fuse ring turns red in the last second. */
+export const COOK_URGENT_MS = 1000;
+
+export interface CookViewModel {
+  /** Fuse left, 0..1 (the ring empties). */
+  ratio: number;
+  urgent: boolean;
+  /** Seconds left, rounded UP to tenths (never shows 0.0 while the grenade is still live). */
+  seconds: number;
+}
+
+export function cookView(cook: HudCookView | null): CookViewModel | null {
+  if (!cook) return null;
+  const left = Math.max(0, Number.isFinite(cook.fuseRemainingMs) ? cook.fuseRemainingMs : 0);
+  return {
+    ratio: Math.round(ratio(left, cook.fuseMs) * 200) / 200,
+    urgent: left <= COOK_URGENT_MS,
+    seconds: Math.ceil(left / 100) / 10,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2a: grenade danger indicator
+// ---------------------------------------------------------------------------------------------
+export interface DangerPlacement {
+  /**
+   * CSS px offset from the screen centre (+x right, +y down). On-screen icons get y = 0: CSS drops them a fixed
+   * em distance below the crosshair (between the cook text and the pickup prompt, which are em-sized too).
+   */
+  x: number;
+  y: number;
+  /** Pinned to the screen edge (pointer arrow shown) rather than drawn over the grenade's direction on screen. */
+  edge: boolean;
+  /** Pointer rotation, degrees clockwise from "up" (= the relative bearing). */
+  arrowDeg: number;
+}
+
+/** Same 2.2:1 clamp as `.ui-hud` (ui.css), so edge icons stay inside the HUD box on ultrawide screens. */
+export const HUD_MAX_ASPECT = 2.2;
+
+/**
+ * Where to draw a grenade danger icon. `bearing` is HudGrenadeDangerView.bearing (radians, 0 = ahead, +PI/2 = right).
+ * Roughly ahead (inside 85% of the horizontal half-FOV) → on screen at the projected x, just under the crosshair
+ * (grenades lie on the ground; the exact height is unknown to the HUD); otherwise on an ellipse just
+ * inside the HUD box edge, like the damage arcs. Without the camera FOV everything goes to the edge.
+ */
+export function dangerPlacement(
+  bearing: number,
+  fovDeg: number | undefined,
+  viewW: number,
+  viewH: number,
+  margin: number,
+): DangerPlacement {
+  const b = Number.isFinite(bearing) ? bearing : 0;
+  const boxW = Math.min(viewW, viewH * HUD_MAX_ASPECT);
+  const rx = Math.max(0, boxW / 2 - margin);
+  const ry = Math.max(0, viewH / 2 - margin);
+  const arrowDeg = Math.round((b * 180) / Math.PI);
+  if (fovDeg !== undefined && fovDeg > 0 && viewH > 0) {
+    const halfV = (Math.min(fovDeg, 170) * Math.PI) / 360;
+    const halfH = Math.atan(Math.tan(halfV) * (viewW / viewH));
+    if (Math.abs(b) <= halfH * 0.85) {
+      const x = (Math.tan(b) / Math.tan(halfH)) * (viewW / 2);
+      return {
+        x: Math.round(Math.max(-rx, Math.min(rx, x))) + 0,
+        y: 0,
+        edge: false,
+        arrowDeg,
+      };
+    }
+  }
+  // `+ 0` folds -0 into 0 (CSS does not care, but it keeps the values comparable).
+  return { x: Math.round(rx * Math.sin(b)) + 0, y: Math.round(-ry * Math.cos(b)) + 0, edge: true, arrowDeg };
+}
+
+/**
+ * M2a addendum (REVIEW-M2a M6): ring pulse period by fuse time left, so the icon blinks faster near detonation.
+ * Without `fuseRemainingMs` (older producer) the calm rate is used. `urgent` (last second) also thickens the ring,
+ * which is the cue that survives reduced motion.
+ */
+export function dangerBlink(fuseRemainingMs: number | undefined): { periodMs: number; urgent: boolean } {
+  if (fuseRemainingMs === undefined || !Number.isFinite(fuseRemainingMs)) return { periodMs: 420, urgent: false };
+  const ms = Math.max(0, fuseRemainingMs);
+  if (ms <= 1000) return { periodMs: 110, urgent: true };
+  if (ms <= 2000) return { periodMs: 220, urgent: false };
+  return { periodMs: 420, urgent: false };
+}
+
+/** Presentation only: icons grow from 1x at this distance (m) and beyond to DANGER_MAX_SCALE at 0 m. */
+export const DANGER_SCALE_FROM_M = 6;
+export const DANGER_MAX_SCALE = 1.35;
+
+export function dangerScale(distance: number): number {
+  const d = Number.isFinite(distance) ? Math.max(0, distance) : DANGER_SCALE_FROM_M;
+  const k = 1 - Math.min(1, d / DANGER_SCALE_FROM_M);
+  return Math.round((1 + (DANGER_MAX_SCALE - 1) * k) * 20) / 20;
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2a: hit-marker variant (localHitConfirmed.vest / helmet)
+// ---------------------------------------------------------------------------------------------
+export interface HitVariant {
+  head: boolean;
+  kill: boolean;
+  /** Absorbed by the target's vest (blue dashed ring). */
+  vest: boolean;
+  /** Absorbed by the target's helmet (dome cap). */
+  helmet: boolean;
+  /** A piece broke on this hit (shard burst). */
+  broke: boolean;
+}
+
+export function hitVariant(e: {
+  headshot: boolean;
+  killed: boolean;
+  vest: { broken: boolean } | null;
+  helmet: { broken: boolean } | null;
+}): HitVariant {
+  return {
+    head: e.headshot && !e.killed,
+    kill: e.killed,
+    vest: e.vest !== null && !e.killed,
+    helmet: e.helmet !== null && !e.killed,
+    broke: !e.killed && (e.vest?.broken === true || e.helmet?.broken === true),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2b: aboard / freefall / chute HUD (HudView.drop, drop.md "What the UI must show")
+// ---------------------------------------------------------------------------------------------
+export interface DropHudModel {
+  stage: HudDropView['stage'];
+  /** Centre prompt: the jump key (aboard), the steer reminder (falling). */
+  promptKey: string;
+  /** Aboard and the doors are still shut: the jump prompt is dimmed. */
+  promptBlocked: boolean;
+  /** Second prompt line (open chute now), or null. */
+  secondKey: string | null;
+  /** Top-centre timer chip: doors open in / auto-eject in, with "m:ss". null while falling. */
+  timer: { key: string; time: string; urgent: boolean } | null;
+  /** Aboard: players still aboard. */
+  aboardCount: number | null;
+  /** Falling: altitude bar 0..1 (of `maxAltitude`) and the auto-deploy marker 0..1; null aboard. */
+  altitude: { ratio: number; deployRatio: number; metres: number; deployMetres: number } | null;
+}
+
+/** Seconds of auto-eject countdown at or below which the timer chip turns urgent. */
+export const EJECT_URGENT_S = 5;
+
+export function dropHudModel(drop: HudDropView, maxAltitude: number): DropHudModel {
+  if (drop.stage === 'aboard') {
+    const doorsShut = drop.noJumpSecondsLeft > 0;
+    return {
+      stage: 'aboard',
+      promptKey: 'hud.carrier.jump',
+      promptBlocked: doorsShut,
+      secondKey: null,
+      timer: doorsShut
+        ? { key: 'hud.carrier.doorsIn', time: formatClock(drop.noJumpSecondsLeft), urgent: false }
+        : { key: 'hud.carrier.eject', time: formatClock(drop.ejectSecondsLeft), urgent: drop.ejectSecondsLeft <= EJECT_URGENT_S },
+      aboardCount: Math.max(0, drop.aboardCount),
+      altitude: null,
+    };
+  }
+  const top = Math.max(1, maxAltitude, drop.altitude, drop.deployHeight);
+  const q = (v: number): number => Math.round(Math.min(1, Math.max(0, v / top)) * 200) / 200;
+  return {
+    stage: drop.stage,
+    promptKey: 'hud.drop',
+    promptBlocked: false,
+    secondKey: drop.stage === 'freefall' && drop.canDeploy ? 'hud.chute.open' : null,
+    timer: null,
+    aboardCount: null,
+    altitude: {
+      ratio: q(drop.altitude),
+      deployRatio: q(drop.deployHeight),
+      metres: Math.max(0, Math.round(drop.altitude)),
+      deployMetres: Math.max(0, Math.round(drop.deployHeight)),
+    },
+  };
+}
+
+/**
+ * M2b: flight announcer moments from two consecutive aboard frames. 'doorsOpen' when jumping becomes allowed,
+ * 'lastCall' when the auto-eject countdown reaches EJECT_URGENT_S.
+ */
+export function flightCue(prev: HudDropView | null, next: HudDropView | null): 'doorsOpen' | 'lastCall' | null {
+  if (!prev || !next || prev.stage !== 'aboard' || next.stage !== 'aboard') return null;
+  if (prev.noJumpSecondsLeft > 0 && next.noJumpSecondsLeft <= 0) return 'doorsOpen';
+  if (next.noJumpSecondsLeft <= 0 && prev.ejectSecondsLeft > EJECT_URGENT_S && next.ejectSecondsLeft <= EJECT_URGENT_S) return 'lastCall';
+  return null;
 }

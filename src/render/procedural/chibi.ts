@@ -6,16 +6,17 @@
  * all sharing ONE toon material and ONE outline material. Geometry is cached per variant and shared.
  *
  * Hierarchy (pivots are the animatable parts; rotate them, not the meshes):
- *   root (Group, feet at origin)
- *   ├─ body   pivot at hips   (0, 0.42, 0)   lean / bob the upper body
- *   │   ├─ torso (Mesh)
- *   │   ├─ head  pivot at neck  (0, 0.38, 0) rel body  -> world y 0.80
- *   │   ├─ armL  pivot at shoulder (-0.215, 0.31, 0) rel body -> world (-0.215, 0.73, 0)
- *   │   │   └─ hand_L_socket
- *   │   └─ armR  pivot at shoulder (+0.215, 0.31, 0) rel body
- *   │       └─ hand_R_socket (attach weapon models here)
- *   ├─ legL  pivot at hip (-0.085, 0.42, 0)
- *   └─ legR  pivot at hip (+0.085, 0.42, 0)
+ *   root (Group, feet at origin)               world position + yaw (+ death tilt)
+ *   └─ stance (Group at the origin, M2a)       crouch drop / prone lie-down; identity when standing
+ *       ├─ body   pivot at hips   (0, 0.42, 0)   lean / bob the upper body (vests attach here, identity)
+ *       │   ├─ torso (Mesh)
+ *       │   ├─ head  pivot at neck  (0, 0.38, 0) rel body  -> world y 0.80 (helmets attach here, identity)
+ *       │   ├─ armL  pivot at shoulder (-0.215, 0.31, 0) rel body -> world (-0.215, 0.73, 0)
+ *       │   │   └─ hand_L_socket
+ *       │   └─ armR  pivot at shoulder (+0.215, 0.31, 0) rel body
+ *       │       └─ hand_R_socket (attach weapon models here)
+ *       ├─ legL  pivot at hip (-0.085, 0.42, 0)
+ *       └─ legR  pivot at hip (+0.085, 0.42, 0)
  *
  * Right = +X (character faces -Z). Arms/legs hang along -Y; rotation.x > 0 swings them FORWARD
  * (arm.rotation.x = PI/2 points the arm straight ahead). Hand sockets are pre-rotated (x = -PI/2) so a
@@ -45,6 +46,113 @@ export const CHIBI_DIMENSIONS = {
 } as const;
 
 const D = CHIBI_DIMENSIONS;
+
+/** Hip-to-sole length of a straight chibi leg (shoe flattened). */
+export const CHIBI_LEG_LENGTH = 0.42;
+
+/**
+ * Leg swing (rad) that keeps the sole on the ground when the stance pivot is dropped by `drop` metres:
+ * acos((hipY - drop) / legLength). Use +angle for the front leg and -angle for the back leg.
+ */
+export function crouchLegAngle(drop: number): number {
+  const c = (D.hipY - drop) / CHIBI_LEG_LENGTH;
+  return Math.acos(c >= 1 ? 1 : c <= 0 ? 0 : c);
+}
+
+/**
+ * Key poses for crouch and prone (M2a), for the pose code in src/render/characterPose.ts (graphics-engineer).
+ * Values are joint rotations in radians / offsets in metres on the ChibiParts pivots. Full spec with the
+ * transitions and the crawl cycle: docs/art/STYLE.md "Stances". Checked in headless renders.
+ */
+export const CHIBI_STANCES = {
+  crouch: {
+    /**
+     * stance.position.y = -drop. BUG-008 (stance.md "Visual fit"): deep squat so the head fits the 0.95 m crouch
+     * cylinder: head top 1.39 -> ~1.03 m (hair 0; <= 1.05 for every hair), face centre ~0.70 m (eyeHeight 0.72).
+     */
+    drop: 0.32,
+    /** legL.rotation.x = +legSwing (front), legR.rotation.x = -legSwing (back); = crouchLegAngle(drop) (1.330). */
+    legSwing: 1.33,
+    /** legL.rotation.z = -legSplay, legR.rotation.z = +legSplay. */
+    legSplay: 0.06,
+    /** body.rotation.x (forward lean). Subtract it from the arm aim angles so the gun stays on target. */
+    bodyLean: -0.4,
+    /** Added to head.rotation.x: cancels the lean, so the face is level (world head tilt 0 at aim pitch 0). */
+    headComp: 0.4,
+    /** Crouch-walk: legs swing +-walkSwing around their crouch angles (feet then float or dip a few cm). */
+    walkSwing: 0.28,
+  },
+  prone: {
+    /** stance.rotation.x: lie face down along the yaw (head toward -Z / the aim direction). */
+    pitch: -Math.PI / 2,
+    /**
+     * stance.position = (0, lift, back): belly on the sand, body inside the sim prone box (1.5 x 0.8 x 0.6, centred on
+     * the root), head in its front 0.5 m. BUG-008: body moved forward (back 0.62 -> 0.34) so the head centre is at
+     * z ~ -0.52; the hips ride a little higher than the chest.
+     */
+    lift: 0.16,
+    back: 0.34,
+    /** body.rotation.x: negative = chest flat on the sand, slightly lower than the hips (BUG-008; was 0.22 propped up). */
+    chestUp: -0.2,
+    /**
+     * head.rotation.x: chin just above the sand, face looking forward and a little down (world head tilt -0.22 rad).
+     * Head centre ~0.33 m (eyeHeight 0.35), head top ~0.67 m (box 0.6). Aim pitch adds pitch * k (characterPose.ts);
+     * k <= 0.3 keeps the head centre at z <= -0.45 at the +45 deg limit (k 0.4 gives -0.42).
+     */
+    headUp: 1.55,
+    /** Arms forward along the ground: arm.rotation.x = PI - chestUp + aimPitch (two-handed); armL.z = armLSplay. */
+    armLSplay: 0.45,
+    /** legs: rotation.x = legLift (heels up a little), rotation.z = -/+legSplay. */
+    legLift: -0.12,
+    legSplay: 0.14,
+    /** Crawl: legs alternate legSplay +- crawlSwing on z, arms alternate x +- crawlArm, body rolls +- crawlRoll on y. */
+    crawlSwing: 0.22,
+    crawlArm: 0.18,
+    crawlRoll: 0.08,
+  },
+} as const;
+
+/**
+ * Plane-drop poses (M2b) for characterPose.ts (graphics-engineer). Spec: docs/art/STYLE.md §20.
+ * freefall: belly-down, limbs spread, rotated about the HIPS via the stance pivot:
+ *   stance.rotation.x = pitch; stance.position = (0, hipY - hipY*cos(pitch), -hipY*sin(pitch)) (= freefallStanceOffset()).
+ * hang: upright under the canopy, hands up on the risers, legs dangling.
+ */
+export const CHIBI_FREEFALL = {
+  freefall: {
+    pitch: -1.35,
+    headX: 1.0,
+    armX: 0.5,
+    /** armL.z = -armSpread, armR.z = +armSpread */
+    armSpread: 1.25,
+    legX: -0.35,
+    legSpread: 0.35,
+    /** flutter amplitude (rad) on arms / legs z, ~9 rad/s */
+    flutter: 0.08,
+    /** steering: bank the stance z by steerX * bank, pitch nose-down by diveK * dive */
+    bank: 0.35,
+    dive: 0.35,
+  },
+  hang: {
+    armX: 2.75,
+    /** armL.z = -armOut, armR.z = +armOut */
+    armOut: 0.25,
+    legLX: 0.22,
+    legRX: 0.12,
+    legSpread: 0.05,
+    bodyX: -0.05,
+    headX: 0.1,
+    /** idle sway on root/stance z: sin(t * swayRate) * sway; steering bank up to bank */
+    sway: 0.06,
+    swayRate: 1.3,
+    bank: 0.25,
+  },
+} as const;
+
+/** Stance-pivot position that makes the freefall pitch rotate about the hips. */
+export function freefallStanceOffset(pitch: number = CHIBI_FREEFALL.freefall.pitch): [number, number, number] {
+  return [0, D.hipY - D.hipY * Math.cos(pitch), -D.hipY * Math.sin(pitch)];
+}
 const HEAD_C: V3 = [0, D.headCenterY - D.neckY, 0]; // head centre relative to neck pivot
 const R = D.headRadius;
 
@@ -111,11 +219,15 @@ const wrap = (i: number, n: number) => ((Math.floor(i) % n) + n) % n;
 const skinOf = (i: number) => SKIN_TONES[wrap(i, SKIN_TONES.length)];
 const outfitOf = (i: number) => OUTFITS[wrap(i, OUTFITS.length)];
 
-type Sleeve = 'none' | 'short' | 'long';
+export type Sleeve = 'none' | 'short' | 'long';
 type LegWear = 'none' | 'shorts' | 'knee' | 'full';
 const SLEEVES: Record<OutfitStyle, Sleeve> = {
   trunksTank: 'none', sundress: 'none', hawaiian: 'short', wetsuit: 'long', rashguard: 'long', onePiece: 'none',
 };
+/** Sleeve length of an outfit index (wraps): used by the first-person viewmodel arms. */
+export function outfitSleeve(outfit: number): Sleeve {
+  return SLEEVES[OUTFITS[((Math.floor(outfit) % OUTFITS.length) + OUTFITS.length) % OUTFITS.length].style];
+}
 const LEGWEAR: Record<OutfitStyle, LegWear> = {
   trunksTank: 'shorts', sundress: 'none', hawaiian: 'shorts', wetsuit: 'full', rashguard: 'knee', onePiece: 'none',
 };
@@ -145,7 +257,7 @@ function headSurface(x: number, y: number, r: number): { p: V3; n: THREE.Vector3
 // -------------------------------------------------------------------------------------------------
 // Part builders
 // -------------------------------------------------------------------------------------------------
-function headPieces(skin: number, hair: number): Piece[] {
+function headPieces(skin: number, hair: number, helmet = false): Piece[] {
   const { style, color: hc } = hairVariant(hair);
   const P: Piece[] = [];
   const C = HEAD_C;
@@ -186,12 +298,20 @@ function headPieces(skin: number, hair: number): Piece[] {
   switch (style) {
     case 'spiky': {
       cap(0.268, Math.PI * 0.56, 0.32);
-      const spikes: [number, number][] = [
-        [0, 1.35], [0, 0.85], [1.1, 0.75], [-1.1, 0.75], [2.0, 0.6], [-2.0, 0.6], [0.6, 0.35], [-0.6, 0.35], [Math.PI, 0.95],
-      ];
+      // Under a helmet the crown spikes would pierce the shell: flare short spikes out below the rim instead
+      // (back and sides, pointing down-out), plus a fringe under the front rim.
+      const spikes: [number, number][] = helmet
+        ? [[0, -0.5], [0.75, -0.45], [-0.75, -0.45], [1.45, -0.32], [-1.45, -0.32]]
+        : [
+            [0, 1.35], [0, 0.85], [1.1, 0.75], [-1.1, 0.75], [2.0, 0.6], [-2.0, 0.6], [0.6, 0.35], [-0.6, 0.35], [Math.PI, 0.95],
+          ];
       for (const [az, el] of spikes) {
         const d = dirAE(az, el);
-        P.push({ geo: new THREE.ConeGeometry(0.075, 0.17, 5, 1, true) /* base buried in the cap */, color: hc, matrix: alongY(at(d.x * 0.26, d.y * 0.26, d.z * 0.26), d) });
+        P.push({ geo: new THREE.ConeGeometry(0.075, 0.17, 5, 1, true) /* base buried in the cap */, color: hc, matrix: alongY(at(d.x * 0.26, d.y * 0.26, d.z * 0.26), d, helmet ? 0.8 : 1) });
+      }
+      if (helmet) {
+        bang(-0.08, 0.075, 0.075, 0.045);
+        bang(0.07, 0.08, 0.075, 0.045);
       }
       break;
     }
@@ -217,13 +337,21 @@ function headPieces(skin: number, hair: number): Piece[] {
     }
     case 'bun': {
       cap(0.27, Math.PI * 0.56, 0.3);
-      P.push({ geo: new THREE.SphereGeometry(0.105, 8, 6), color: hc, matrix: xf(at(0, 0.24, 0.1)) });
+      // Under a helmet the top bun drops to a low bun at the nape (below the helmet's back rim).
+      if (helmet) P.push({ geo: new THREE.SphereGeometry(0.09, 8, 6), color: hc, matrix: xf(at(0, -0.1, 0.25)) });
+      else P.push({ geo: new THREE.SphereGeometry(0.105, 8, 6), color: hc, matrix: xf(at(0, 0.24, 0.1)) });
       bang(-0.08, 0.135, 0.075, 0.05);
       bang(0.08, 0.135, 0.075, 0.05);
       break;
     }
     case 'sunhat': {
       cap(0.266, Math.PI * 0.6, 0.35);
+      if (helmet) {
+        // The helmet replaces the sun hat: plain cap + a soft fringe under the front rim.
+        bang(-0.085, 0.075, 0.08, 0.045);
+        bang(0.085, 0.075, 0.08, 0.045);
+        break;
+      }
       const tilt: V3 = [0.12, 0, 0];
       P.push({ geo: new THREE.CylinderGeometry(0.43, 0.43, 0.024, 16), color: 0xf7d774, matrix: xf(at(0, 0.15, 0.02), tilt) });
       P.push({ geo: new THREE.CylinderGeometry(0.19, 0.235, 0.15, 12), color: 0xf7d774, matrix: xf(at(0, 0.235, 0.03), tilt) });
@@ -339,10 +467,11 @@ function partGeos(opts: ChibiOptions): PartGeos {
   const s = wrap(opts.skin, SKIN_TONES.length);
   const of = wrap(opts.outfit, OUTFITS.length);
   const h = Math.abs(Math.floor(opts.hair)) % CHIBI_VARIANT_COUNTS.hair;
+  const hm = opts.helmet ? 1 : 0;
   const skin = skinOf(s);
   const o = outfitOf(of);
   return {
-    head: cached(`head|${s}|${h}`, () => headPieces(skin, h)),
+    head: cached(`head|${s}|${h}|${hm}`, () => headPieces(skin, h, hm === 1)),
     torso: cached(`torso|${s}|${of}`, () => torsoPieces(skin, o)),
     armL: cached(`armL|${s}|${of}`, () => armPieces(-1, skin, o)),
     armR: cached(`armR|${s}|${of}`, () => armPieces(1, skin, o)),
@@ -353,9 +482,26 @@ function partGeos(opts: ChibiOptions): PartGeos {
 // -------------------------------------------------------------------------------------------------
 // Public API
 // -------------------------------------------------------------------------------------------------
-export interface ChibiOptions { skin: number; outfit: number; hair: number }
+export interface ChibiOptions {
+  skin: number;
+  outfit: number;
+  hair: number;
+  /**
+   * Helmet-safe hair (M2a): set true while a helmet is worn. Removes the sun hat, flares spiky hair out below
+   * the helmet rim and drops a top bun to the nape, so nothing pokes through the shell. Default false.
+   * After `setVariant({ helmet })`, a skinned chibi must also call `setAppearanceKey(key)` with a key that
+   * includes this flag (chibiSkin caches geometry per key).
+   */
+  helmet?: boolean;
+}
 
 export interface ChibiParts {
+  /**
+   * Stance pivot at the feet origin (child of root, parent of body and legs). Identity when standing. Crouch:
+   * drop it (position.y < 0). Prone: rotation.x = -PI/2 plus a lift / back offset. See CHIBI_STANCES and
+   * docs/art/STYLE.md "Stances".
+   */
+  stance: THREE.Object3D;
   /** Upper-body pivot at the hips. */
   body: THREE.Object3D;
   /** Neck pivot (head mesh is its child). */
@@ -400,16 +546,21 @@ function swap(mesh: THREE.Mesh, m: Merged): void {
 }
 
 export function createChibi(opts: ChibiOptions): ChibiModel {
-  const options: ChibiOptions = { skin: opts.skin, outfit: opts.outfit, hair: opts.hair };
+  const options: ChibiOptions = { skin: opts.skin, outfit: opts.outfit, hair: opts.hair, helmet: !!opts.helmet };
   const g = partGeos(options);
 
   const root = new THREE.Group();
   root.name = 'chibi';
 
+  // Stance pivot (M2a): everything below hangs off it, so crouch / prone never fight the root's position + yaw.
+  const stance = new THREE.Group();
+  stance.name = 'stance';
+  root.add(stance);
+
   const body = new THREE.Group();
   body.name = 'body';
   body.position.set(0, D.hipY, 0);
-  root.add(body);
+  stance.add(body);
 
   const torso = partMesh('torso', g.torso);
   body.add(torso);
@@ -444,14 +595,14 @@ export function createChibi(opts: ChibiOptions): ChibiModel {
     pivot.position.set(side * D.hipX, D.hipY, 0);
     const mesh = partMesh(`${pivot.name}Mesh`, g.leg);
     pivot.add(mesh);
-    root.add(pivot);
+    stance.add(pivot);
     return { pivot, mesh };
   };
   const legL = mkLeg(-1);
   const legR = mkLeg(1);
 
   const parts: ChibiParts = {
-    body, head, armL: armL.pivot, armR: armR.pivot, legL: legL.pivot, legR: legR.pivot,
+    stance, body, head, armL: armL.pivot, armR: armR.pivot, legL: legL.pivot, legR: legR.pivot,
     hand_R_socket: armR.socket, hand_L_socket: armL.socket,
   };
   const meshes: ChibiMeshes = { torso, head: headMesh, armL: armL.mesh, armR: armR.mesh, legL: legL.mesh, legR: legR.mesh };
@@ -475,7 +626,8 @@ export function createChibi(opts: ChibiOptions): ChibiModel {
       model.setVariant({ outfit });
     },
     resetPose() {
-      for (const p of [body, head, armL.pivot, armR.pivot, legL.pivot, legR.pivot]) p.rotation.set(0, 0, 0);
+      for (const p of [stance, body, head, armL.pivot, armR.pivot, legL.pivot, legR.pivot]) p.rotation.set(0, 0, 0);
+      stance.position.set(0, 0, 0);
       body.position.set(0, D.hipY, 0);
     },
   };

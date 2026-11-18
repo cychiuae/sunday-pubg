@@ -1,6 +1,10 @@
 /**
- * Page helpers for E2E specs (owner: qa-tester). DOM-only assertions on #ui-root; renderer stats via the dev-only
- * `window.__render` hook. There is no game-state hook yet (see docs/qa/M1-test-report.md "Hooks requested").
+ * Page helpers for E2E specs (owner: qa-tester). DOM assertions on #ui-root; client state via the dev-only
+ * `window.__game` hook (src/game/devHook.ts); renderer stats via `window.__render`.
+ *
+ * M2b flow (rooms.md): title (name, Play) -> room browser -> Create room dialog / Join by code / a listed room ->
+ * waiting room (host Start) -> countdown -> carrier (aboard) -> jump -> freefall -> chute -> on foot -> results ->
+ * the same waiting room.
  */
 import { expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
 
@@ -48,6 +52,12 @@ export const ui = {
   title: (p: Page) => p.locator('.ui-screen--title'),
   connect: (p: Page) => p.locator('.ui-screen--connect'),
   lobby: (p: Page) => p.locator('.ui-screen--lobby'),
+  /** M2b */
+  browser: (p: Page) => p.locator('.ui-screen--browser'),
+  roomDialog: (p: Page) => p.locator('.ui-screen--roomdlg'),
+  room: (p: Page) => p.locator('.ui-screen--room'),
+  roomCode: (p: Page) => p.locator('.ui-room__code'),
+  roomRows: (p: Page) => p.locator('.ui-roomtable__item'),
   hud: (p: Page) => p.locator('.ui-hud'),
   play: (p: Page) => p.locator('.ui-screen--play'),
   death: (p: Page) => p.locator('.ui-screen--death'),
@@ -70,6 +80,75 @@ export async function openTitle(page: Page): Promise<void> {
 export async function join(page: Page, name: string): Promise<void> {
   await ui.nameInput(page).fill(name);
   await ui.nameInput(page).press('Enter');
+}
+
+export interface RoomOptions {
+  visibility?: 'public' | 'private';
+  map?: 'island01' | 'office' | 'vote';
+  bots?: boolean;
+}
+
+/** From the title: enter the name and wait for the room browser. */
+export async function toBrowser(page: Page, name: string): Promise<void> {
+  await join(page, name);
+  await expect(ui.browser(page)).toBeVisible({ timeout: 20_000 });
+}
+
+/** From the browser: open Create room, set the options, submit, and return the room code from the waiting room. */
+export async function createRoom(page: Page, opts: RoomOptions = {}): Promise<string> {
+  await ui.browser(page).getByRole('button', { name: /create room/i }).first().click();
+  const dlg = ui.roomDialog(page);
+  await expect(dlg).toBeVisible();
+  if (opts.visibility) await dlg.locator(`#ui-roomdlg-vis-${opts.visibility}`).check({ force: true });
+  if (opts.map) await dlg.locator(`#ui-roomdlg-map-${opts.map}`).check({ force: true });
+  if (opts.bots !== undefined) await dlg.locator('#ui-roomdlg-bots').setChecked(opts.bots, { force: true });
+  await dlg.getByRole('button', { name: /^create$/i }).click();
+  await expect(ui.room(page)).toBeVisible({ timeout: 10_000 });
+  return ((await ui.roomCode(page).innerText()) ?? '').replace(/\s+/g, '');
+}
+
+/** From the browser: type a code into Join by code. */
+export async function joinByCode(page: Page, code: string): Promise<void> {
+  await page.locator('#ui-room-code').fill(code);
+  await ui.browser(page).getByRole('button', { name: /^join$/i }).click();
+  // A room mid-match shows the match (spectating) instead of the waiting room.
+  await expect(ui.room(page).or(ui.hud(page))).toBeVisible({ timeout: 10_000 });
+}
+
+/** Host: press Start match in the waiting room. */
+export async function startMatch(page: Page): Promise<void> {
+  await ui.room(page).getByRole('button', { name: /start match/i }).click();
+}
+
+/**
+ * The M1-style "just play" path used by older specs: name -> create a private room (island unless given) -> Start ->
+ * match HUD. Returns the room code (an Observer joins with it).
+ */
+export async function soloMatch(page: Page, name: string, opts: RoomOptions = {}, timeoutMs = 60_000): Promise<string> {
+  await toBrowser(page, name);
+  const code = await createRoom(page, { visibility: 'private', map: 'island01', ...opts });
+  await startMatch(page);
+  await waitForMatch(page, timeoutMs);
+  return code;
+}
+
+/** Read one field set of the dev hook. */
+export async function game<T>(page: Page, f: (g: NonNullable<Window['__game']>) => T): Promise<T> {
+  return page.evaluate(`(${f.toString()})(window.__game)`) as Promise<T>;
+}
+
+/**
+ * Aboard the carrier: press Space until the local player leaves it (the doors open at route.noJumpUntil), then wait
+ * until on foot. Needs pointer lock for game input. Returns ms from the first press to the jump.
+ */
+export async function jumpAndLand(page: Page, timeoutMs = 45_000): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  await expect.poll(() => game(page, (g) => g.aboard), { timeout: 20_000 }).toBe(true);
+  while (Date.now() < until && (await game(page, (g) => g.aboard))) {
+    await page.keyboard.press('Space');
+    await page.waitForTimeout(250);
+  }
+  await expect.poll(() => game(page, (g) => g.localAlive && !g.aboard && g.dropPhase === null), { timeout: Math.max(1000, until - Date.now()) }).toBe(true);
 }
 
 export async function aliveCount(page: Page): Promise<number> {

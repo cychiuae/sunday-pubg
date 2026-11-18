@@ -7,7 +7,8 @@
  * when the page URL has an `e2e` query flag (`/?e2e`, `/?e2e=1`), so production players never see it.
  * The state is the one ClientGame rendered on its last update() (predicted local position, interpolated remotes).
  */
-import type { ConnectionStatus, MatchPhase, PlayerId, Vec3, WeaponId } from '../shared/types';
+import type { CameraCase, ViewmodelAction } from '../shared/contracts';
+import type { ArmorTierOrNone, ConnectionStatus, GrenadeId, HealId, HeldId, MatchPhase, PlayerId, SightType, Stance, Vec3 } from '../shared/types';
 
 export const DEV_HOOK_KEY = '__game';
 
@@ -26,6 +27,22 @@ export interface DevPlayerState {
   hp: number;
   /** View position (predicted for the local player, interpolated for remotes). */
   pos: Vec3;
+  /** M2a: target stance, transition source and progress (1 = settled). */
+  stance: Stance;
+  stanceFrom: Stance;
+  stanceProgress: number;
+  vestTier: ArmorTierOrNone;
+  helmetTier: ArmorTierOrNone;
+  weapon: HeldId;
+}
+
+/** M2a: a live grenade as drawn (FrameView.grenades). */
+export interface DevGrenadeState {
+  id: GrenadeId;
+  ownerId: PlayerId;
+  pos: Vec3;
+  resting: boolean;
+  explodesAt: number;
 }
 
 export interface DevGameState {
@@ -39,10 +56,47 @@ export interface DevGameState {
   /** False when dead or not a participant of the current match. */
   localAlive: boolean;
   localHp: number | null;
-  localArmor: number | null;
   /** Rendered local feet position (predicted while alive); null when not a participant. */
   localPos: Vec3 | null;
-  localWeapon: WeaponId | null;
+  /** Local look angles in radians (the mouse-driven yaw/pitch sent with inputs; yaw 0 = -Z, pitch > 0 = up). */
+  localYaw: number;
+  localPitch: number;
+  /** M2a: HeldId ('grenade' in slot 3). */
+  localWeapon: HeldId | null;
+  /** M2a: predicted local stance (null when not a live participant). */
+  stance: Stance | null;
+  stanceFrom: Stance | null;
+  /** 0..1, 1 = settled. */
+  stanceProgress: number | null;
+  /** M2a: ADS engaged (predicted adsMs > 0). */
+  ads: boolean;
+  /** M2a: predicted ADS progress 0..1 (adsMs / adsTimeMs). */
+  adsProgress: number;
+  /** M2a: cosmetic camera blend 0..1 and the scope view flag (camera.firstPerson). */
+  adsCameraBlend: number;
+  scoped: boolean;
+  /** M2a: sight of the item in hand; null without a live local player. */
+  sight: SightType | null;
+  /** M2a: worn armor tiers (0 = none) and durability (null = none). */
+  vestTier: ArmorTierOrNone;
+  helmetTier: ArmorTierOrNone;
+  vestDurability: number | null;
+  helmetDurability: number | null;
+  /** M2a: carried grenades. */
+  grenades: number;
+  /** M2a: a grenade is cooking in hand (predicted or authoritative). */
+  cooking: boolean;
+  /** M2a: remaining cook fuse (ms) as shown by the HUD ring; null when not cooking. */
+  cookFuseMs: number | null;
+  /** M2a: the throw arc preview is shown this frame. */
+  grenadeArc: boolean;
+  /** M2a: live grenades in the world (extrapolated). */
+  liveGrenades: DevGrenadeState[];
+  /** M2a: camera vertical FOV and the scope view flag. */
+  cameraFovDeg: number;
+  cameraFirstPerson: boolean;
+  /** M2a: camera pivot height above the rendered local feet (the stance eye height); null without a live local. */
+  cameraEyeHeight: number | null;
   localKills: number;
   aliveCount: number;
   totalPlayers: number;
@@ -57,6 +111,20 @@ export interface DevGameState {
   lastCorrection: number;
   /** Count of ground loot in the latest snapshot. */
   lootCount: number;
+  // ---- M2b ----
+  /** Map of the current match (null before the first welcome). */
+  mapId: string | null;
+  /** CameraView.view of the last frame (null before the first update). */
+  cameraView: CameraCase | null;
+  /** Local drop stage (HudView.drop.stage), null on foot or not a live participant. */
+  dropPhase: 'aboard' | 'freefall' | 'chute' | null;
+  aboard: boolean;
+  /** Room the client is in (null in the browser or before hello). */
+  roomId: string | null;
+  roomCode: string | null;
+  isHost: boolean;
+  /** FrameView.viewmodel summary (null in 3P cases). */
+  viewmodel: { item: HeldId | HealId; action: ViewmodelAction; visible: boolean } | null;
   /** Every match participant as the client renders it. */
   players: DevPlayerState[];
 }

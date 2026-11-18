@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { MAX_NAME_LENGTH, PITCH_MAX, PITCH_MIN, SIM_DT } from '../src/shared/constants';
 import { makeInput } from '../src/shared/protocol/testing';
-import { RateLimiter, WindowCounter, mergeInputs, sanitizeInput, sanitizeName } from './validate';
+import type { PlayerInput } from '../src/shared/types';
+import { MAX_MOVE_INPUT_LEN } from '../src/shared/sim/movement';
+import {
+  MAX_MOVE_LEN,
+  RateLimiter,
+  WindowCounter,
+  mergeInputs,
+  sanitizeInput,
+  sanitizeName,
+  sanitizeRoomName,
+  validClientToken,
+} from './validate';
 
 describe('sanitizeName', () => {
   it.each([
@@ -109,5 +120,67 @@ describe('mergeInputs', () => {
       selectSlot: 0,
     });
     expect(mergeInputs(older, { ...newer, selectSlot: 2 }).selectSlot).toBe(2);
+  });
+});
+
+describe('M2a input rules at the edge', () => {
+  it('coerces ads to a boolean and a missing stanceToggle to null', () => {
+    const raw = { ...makeInput({ seq: 2 }), ads: 1, stanceToggle: undefined } as unknown as PlayerInput;
+    const out = sanitizeInput(raw, 1)!;
+    expect(out.ads).toBe(false);
+    expect(out.stanceToggle).toBeNull();
+    expect(sanitizeInput(makeInput({ seq: 2, ads: true, stanceToggle: 'prone' }), 1)).toMatchObject({ ads: true, stanceToggle: 'prone' });
+  });
+
+  it.each([['stand'], ['sit'], [1]])('rejects stanceToggle %j', (stanceToggle) => {
+    expect(sanitizeInput({ ...makeInput({ seq: 2 }), stanceToggle } as unknown as PlayerInput, 1)).toBeNull();
+  });
+
+  it('accepts selectSlot -1..3 and rejects anything else', () => {
+    for (const selectSlot of [-1, 0, 1, 2, 3] as const) expect(sanitizeInput(makeInput({ seq: 2, selectSlot }), 1)).not.toBeNull();
+    for (const selectSlot of [4, -2, 1.5]) {
+      expect(sanitizeInput({ ...makeInput({ seq: 2 }), selectSlot } as unknown as PlayerInput, 1)).toBeNull();
+    }
+  });
+
+  it('merge: ads is held (newer wins), the later stance request wins and an older one survives a null', () => {
+    expect(mergeInputs(makeInput({ ads: true }), makeInput({ seq: 2, ads: false })).ads).toBe(false);
+    expect(mergeInputs(makeInput({ stanceToggle: 'crouch' }), makeInput({ seq: 2 })).stanceToggle).toBe('crouch');
+    expect(mergeInputs(makeInput({ stanceToggle: 'crouch' }), makeInput({ seq: 2, stanceToggle: 'prone' })).stanceToggle).toBe('prone');
+    expect(mergeInputs(makeInput(), makeInput({ seq: 2 })).stanceToggle).toBeNull();
+    expect(mergeInputs(makeInput({ selectSlot: 3 }), makeInput({ seq: 2 })).selectSlot).toBe(3);
+  });
+});
+
+describe('M2b edge helpers', () => {
+  it('MAX_MOVE_LEN is the sim constant (REVIEW-M2a L5)', () => {
+    expect(MAX_MOVE_LEN).toBe(MAX_MOVE_INPUT_LEN);
+  });
+
+  it('sanitizeRoomName: cleans, truncates to the cap, empty -> null', () => {
+    expect(sanitizeRoomName(null, 24)).toBeNull();
+    expect(sanitizeRoomName('  \u202eLunch\n  crew ', 24)).toBe('Lunch crew');
+    expect(sanitizeRoomName('x'.repeat(30), 24)).toBe('x'.repeat(24));
+    expect(sanitizeRoomName('ab😀cd', 3)).toBe('ab😀');
+    expect(sanitizeRoomName(' \u200b ', 24)).toBeNull();
+  });
+
+  it('validClientToken: 16-64 chars of [A-Za-z0-9_-] (ADR 0006 §5)', () => {
+    expect(validClientToken(undefined)).toBeNull();
+    expect(validClientToken('a'.repeat(15))).toBeNull();
+    expect(validClientToken('a'.repeat(65))).toBeNull();
+    expect(validClientToken('abc def ghi jkl mno')).toBeNull();
+    expect(validClientToken('AAECAwQFBgcICQoLDA0ODw')).toBe('AAECAwQFBgcICQoLDA0ODw');
+  });
+
+  it('RateLimiter.retryAfterMs and full', () => {
+    const r = new RateLimiter(0.1, 2, 0);
+    expect(r.take(0)).toBe(true);
+    expect(r.take(0)).toBe(true);
+    expect(r.take(0)).toBe(false);
+    expect(r.retryAfterMs(0)).toBe(10_000);
+    expect(r.retryAfterMs(4000)).toBe(6000);
+    expect(r.full(0)).toBe(false);
+    expect(r.full(20_000)).toBe(true);
   });
 });

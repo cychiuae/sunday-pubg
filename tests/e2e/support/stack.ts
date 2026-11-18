@@ -22,17 +22,38 @@ const TSX = join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 const VITE = join(ROOT, 'node_modules', 'vite', 'bin', 'vite.js');
 const VITE_CONFIG = join(ROOT, 'tests', 'e2e', 'support', 'vite.e2e.config.ts');
 
-export interface Health {
-  ok: boolean;
-  connections: number;
-  joined: number;
+/** M2b /healthz: RoomManager.stats() (server/RoomManager.ts) with one entry per room. */
+export interface RoomHealth {
+  id: string;
+  phase: 'waiting' | 'countdown' | 'playing' | 'results';
+  humans: number;
+  visibility: 'public' | 'private';
+  matchId: number | null;
+  mapId: string | null;
   tick: number;
-  phase: 'lobby' | 'countdown' | 'playing' | 'results';
-  matchId: number;
   avgTickMs: number;
   maxTickMs: number;
+  matchAvgTickMs: number;
+  matchMaxTickMs: number;
+  ticks: number;
   droppedTicks: number;
   bytesOut: number;
+}
+export interface Health {
+  ok: boolean;
+  rooms: number;
+  connections: number;
+  browser: number;
+  listSubscribers: number;
+  loopDelayP99Ms: number;
+  loopDelayMaxMs: number;
+  perRoom: RoomHealth[];
+}
+
+/** The only room's health (most specs run one room); throws when there is not exactly one. */
+export function onlyRoom(h: Health): RoomHealth {
+  if (h.perRoom.length !== 1) throw new Error(`expected 1 room, got ${h.perRoom.length}: ${JSON.stringify(h.perRoom)}`);
+  return h.perRoom[0]!;
 }
 
 export interface StackOptions {
@@ -41,6 +62,10 @@ export interface StackOptions {
   latencyMs?: number;
   jitterMs?: number;
   seed?: number;
+  /** M2b: server MAP env (pins the map in every room). */
+  mapPin?: string;
+  /** M2b: server MAX_ROOMS env. */
+  maxRooms?: number;
   /** Name used for log files under test-results/stack-logs. */
   label: string;
 }
@@ -55,16 +80,31 @@ export interface Stack {
   stop(): Promise<void>;
 }
 
-function freePort(): Promise<number> {
-  return new Promise((res, rej) => {
+/**
+ * Port ranges reserved for QA stacks (M2a rule): game servers 8800-8999, Vite 5300-5399. The developer's dev server
+ * (5173 / 8797) is outside both ranges, so a test run can never collide with it or kill it.
+ */
+export const SERVER_PORTS = { lo: 8800, hi: 8999 } as const;
+export const VITE_PORTS = { lo: 5300, hi: 5399 } as const;
+
+function canListen(port: number): Promise<boolean> {
+  return new Promise((res) => {
     const srv = createServer();
-    srv.once('error', rej);
-    srv.listen(0, '127.0.0.1', () => {
-      const addr = srv.address();
-      const port = typeof addr === 'object' && addr ? addr.port : 0;
-      srv.close(() => res(port));
-    });
+    srv.once('error', () => res(false));
+    srv.listen(port, '127.0.0.1', () => srv.close(() => res(true)));
   });
+}
+
+/** A free port in [lo, hi], probed from a random start so parallel runs rarely race for the same one. */
+async function freePortIn(range: { lo: number; hi: number }, avoid: number[] = []): Promise<number> {
+  const n = range.hi - range.lo + 1;
+  const start = Math.floor(Math.random() * n);
+  for (let i = 0; i < n; i++) {
+    const port = range.lo + ((start + i) % n);
+    if (avoid.includes(port)) continue;
+    if (await canListen(port)) return port;
+  }
+  throw new Error(`no free port in ${range.lo}-${range.hi}`);
 }
 
 function waitForLine(proc: ChildProcess, re: RegExp, timeoutMs: number, what: string): Promise<RegExpMatchArray> {
@@ -139,9 +179,10 @@ function tee(proc: ChildProcess, file: string): void {
 }
 
 export async function startStack(opts: StackOptions): Promise<Stack> {
+  const wantServerPort = await freePortIn(SERVER_PORTS);
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    PORT: '0',
+    PORT: String(wantServerPort),
     HOST: '127.0.0.1',
     BALANCE_OVERRIDE: opts.balance ? JSON.stringify(opts.balance) : '',
     LATENCY_MS: String(opts.latencyMs ?? 0),
@@ -150,14 +191,18 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
   };
   if (opts.seed !== undefined) env.SEED = String(opts.seed);
   else delete env.SEED;
+  if (opts.mapPin !== undefined) env.MAP = opts.mapPin;
+  else delete env.MAP;
+  if (opts.maxRooms !== undefined) env.MAX_ROOMS = String(opts.maxRooms);
 
   const server = spawn(process.execPath, [TSX, 'server/index.ts'], { cwd: ROOT, env, detached: true, stdio: 'pipe' });
+  // Server logs "listening on :<port>"; the port is the one requested above (8800-8999).
   tee(server, `${opts.label}-server.log`);
   let vite: ChildProcess | null = null;
   try {
     const m = await waitForLine(server, /listening on :(\d+)/, 30_000, 'game server');
     const serverPort = Number(m[1]);
-    const vitePort = await freePort();
+    const vitePort = await freePortIn(VITE_PORTS);
     vite = spawn(process.execPath, [VITE, '--config', VITE_CONFIG, '--port', String(vitePort), '--strictPort', '--host', '127.0.0.1'], {
       cwd: ROOT,
       env: { ...process.env, PORT: String(serverPort), FORCE_COLOR: '0' },

@@ -70,7 +70,7 @@ a damage tick sound while outside. VFX: an animated translucent water wall at th
 ## Acceptance tests
 1. With default data, the phase 1 shrink begins at t = 75 s and the radius at t = 97.5 s is (125 + 87.5)/2 = 106.25 m.
 2. Every target circle lies inside the previous one (distance between centres + r_i <= R_prev), checked over 1000 seeds.
-3. A player outside during phase 3 loses exactly 4 HP per second, with armor unchanged.
+3. A player outside during phase 3 loses exactly 4 HP per second, with vest and helmet durability unchanged (M2a armor pieces).
 4. A player with 100 HP outside during collapse dies within 4 s.
 5. With a fixed seed, the zone sequence is identical across runs.
 6. Phases end at 120 / 225 / 320 / 390 / 440 / 480 s; the collapse starts shrinking at 500 s and is closed (radius 0) at 520 s.

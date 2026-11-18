@@ -4,15 +4,30 @@
  * - Reads continuous state from HudView every frame (diffed writes only).
  * - Reads discrete moments from the bus (never emits).
  * - Sends intents back only through UiCallbacks. Never requests pointer lock itself.
- * - Persists Settings (SETTINGS_STORAGE_KEY) and UI-only prefs (scale, reduced motion), plus the last name.
+ * - Persists Settings (SETTINGS_STORAGE_KEY) and UI-only prefs (scale, reduced motion, head bob), plus the last name.
+ * - M2b: the room browser, create dialog and waiting room (HudView.rooms; intents through UiCallbacks.on*Room*), the
+ *   `?room=` / `?map=` deep links and the `?room=` URL sync, the drop HUD and flight announcer, zone strings by theme,
+ *   first-person settings (Settings.fovDeg plus the EFFECTIVE headBob / reducedMotion).
  *
  * Owner: ui-ux-designer. Design spec: docs/ui/UI.md.
  */
 import './ui.css';
 import { coastlineRadius } from '../shared/sim/terrain';
-import type { GraphicsStatus, HudView, IUi, Settings, UiCallbacks, UiSoundId } from '../shared/contracts';
+import type {
+  GraphicsStatus,
+  HudDropView,
+  HudView,
+  IUi,
+  RoomLimitsView,
+  RoomSettingsInput,
+  Settings,
+  UiCallbacks,
+  UiSoundId,
+} from '../shared/contracts';
+import type { ZoneTheme } from '../shared/balance';
 import type { EventBus, GameEvents } from '../shared/events';
-import type { MatchPhase, PlayerId } from '../shared/types';
+import type { MapId, MatchPhase, PlayerId } from '../shared/types';
+import { ScopeOverlay } from './ads';
 import { h } from './dom';
 import { KillFeed, MessageSlot, type Message } from './feed';
 import { Hud } from './hud';
@@ -20,12 +35,29 @@ import {
   actionFailedKey,
   aliveAnnouncement,
   connectionErrorKey,
+  flightCue,
   graphicsStatusView,
+  hitVariant,
+  isSelfGrenadeKill,
   itemCategory,
+  roomInResults,
   selectScreen,
+  zoneKey,
   type ScreenId,
 } from './logic';
+import { MenuToasts, RoomBrowser, RoomDialog, WaitingRoom } from './rooms';
 import {
+  createFailedKey,
+  deepLinkVote,
+  joinFailedKey,
+  mapNameKey,
+  MemberToastThrottle,
+  parseDeepLink,
+  withRoomParam,
+  type DeepLink,
+} from './roomLogic';
+import {
+  controlsList,
   ConnectScreen,
   DeathCard,
   GraphicsOverlay,
@@ -36,6 +68,7 @@ import {
   TitleScreen,
 } from './screens';
 import {
+  effectiveSettings,
   getStorage,
   HINTS_STORAGE_KEY,
   loadSettings,
@@ -51,7 +84,7 @@ import {
   writeItem,
   type UiPrefs,
 } from './settings';
-import { t } from '../content/strings';
+import { hasKey, t } from '../content/strings';
 
 const BANNER_MS = 2600;
 /** UI sound throttles: hover sweeps across a row of buttons and slider drags fire many events. */
@@ -62,19 +95,40 @@ const CLICKABLE = 'button, input[type="checkbox"], input[type="radio"]';
 const HOVERABLE = 'button, .ui-seg__opt, .ui-field--check, input[type="range"]';
 const HINT_MS = 5000;
 
-type HintId = 'hint.drop' | 'hint.loot' | 'hint.reload' | 'hint.heal' | 'hint.tide' | 'hint.switch';
+type HintId =
+  | 'hint.drop'
+  | 'hint.loot'
+  | 'hint.reload'
+  | 'hint.heal'
+  | 'hint.tide'
+  | 'hint.switch'
+  // M2a
+  | 'hint.ads'
+  | 'hint.crouch'
+  | 'hint.prone'
+  | 'hint.grenade'
+  // M2b
+  | 'hint.lightsOut'
+  | 'hint.sprinklers'
+  | 'hint.spectateView';
 
 export class Ui implements IUi {
   private readonly el: HTMLDivElement;
   private readonly storage = getStorage();
+  /** Stored settings with the effective headBob / reducedMotion folded in (what ClientGame gets). */
   private settings: Settings;
   private prefs: UiPrefs;
   private readonly unsubs: (() => void)[] = [];
   private readonly motionQuery: MediaQueryList | null;
-  private readonly onMotionChange = (): void => this.applyPrefs();
+  private readonly onMotionChange = (): void => {
+    this.applyPrefs();
+    this.settingsPanel.refreshMotion();
+  };
   private readonly onResize = (): void => {
+    this.viewportW = window.innerWidth;
     this.viewportH = window.innerHeight;
   };
+  private viewportW = typeof window !== 'undefined' ? window.innerWidth : 1280;
   private viewportH = typeof window !== 'undefined' ? window.innerHeight : 720;
 
   // Screens
@@ -82,6 +136,7 @@ export class Ui implements IUi {
   private readonly connect: ConnectScreen;
   private readonly lobby: LobbyScreen;
   private readonly hud: Hud;
+  private readonly scope: ScopeOverlay;
   private readonly play: PlayOverlay;
   private readonly death: DeathCard;
   private readonly results: ResultsScreen;
@@ -91,6 +146,28 @@ export class Ui implements IUi {
   private readonly banner: MessageSlot;
   private readonly hint: MessageSlot;
   private readonly waitingChip: HTMLDivElement;
+  // M2b rooms
+  private readonly browser: RoomBrowser;
+  private readonly dialog: RoomDialog;
+  private readonly room: WaitingRoom;
+  private readonly menuToasts: MenuToasts;
+  private readonly deepLink: DeepLink;
+  /** A room code to join as soon as the server puts us in the browser (deep link, Rejoin). */
+  private pendingCode: string | null = null;
+  /** The last room we were in (Rejoin after a lost connection). */
+  private lastRoomCode: string | null = null;
+  /** The `?room=` value this Ui last wrote to the URL. */
+  private urlRoom: string | null = null;
+  private limits: RoomLimitsView | null = null;
+  private readonly memberToasts = new MemberToastThrottle();
+  /** The room id whose `?map=` vote was already sent. */
+  private mapVoteSentFor: string | null = null;
+  private deepLinkInvalidShown = false;
+  private inRoom = false;
+  private isHost = false;
+  private lastHud: HudView | null = null;
+  private currentMapId: MapId | null = null;
+  private prevDrop: HudDropView | null = null;
 
   // Flow state
   private joinRequested = false;
@@ -112,8 +189,8 @@ export class Ui implements IUi {
   private zonePhaseSeen = -2;
   private zoneShrinkingSeen = false;
   private readonly lastHeadshot = new Map<PlayerId, boolean>();
-  private readonly lastArmor = new Map<PlayerId, number>();
-  private armorBrokeFor: PlayerId | null = null;
+  /** M2a: attacker of each victim's latest explosion damage (self-grenade detection, logic.isSelfGrenadeKill). */
+  private readonly lastBlastAttacker = new Map<PlayerId, PlayerId | null>();
   private readonly hintsSeen: Set<string>;
   private msgSeq = 0;
   private lastHoverSoundAt = -Infinity;
@@ -124,22 +201,74 @@ export class Ui implements IUi {
     bus: EventBus<GameEvents>,
     private readonly callbacks: UiCallbacks,
   ) {
-    this.settings = loadSettings(this.storage);
     this.prefs = loadUiPrefs(this.storage);
+    this.motionQuery = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
+    this.settings = effectiveSettings(loadSettings(this.storage), this.prefs, this.motionQuery?.matches === true);
+    this.deepLink = parseDeepLink(typeof location !== 'undefined' ? location.search : '');
     this.lastName = readItem(this.storage, NAME_STORAGE_KEY) ?? '';
     this.hintsSeen = parseHintSet(readItem(this.storage, HINTS_STORAGE_KEY));
-    this.motionQuery = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
 
     const openSettings = (): void => this.settingsPanel.show(true);
-    this.title = new TitleScreen(this.lastName, (name) => this.join(name), openSettings);
+    this.title = new TitleScreen(
+      this.lastName,
+      (name) => {
+        // M2b: a valid ?room= link joins straight after the name (UI.md §12.9).
+        if (this.deepLink.room) this.pendingCode = this.deepLink.room;
+        this.join(name);
+      },
+      openSettings,
+      () => {
+        this.deepLink.room = null;
+        this.pendingCode = null;
+      },
+    );
+    this.title.setDeepLink(this.deepLink.room);
     this.connect = new ConnectScreen(() => {
+      // Rejoin returns to the same room when it still exists (else the browser shows why).
+      if (this.lastRoomCode) this.pendingCode = this.lastRoomCode;
       if (this.lastName) this.join(this.lastName);
       else this.joinRequested = false;
     });
     this.lobby = new LobbyScreen(openSettings);
     this.hud = new Hud(coastlineRadius);
-    this.play = new PlayOverlay(() => this.callbacks.onResume(), openSettings);
-    this.death = new DeathCard(() => this.closeDeath());
+    this.scope = new ScopeOverlay();
+    this.play = new PlayOverlay(
+      () => this.callbacks.onResume(),
+      openSettings,
+      () => this.callbacks.onLeaveRoom?.(),
+    );
+    this.menuToasts = new MenuToasts();
+    this.browser = new RoomBrowser({
+      refresh: () => this.callbacks.onRefreshRooms?.(),
+      create: () => this.openCreateDialog(),
+      join: (target) => this.callbacks.onJoinRoom?.(target),
+      back: () => {
+        // Back to the title to change the name. There is no disconnect intent yet; Play sends onJoin again.
+        this.joinRequested = false;
+        this.pendingCode = null;
+      },
+      full: () => this.menuToasts.push('browser.error.full', {}, true, performance.now()),
+    });
+    this.dialog = new RoomDialog((mode, settings, patch) => this.submitRoomDialog(mode, settings, patch));
+    this.room = new WaitingRoom(
+      {
+        leave: () => this.callbacks.onLeaveRoom?.(),
+        openRoomSettings: () => this.openEditDialog(),
+        openSettings,
+        start: () => this.callbacks.onStartMatch?.(),
+        cancel: () => this.callbacks.onCancelCountdown?.(),
+        setReady: (ready) => this.callbacks.onSetReady?.(ready),
+        vote: (option) => this.callbacks.onVote?.(option),
+        kick: (id) => this.callbacks.onKick?.(id),
+      },
+      coastlineRadius,
+      controlsList(true),
+    );
+    this.death = new DeathCard(() => {
+      this.closeDeath();
+      // BUG-001: start spectating now instead of waiting out match.deathScreenSeconds.
+      this.callbacks.onSpectate?.();
+    });
     this.results = new ResultsScreen(() => {
       this.resultsDismissed = true;
       this.callbacks.onPlayAgain();
@@ -168,14 +297,19 @@ export class Ui implements IUi {
       'div',
       'ui',
       null,
+      this.scope.el,
       this.hud.el,
       this.waitingChip,
       this.lobby.el,
+      this.browser.el,
+      this.room.el,
+      this.menuToasts.el,
       this.death.el,
       this.results.el,
       this.play.el,
       this.connect.el,
       this.title.el,
+      this.dialog.el,
       this.settingsPanel.el,
       this.gfx.noteEl,
       this.gfx.el,
@@ -205,10 +339,17 @@ export class Ui implements IUi {
 
   update(hud: HudView): void {
     const now = performance.now();
-    if (hud.joined) this.wasJoined = true;
+    const rooms = hud.rooms ?? null;
+    const roomView = rooms?.room ?? null;
+    if (hud.joined || (rooms !== null && rooms.location !== 'none')) this.wasJoined = true;
     this.localId = hud.local?.id ?? this.localId;
-    if (hud.phase !== 'results') this.resultsDismissed = false;
+    if (rooms?.browser) this.limits = rooms.browser.limits;
+    if (hud.zoneTheme) this.hud.zoneTheme = hud.zoneTheme;
+    const inResults = rooms ? roomInResults(hud.phase, roomView?.phase ?? null) : hud.phase === 'results';
+    if (!inResults) this.resultsDismissed = false;
     if (hud.pointerLocked) this.lockedThisMatch = true;
+    this.inRoom = rooms?.location === 'room';
+    this.isHost = roomView?.isLocalHost === true;
 
     const screen = selectScreen({
       joinRequested: this.joinRequested,
@@ -216,8 +357,14 @@ export class Ui implements IUi {
       joined: hud.joined,
       phase: hud.phase,
       resultsDismissed: this.resultsDismissed,
+      rooms: rooms
+        ? { location: rooms.location, roomPhase: roomView?.phase ?? null, localSpectating: roomView?.localSpectating === true }
+        : null,
+      hasLocal: hud.local !== null,
+      spectating: hud.spectate !== null,
     });
     this.setScreen(screen);
+    this.updateRooms(hud, screen, now);
 
     switch (screen) {
       case 'connecting':
@@ -228,6 +375,12 @@ export class Ui implements IUi {
         break;
       case 'lobby':
         this.lobby.update(hud);
+        break;
+      case 'browser':
+        if (rooms?.browser) this.browser.update(rooms.browser, rooms.pending, now);
+        break;
+      case 'room':
+        if (roomView) this.room.update(hud, roomView, this.limits, this.resultsDismissed, now);
         break;
       case 'results':
         this.results.update(hud);
@@ -241,7 +394,104 @@ export class Ui implements IUi {
 
     const showPlay = this.shouldShowPlayOverlay(screen, hud);
     this.play.show(showPlay);
-    if (showPlay) this.play.update(!this.lockedThisMatch);
+    if (showPlay) this.play.update(!this.lockedThisMatch, this.inRoom);
+    this.menuToasts.update(now);
+    this.lastHud = hud;
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // M2b rooms
+  // ------------------------------------------------------------------------------------------
+  private updateRooms(hud: HudView, screen: ScreenId, now: number): void {
+    const rooms = hud.rooms ?? null;
+    if (!rooms) return;
+    const room = rooms.room;
+
+    // Deep link / Rejoin: join by code as soon as the server has us in the browser.
+    if (rooms.location === 'browser' && this.pendingCode) {
+      const code = this.pendingCode;
+      this.pendingCode = null;
+      this.browser.prefillCode(code);
+      this.callbacks.onJoinRoom?.({ code });
+    }
+    if (screen === 'browser' && this.deepLink.roomInvalid && !this.deepLinkInvalidShown) {
+      this.deepLinkInvalidShown = true;
+      this.browser.showError('browser.deepLink.invalid');
+    }
+
+    // ?map= pre-selects your vote once per room joined (maps.md rule 2).
+    if (room?.vote && !room.vote.locked && !room.vote.pinned && room.vote.mine === null && this.mapVoteSentFor !== room.id) {
+      this.mapVoteSentFor = room.id;
+      const offered = room.vote.options.map((o) => o.option).filter((o) => o !== 'random');
+      const option = deepLinkVote(this.deepLink.map, offered);
+      if (option) this.callbacks.onVote?.(option);
+    }
+
+    // Keep ?room= in the URL while in a room, so a reload rejoins it (UI.md §12.9).
+    const code = rooms.location === 'room' && room ? room.code : null;
+    if (code !== this.urlRoom && (code !== null || this.urlRoom !== null)) {
+      this.urlRoom = code;
+      try {
+        history.replaceState(history.state, '', withRoomParam(location.href, code));
+      } catch {
+        // Sandboxed frames may refuse; the room still works.
+      }
+    }
+
+    // Dialog spinner and the folded join/leave toasts.
+    if (this.dialog.mode === 'create') this.dialog.setPending(rooms.pending === 'create');
+    const more = this.memberToasts.flush(now);
+    if (more > 0 && screen === 'room') this.menuToasts.push('room.toast.more', { count: more }, false, now);
+  }
+
+  private renderedDefaultName(): string {
+    return t(hasKey('room.create.nameDefault') ? 'room.create.nameDefault' : 'room.create.name.default', { name: this.lastName });
+  }
+
+  private openCreateDialog(): void {
+    const limits = this.limits;
+    if (!limits) return;
+    const def = this.renderedDefaultName();
+    this.dialog.open({
+      mode: 'create',
+      name: def,
+      renderedDefault: def,
+      isPublic: true,
+      mapMode: limits.pinnedMapId ?? 'vote',
+      maxHumans: limits.maxHumansDefault,
+      fillBots: limits.fillBotsDefault,
+      limits,
+      members: 0,
+    });
+  }
+
+  private openEditDialog(): void {
+    const room = this.lastHud?.rooms?.room;
+    const limits = this.limits;
+    if (!room || !limits || !room.isLocalHost || room.phase !== 'waiting') return;
+    const host = room.members.find((m) => m.isHost);
+    const def = t(hasKey('room.create.nameDefault') ? 'room.create.nameDefault' : 'room.create.name.default', { name: host?.name ?? this.lastName });
+    this.dialog.open({
+      mode: 'edit',
+      name: room.settings.name ?? def,
+      renderedDefault: def,
+      isPublic: room.settings.visibility === 'public',
+      mapMode: room.settings.mapMode,
+      maxHumans: room.settings.maxHumans,
+      fillBots: room.settings.fillBots,
+      limits,
+      members: room.members.length,
+    });
+  }
+
+  private submitRoomDialog(mode: 'create' | 'edit', settings: RoomSettingsInput, patch: Partial<RoomSettingsInput>): void {
+    if (mode === 'create') {
+      this.callbacks.onCreateRoom?.(settings);
+      return;
+    }
+    // Settings are applied by the next room update; there is no per-request failure event, so close now.
+    this.callbacks.onSetRoomSettings?.(patch);
+    this.dialog.close();
   }
 
   /** ADR 0003: WebGL context health. 'failed' blocks with Reload; 'restoring' shows a small note; 'ok' hides both. */
@@ -261,6 +511,9 @@ export class Ui implements IUi {
     this.motionQuery?.removeEventListener('change', this.onMotionChange);
     window.removeEventListener('resize', this.onResize);
     this.settingsPanel.dispose();
+    this.dialog.dispose();
+    this.room.dispose();
+    this.scope.dispose();
     this.hud.dispose();
     this.el.remove();
   }
@@ -277,7 +530,7 @@ export class Ui implements IUi {
   }
 
   private setSettings(s: Settings): void {
-    const next = normalizeSettings(s);
+    const next = effectiveSettings(normalizeSettings(s), this.prefs, this.motionQuery?.matches === true);
     if (settingsEqual(next, this.settings)) return;
     this.settings = next;
     saveSettings(this.storage, next);
@@ -285,9 +538,15 @@ export class Ui implements IUi {
   }
 
   private applyPrefs(): void {
-    const reduced = this.prefs.reducedMotion === 'on' || (this.prefs.reducedMotion === 'system' && this.motionQuery?.matches === true);
-    this.el.classList.toggle('is-reduced-motion', reduced);
+    const next = effectiveSettings(this.settings, this.prefs, this.motionQuery?.matches === true);
+    this.el.classList.toggle('is-reduced-motion', next.reducedMotion === true);
     this.el.style.setProperty('--ui-scale', String(this.prefs.uiScale));
+    // M2b: reduced motion and head bob are part of Settings now (ClientGame and the renderer act on them).
+    if (!settingsEqual(next, this.settings)) {
+      this.settings = next;
+      saveSettings(this.storage, next);
+      this.callbacks.onSettingsChanged({ ...next });
+    }
   }
 
   private setScreen(screen: ScreenId): void {
@@ -296,9 +555,14 @@ export class Ui implements IUi {
     this.title.show(screen === 'title');
     this.connect.show(screen === 'connecting' || screen === 'connectionLost');
     this.lobby.show(screen === 'lobby');
+    this.browser.show(screen === 'browser');
+    this.room.show(screen === 'room');
+    this.el.dataset['screen'] = screen;
+    if (screen !== 'browser' && screen !== 'room') this.dialog.close();
     this.results.show(screen === 'results');
     this.hud.el.hidden = screen !== 'match';
     if (screen !== 'match') {
+      this.scope.update(null);
       this.death.show(false);
       this.waitingChip.hidden = true;
     }
@@ -330,16 +594,27 @@ export class Ui implements IUi {
     }
     this.prevAlive = hud.aliveCount;
 
+    // M2b flight announcer: doors open, last call (per map: announcer.flight.<mapId>.*).
+    const drop = local?.alive ? (hud.drop ?? null) : null;
+    const cue = flightCue(this.prevDrop, drop);
+    if (cue) this.announceFlight(cue);
+    this.prevDrop = drop;
+    if (hud.spectate?.view !== undefined && hud.spectate !== null) this.showHint('hint.spectateView');
+
     // Contextual hints
     if (local && local.alive) {
       if (local.mag !== null && local.mag === 0 && (local.reserve ?? 0) > 0) this.showHint('hint.reload');
-      if (local.outsideZone) this.showHint('hint.tide');
+      if (local.outsideZone) this.showHint(this.zoneHint());
+      // M2a: first time a gun with a sight is in hand after landing.
+      if (!local.dropping && hud.ads && hud.ads.sight !== 'none') this.showHint('hint.ads');
     }
 
     this.feed.update(now);
     this.banner.update(now);
     this.hud.dropHintActive = this.hint.update(now) === 'hint.drop';
-    this.hud.update(hud, now, this.viewportH);
+    this.hud.update(hud, now, this.viewportW, this.viewportH);
+    // Full-screen scope frame (M2a): only while the local player is scoped and nothing modal covers the match.
+    this.scope.update(this.deathOpen ? null : this.hud.reticle.scope);
   }
 
   private openDeath(now: number): void {
@@ -365,8 +640,23 @@ export class Ui implements IUi {
     this.zonePhaseSeen = -2;
     this.zoneShrinkingSeen = false;
     this.lastHeadshot.clear();
-    this.lastArmor.clear();
+    this.lastBlastAttacker.clear();
     this.lastMatchEnded = null;
+    this.prevDrop = null;
+  }
+
+  private zoneTheme(): ZoneTheme {
+    return this.hud.zoneTheme;
+  }
+
+  private zoneHint(): HintId {
+    return zoneKey('hint', this.zoneTheme()) as HintId;
+  }
+
+  private announceFlight(moment: 'takeoff' | 'doorsOpen' | 'lastCall'): void {
+    const mapId = this.currentMapId ?? this.lastHud?.minimap.map.id ?? null;
+    const key = mapId ? `announcer.flight.${mapId}.${moment}` : null;
+    if (key && hasKey(key)) this.announce(`flight-${moment}`, { key, vars: {}, tone: moment === 'lastCall' ? 'warn' : 'normal' });
   }
 
   private announce(id: string, msg: Message): void {
@@ -438,35 +728,116 @@ export class Ui implements IUi {
 
     on('localPlayerSpawned', (e) => {
       this.localId = e.playerId;
+      // M2b: with the carrier you spawn aboard; the drop line waits for your jump (playerJumped below).
+      if (this.lastHud?.drop !== undefined) return;
       this.announce('drop', { key: 'announcer.drop', vars: {}, tone: 'normal' });
       this.showHint('hint.drop');
     });
 
+    // ---- M2b: maps and the drop
+    on('mapChanged', (e) => {
+      this.currentMapId = e.mapId;
+      this.hud.zoneTheme = e.zoneTheme;
+    });
+    on('carrierDeparted', (e) => {
+      this.currentMapId = e.route.mapId;
+      this.announceFlight('takeoff');
+    });
+    on('playerJumped', (e) => {
+      if (!e.isLocal) return;
+      this.announce('drop', { key: 'announcer.drop', vars: {}, tone: 'normal' });
+      this.showHint('hint.drop');
+    });
+
+    // ---- M2b: rooms
+    on('roomJoined', (e) => {
+      this.lastRoomCode = e.code;
+      this.pendingCode = null;
+      this.dialog.close();
+      this.browser.clearError();
+      this.memberToasts.reset();
+      this.menuToasts.clear();
+    });
+    on('roomJoinFailed', (e) => {
+      if (e.code) this.browser.prefillCode(e.code);
+      this.browser.showError(joinFailedKey(e.reason), { code: e.code ?? '', length: this.limits?.codeLength ?? 5 });
+      if (e.reason === 'closed' || e.reason === 'notFound') this.lastRoomCode = null;
+    });
+    on('roomCreateFailed', (e) => {
+      const key = createFailedKey(e.reason);
+      if (this.dialog.isOpen) this.dialog.showError(key);
+      else this.menuToasts.push(key, {}, true, performance.now());
+    });
+    on('roomLeft', (e) => {
+      this.dialog.close();
+      this.lastRoomCode = null;
+      this.mapVoteSentFor = null;
+      const now = performance.now();
+      if (e.reason === 'kicked') this.menuToasts.push('room.toast.kicked', {}, true, now);
+      else if (e.reason === 'closed') this.menuToasts.push('room.toast.closed', {}, true, now);
+      requestAnimationFrame(() => this.browser.focusCode());
+    });
+    on('roomHostChanged', (e) => {
+      const now = performance.now();
+      if (e.isLocal) {
+        this.menuToasts.push('room.toast.youHost', {}, false, now);
+        requestAnimationFrame(() => this.room.focusPrimary());
+      } else {
+        this.menuToasts.push('room.toast.hostMigrated', { name: e.hostName }, false, now);
+      }
+    });
+    on('roomMemberChanged', (e) => {
+      if (this.screen !== 'room') return;
+      const now = performance.now();
+      if (this.memberToasts.offer(now)) {
+        this.menuToasts.push(e.change === 'joined' ? 'room.toast.joined' : 'room.toast.left', { name: e.name }, false, now);
+      }
+    });
+    on('roomSettingsChanged', () => {
+      if (!this.isHost) this.menuToasts.push('room.toast.settings', {}, false, performance.now());
+    });
+    on('mapVoteLocked', (e) => {
+      const key = e.via === 'random' ? 'lobby.vote.lockedRandom' : 'lobby.vote.locked';
+      this.menuToasts.push(key, { name: t(mapNameKey(e.mapId)) }, false, performance.now());
+    });
+
     on('playerDamaged', (e) => {
       this.lastHeadshot.set(e.victimId, e.headshot);
-      // armorBefore (M1-fix) when the producer sends it; otherwise the last armor value we saw for that victim.
-      const before = e.armorBefore ?? this.lastArmor.get(e.victimId);
-      this.armorBrokeFor = e.isLocalAttacker && before !== undefined && before > 0 && e.armorAfter <= 0 ? e.victimId : null;
-      this.lastArmor.set(e.victimId, e.armorAfter);
+      if (e.cause === 'explosion') this.lastBlastAttacker.set(e.victimId, e.attackerId);
       if (e.isLocalVictim) {
         this.hud.localDamaged(e);
+        const now = performance.now();
+        // M2a: armor.md "broken" feedback for the wearer (the snapshot tier drops to 0 at the same time).
+        if (e.vest?.broken) this.hud.armorBroken('vest', e.vest.tier, now);
+        if (e.helmet?.broken) this.hud.armorBroken('helmet', e.helmet.tier, now);
         if (e.cause === 'weapon') this.showHint('hint.heal');
       }
     });
 
     on('localHitConfirmed', (e) => {
-      this.hud.hitConfirmed(e.headshot, e.killed, this.armorBrokeFor === e.victimId);
-      this.armorBrokeFor = null;
+      this.hud.hitConfirmed(hitVariant(e));
+    });
+
+    on('shotFired', (e) => {
+      // M2a: the first fight is the moment to teach cover.
+      if (e.isLocal && this.screen === 'match') this.showHint('hint.crouch');
+    });
+
+    on('stanceChanged', (e) => {
+      // M2a: once they have crouched, teach prone next.
+      if (e.isLocal && e.to === 'crouch' && !e.forced) this.showHint('hint.prone');
     });
 
     on('playerKilled', (e) => {
       const now = performance.now();
+      const self = isSelfGrenadeKill(e.cause, e.killerId, e.victimId, this.lastBlastAttacker.get(e.victimId));
       this.feed.add(
         {
           killerName: e.killerName,
           victimName: e.victimName,
           weapon: e.weapon,
           cause: e.cause,
+          self,
           headshot: e.cause === 'weapon' && (e.headshot ?? this.lastHeadshot.get(e.victimId) === true),
           isLocalKiller: e.isLocalKiller,
           isLocalVictim: e.isLocalVictim,
@@ -478,7 +849,7 @@ export class Ui implements IUi {
         this.announce('firstblood', { key: 'announcer.firstBlood', vars: {}, tone: 'normal' });
       }
       if (e.isLocalVictim) {
-        this.death.setDeath(e);
+        this.death.setDeath(e, self);
         this.openDeath(now);
       }
     });
@@ -487,26 +858,28 @@ export class Ui implements IUi {
       if (!e.isLocal) return;
       this.hud.pickupToast(e.item, e.qty, performance.now());
       if (itemCategory(e.item) === 'gun') this.showHint('hint.switch');
+      if (e.item === 'grenade') this.showHint('hint.grenade');
     });
 
     on('actionFailed', (e) => {
       if (!e.isLocal || this.screen !== 'match') return;
-      const key = actionFailedKey(e.action, e.reason);
+      const key = actionFailedKey(e.action, e.reason, this.hud.currentPromptItem);
       if (key) this.hud.failToast(key, performance.now());
     });
 
     on('interactPromptChanged', (e) => {
-      this.hud.setPrompt(e.lootId !== null ? e.item : null, e.qty);
+      // durability / refusal are M2a fields; `?? null` keeps an older producer working.
+      this.hud.setPrompt(e.lootId !== null ? e.item : null, e.qty, e.durability ?? null, e.refusal ?? null, e.maxDurability ?? null);
       if (e.lootId !== null) this.showHint('hint.loot');
     });
 
     on('zoneWarning', (e) => {
       this.announce(`tidewarn-${e.phaseIndex}`, {
-        key: 'announcer.tide.warning',
+        key: zoneKey('announcer', this.zoneTheme(), 'warning'),
         vars: { seconds: e.secondsUntilShrink },
         tone: 'warn',
       });
-      this.showHint('hint.tide');
+      this.showHint(this.zoneHint());
     });
 
     on('zoneChanged', ({ zone }) => {
@@ -514,9 +887,9 @@ export class Ui implements IUi {
       const phaseChanged = zone.phaseIndex !== this.zonePhaseSeen;
       const startedShrinking = zone.shrinking && (!this.zoneShrinkingSeen || phaseChanged);
       if (final && phaseChanged) {
-        this.announce('tide-final', { key: 'announcer.tide.final', vars: {}, tone: 'warn' });
+        this.announce('tide-final', { key: zoneKey('announcer', this.zoneTheme(), 'final'), vars: {}, tone: 'warn' });
       } else if (!final && startedShrinking) {
-        this.announce(`tide-${zone.phaseIndex}`, { key: 'announcer.tide.rising', vars: {}, tone: 'warn' });
+        this.announce(`tide-${zone.phaseIndex}`, { key: zoneKey('announcer', this.zoneTheme(), 'rising'), vars: {}, tone: 'warn' });
       }
       this.zonePhaseSeen = zone.phaseIndex;
       this.zoneShrinkingSeen = zone.shrinking;

@@ -39,6 +39,20 @@ const WEAPON_KEYS = [
   'falloffEnd',
   'minDamageFactor',
   'moveSpreadMultiplier',
+  // M2a (ADS, LMG fire slow, grenade, armor, stances).
+  'adsZoom',
+  'adsSpreadMultiplier',
+  'adsMoveMultiplier',
+  'adsTimeMs',
+  'fireMoveMultiplier',
+  'fuseMs',
+  'maxDamage',
+  'innerRadius',
+  'absorbFraction',
+  'throwSpeedMin',
+  'throwSpeedMax',
+  'proneMaxWaterDepth',
+  'crouchMaxWaterDepth',
 ];
 
 describe('no hard-coded gameplay numbers (C1)', () => {
@@ -57,6 +71,14 @@ describe('no hard-coded gameplay numbers (C1)', () => {
 });
 
 describe('player-facing strings (A5 / C4)', () => {
+  it('M2a: every new item id has a name string (item.<id>.name)', () => {
+    const en = JSON.parse(readFileSync(join(ROOT, 'src/content/strings/en.json'), 'utf8')) as Record<string, unknown>;
+    const ids = ['dmr', 'sniper', 'lmg', 'ammo_sniper', 'grenade', 'vest_1', 'vest_2', 'vest_3', 'helmet_1', 'helmet_2', 'helmet_3'];
+    expect(ids.filter((id) => typeof en[`item.${id}.name`] !== 'string')).toEqual([]);
+    // BUG-007 (fixed): the stale M1 `item.vest.*` strings are gone.
+    expect(Object.keys(en).filter((k) => k.startsWith('item.vest.'))).toEqual([]);
+  });
+
   const en = JSON.parse(readFileSync(join(ROOT, 'src/content/strings/en.json'), 'utf8')) as Record<string, unknown>;
   const keys = new Set(Object.keys(en));
 

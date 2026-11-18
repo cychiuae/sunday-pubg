@@ -1,35 +1,90 @@
 import { describe, expect, it } from 'vitest';
 import { BALANCE } from '../balance';
 import { aimDirection, createRng, DEG2RAD } from '../math';
-import { applyDamage, effectiveSpreadDeg, falloffFactor, isHeadshot, pelletDamage, rayCylinder, sampleCone } from './combat';
+import type { WeaponId } from '../types';
+import { adsProgressOf, applyArmorPiece, effectiveSpreadDeg, pelletDamage, rayCylinder, sampleCone } from './combat';
 
 const b = BALANCE;
 const rifle = b.weapons.rifle;
 
 describe('combat math', () => {
-  it('rifle falloff: 22 at 10 m, 15.4 at 110 m (combat.md AT1)', () => {
-    expect(pelletDamage(rifle, 10, false)).toBeCloseTo(22, 9);
-    expect(pelletDamage(rifle, 110, false)).toBeCloseTo(15.4, 9);
-    expect(pelletDamage(rifle, 140, false)).toBeCloseTo(15.4, 9);
-    expect(falloffFactor(rifle, 75)).toBeCloseTo(0.85, 9);
+  it('rifle falloff: 19 at 10 m, 15.675 at 60 m, 12.35 at 90 and 120 m (combat.md AT1)', () => {
+    expect(pelletDamage(rifle, 10, false)).toBeCloseTo(19, 9);
+    expect(pelletDamage(rifle, 60, false)).toBeCloseTo(15.675, 9);
+    expect(pelletDamage(rifle, 90, false)).toBeCloseTo(12.35, 9);
+    expect(pelletDamage(rifle, 120, false)).toBeCloseTo(12.35, 9);
   });
 
-  it('headshot zone is the top headZoneFraction of the cylinder (AT2)', () => {
-    expect(isHeadshot(1.0, 0, b)).toBe(true);
-    expect(isHeadshot(0.7, 0, b)).toBe(false);
-    expect(pelletDamage(rifle, 10, isHeadshot(1.0, 0, b))).toBeCloseTo(38.5, 9);
-    expect(pelletDamage(rifle, 10, isHeadshot(0.7, 0, b))).toBeCloseTo(22, 9);
+  it('headshot multiplier (AT2; the head zones are covered by stance.test.ts rayHitbox)', () => {
+    expect(pelletDamage(rifle, 10, true)).toBeCloseTo(34.2, 9);
   });
 
-  it('armor absorbs absorbFraction until empty (AT3)', () => {
-    const a = applyDamage(100, 50, 30, b.armor.absorbFraction);
-    expect(a.hp).toBeCloseTo(85);
-    expect(a.armor).toBeCloseTo(35);
-    const c = applyDamage(a.hp, a.armor, 100, b.armor.absorbFraction);
-    expect(c.armorTaken).toBeCloseTo(35);
-    expect(c.armor).toBeCloseTo(0);
-    expect(c.hp).toBeCloseTo(20);
-    expect(applyDamage(100, 50, 10, b.armor.absorbFraction, true)).toMatchObject({ hp: 90, armor: 50 });
+  it('armor piece: a = min(durability, dmg x f); destroyed at 0 (armor.md AT1)', () => {
+    const f = b.items.vest_2.absorbFraction;
+    const a = applyArmorPiece({ tier: 2, durability: 55 }, 30, f);
+    expect(a.absorbed).toBeCloseTo(12);
+    expect(a.hpLoss).toBeCloseTo(18);
+    expect(a.piece).toEqual({ tier: 2, durability: 43 });
+    const c = applyArmorPiece(a.piece, 100, f);
+    expect(c.absorbed).toBeCloseTo(40);
+    expect(c.piece!.durability).toBeCloseTo(3);
+    const d = applyArmorPiece(c.piece, 10, f);
+    expect(d.absorbed).toBeCloseTo(3);
+    expect(d.hpLoss).toBeCloseTo(7);
+    expect(d.broken).toBe(true);
+    expect(d.piece).toBeNull();
+    expect(applyArmorPiece(null, 25, f)).toEqual({ piece: null, absorbed: 0, broken: false, hpLoss: 25 });
+  });
+
+  it('spread = spreadDeg x A x S x M x J (combat.md AT13, AT16)', () => {
+    const still = { horizontalSpeed: 0, airborne: false };
+    expect(effectiveSpreadDeg('rifle', b, { ...still, adsProgress: 1 })).toBeCloseTo(0.8, 9);
+    expect(effectiveSpreadDeg('rifle', b, { ...still, adsProgress: 100 / 230 })).toBeCloseTo(1.6 * (1 - 0.5 * (100 / 230)), 9);
+    expect(effectiveSpreadDeg('sniper', b, { ...still, adsProgress: 1, stance: 'prone' })).toBeCloseTo(0.072, 9);
+    // Same while crawling at 0.5 m/s (below the 1.0 m/s threshold).
+    expect(effectiveSpreadDeg('sniper', b, { horizontalSpeed: 0.5, airborne: false, adsProgress: 1, stance: 'prone' })).toBeCloseTo(0.072, 9);
+    expect(effectiveSpreadDeg('lmg', b, { horizontalSpeed: 1.5, airborne: false, adsProgress: 1, stance: 'crouch' })).toBeCloseTo(2.808, 9);
+    // S does not apply during a transition.
+    expect(effectiveSpreadDeg('rifle', b, { ...still, stance: 'prone', stanceSettled: false })).toBeCloseTo(1.6, 9);
+    // Every table row of combat.md "Resulting cones".
+    const rows: [WeaponId, number, number, number, number, number, number][] = [
+      ['pistol', 1.5, 3.0, 0.9, 1.8, 0.72, 0.54],
+      ['smg', 3.0, 4.2, 1.95, 2.73, 1.56, 1.17],
+      ['shotgun', 7.0, 8.4, 5.95, 7.14, 4.76, 3.57],
+      ['rifle', 1.6, 4.0, 0.8, 2.0, 0.64, 0.48],
+      ['lmg', 2.6, 7.8, 1.17, 3.51, 0.936, 0.702],
+      ['dmr', 3.0, 7.5, 0.3, 0.75, 0.24, 0.18],
+      ['sniper', 6.0, 18.0, 0.12, 0.36, 0.096, 0.072],
+    ];
+    const moving = { horizontalSpeed: 2, airborne: false };
+    for (const [w, hip, hipMove, ads, adsMove, adsCrouch, adsProne] of rows) {
+      expect(effectiveSpreadDeg(w, b, still)).toBeCloseTo(hip, 9);
+      expect(effectiveSpreadDeg(w, b, moving)).toBeCloseTo(hipMove, 9);
+      expect(effectiveSpreadDeg(w, b, { ...still, adsProgress: 1 })).toBeCloseTo(ads, 9);
+      expect(effectiveSpreadDeg(w, b, { ...moving, adsProgress: 1 })).toBeCloseTo(adsMove, 9);
+      expect(effectiveSpreadDeg(w, b, { ...still, adsProgress: 1, stance: 'crouch' })).toBeCloseTo(adsCrouch, 9);
+      expect(effectiveSpreadDeg(w, b, { ...still, adsProgress: 1, stance: 'prone' })).toBeCloseTo(adsProne, 9);
+    }
+  });
+
+  it('adsProgressOf: adsMs / adsTimeMs, 0 for the grenade and fists', () => {
+    expect(adsProgressOf({ adsMs: 115 }, 'rifle', b)).toBeCloseTo(0.5, 9);
+    expect(adsProgressOf({ adsMs: 999 }, 'rifle', b)).toBe(1);
+    expect(adsProgressOf({ adsMs: 100 }, 'grenade', b)).toBe(0);
+    expect(adsProgressOf({ adsMs: 100 }, 'fists', b)).toBe(0);
+  });
+
+  it('sniper constraint: body never kills a full-HP player; head kills through helmet_1/2, not a fresh helmet_3 (combat.md)', () => {
+    const sn = b.weapons.sniper;
+    const H = sn.damage * sn.headshotMultiplier;
+    expect(sn.damage).toBeLessThan(100);
+    const loss = (id: 'helmet_1' | 'helmet_2' | 'helmet_3', d = b.items[id].durability) =>
+      applyArmorPiece({ tier: b.items[id].tier, durability: d }, H, b.items[id].absorbFraction).hpLoss;
+    expect(loss('helmet_1')).toBeGreaterThanOrEqual(100);
+    expect(loss('helmet_2')).toBeGreaterThanOrEqual(100);
+    expect(loss('helmet_3')).toBeLessThan(100);
+    expect(loss('helmet_3', 60)).toBeGreaterThanOrEqual(100);
+    expect(loss('helmet_3', 61)).toBeCloseTo(99, 9);
   });
 
   it('shotgun point-blank all pellets = 99 (AT4)', () => {

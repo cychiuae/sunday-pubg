@@ -3,8 +3,20 @@
  * warnings, zone in/out, interact prompt, footsteps and remote jump/land. Each tracker is small, pure state plus
  * an emit; ClientGame calls them at fixed points in update().
  */
+import type { Balance } from '../shared/balance';
 import type { EventBus, GameEvents } from '../shared/events';
-import type { LootState, MatchState, PlayerId, PlayerState, Surface, Vec3, ZoneState } from '../shared/types';
+import type {
+  ActionFailReason,
+  LocalPlayerState,
+  LootState,
+  MatchState,
+  PlayerId,
+  PlayerState,
+  Surface,
+  Vec3,
+  ZoneState,
+} from '../shared/types';
+import { AMMO_IDS, ARMOR_PIECES, HEAL_IDS, isArmorId, type AmmoId, type HealId } from '../shared/types';
 import { secondsUntil } from './zoneView';
 
 export type Bus = Pick<EventBus<GameEvents>, 'emit'>;
@@ -118,25 +130,81 @@ export function findNearestLoot(loot: readonly LootState[], pos: Vec3, range: nu
   return best;
 }
 
-/** interactPromptChanged when the nearest pickable loot (id, item or qty) changes. */
+/**
+ * M2a: the reason E on `loot` would be refused right now, predicted from the latest snapshot.local (the prompt warns
+ * before the press). Armor: tier <= the worn piece's tier in that slot -> betterArmor (armor.md "Equipping").
+ * Grenades, ammo and heals at their carry limit -> inventoryFull. Guns are never refused (they swap).
+ */
+export function pickupRefusal(loot: LootState, local: LocalPlayerState, balance: Balance): ActionFailReason | null {
+  const item = loot.item;
+  if (isArmorId(item)) {
+    const { slot, tier } = ARMOR_PIECES[item];
+    const worn = slot === 'vest' ? local.vest : local.helmet;
+    return worn && worn.tier >= tier ? 'betterArmor' : null;
+  }
+  if (item === 'grenade') return local.grenades >= balance.items.grenade.maxCarry ? 'inventoryFull' : null;
+  if ((AMMO_IDS as readonly string[]).includes(item)) {
+    const ammo = item as AmmoId;
+    return local.ammo[ammo] >= balance.items[ammo].maxCarry ? 'inventoryFull' : null;
+  }
+  if ((HEAL_IDS as readonly string[]).includes(item)) {
+    const heal = item as HealId;
+    return local.heals[heal] >= balance.items[heal].maxStack ? 'inventoryFull' : null;
+  }
+  return null;
+}
+
+/** interactPromptChanged when the nearest pickable loot (id, item, qty, durability) or its refusal changes. */
 export class InteractPromptTracker {
   private lootId: number | null = null;
   private item: LootState['item'] | null = null;
   private qty = 0;
+  private durability: number | null = null;
+  private refusal: ActionFailReason | null = null;
+  private maxDurability: number | null = null;
 
   get currentLootId(): number | null {
     return this.lootId;
   }
 
-  set(loot: LootState | null, bus: Bus): void {
+  /**
+   * `balance` (optional for old callers) fills `maxDurability` = items.<armor>.durability for armor pickups
+   * (REVIEW-M2a M6), null for every other item.
+   */
+  set(loot: LootState | null, bus: Bus, refusal: ActionFailReason | null = null, balance?: Balance): void {
     const id = loot ? loot.id : null;
     const item = loot ? loot.item : null;
     const qty = loot ? loot.qty : 0;
-    if (id === this.lootId && item === this.item && qty === this.qty) return;
+    const durability = loot?.durability ?? null;
+    const why = loot ? refusal : null;
+    const maxDurability = item !== null && balance && isArmorId(item) ? balance.items[item].durability : null;
+    if (
+      id === this.lootId &&
+      item === this.item &&
+      qty === this.qty &&
+      durability === this.durability &&
+      why === this.refusal &&
+      maxDurability === this.maxDurability
+    ) {
+      return;
+    }
     this.lootId = id;
     this.item = item;
     this.qty = qty;
-    bus.emit('interactPromptChanged', { lootId: id, item, qty });
+    this.durability = durability;
+    this.refusal = why;
+    this.maxDurability = maxDurability;
+    bus.emit('interactPromptChanged', { lootId: id, item, qty, durability, maxDurability, refusal: why });
+  }
+
+  /** Forget the prompt without emitting (new match). */
+  reset(): void {
+    this.lootId = null;
+    this.item = null;
+    this.qty = 0;
+    this.durability = null;
+    this.refusal = null;
+    this.maxDurability = null;
   }
 }
 
@@ -219,6 +287,7 @@ export class RemoteMotionTracker {
           surface: surfaceAt(p.pos.x, p.pos.z),
           sprinting: p.anim.sprinting,
           isLocal: false,
+          stance: p.stance,
         });
       }
     }

@@ -6,7 +6,7 @@
  * prop cylinders. `CameraRig` adds smoothing (snap in, ease out) and is the only stateful part.
  */
 import type { CameraView } from '../shared/contracts';
-import type { Vec3 } from '../shared/types';
+import type { Rect, Vec3 } from '../shared/types';
 
 export type HeightFn = (x: number, z: number) => number;
 
@@ -95,6 +95,10 @@ export function desiredCameraPosition(cam: CameraView, out: Vec3): Vec3 {
  * grid. Allocation-free queries.
  */
 export class CameraObstacles {
+  /** M2b indoor: highest camera y (the ceiling plane minus a clearance), or Infinity outdoors. */
+  ceiling = Infinity;
+  /** M2b indoor: the camera stays inside this rectangle (the floor inset by the camera radius), or null. */
+  bounds: Rect | null = null;
   private readonly cells: Int32Array[];
   private readonly n: number;
   private readonly origin: number;
@@ -125,6 +129,28 @@ export class CameraObstacles {
   private cellOf(v: number): number {
     const c = Math.floor((v - this.origin) / this.cellSize);
     return c < 0 ? 0 : c >= this.n ? this.n - 1 : c;
+  }
+
+  /**
+   * M2b indoor limits: the camera stays `clearance` below `ceilingY` (nothing renders above the ceiling) and inside
+   * `rect` inset by `clearance`. Pass null / Infinity to clear.
+   */
+  setLimits(ceilingY: number, rect: Rect | null, clearance = 0.6): void {
+    this.ceiling = Number.isFinite(ceilingY) ? ceilingY - clearance : Infinity;
+    this.bounds = rect
+      ? { minX: rect.minX + clearance, minZ: rect.minZ + clearance, maxX: rect.maxX - clearance, maxZ: rect.maxZ - clearance }
+      : null;
+  }
+
+  /** Clamp a camera point to the ceiling and bounds limits (in place). */
+  clampLimits(p: Vec3): void {
+    if (p.y > this.ceiling) p.y = this.ceiling;
+    const b = this.bounds;
+    if (!b) return;
+    if (p.x < b.minX) p.x = b.minX;
+    else if (p.x > b.maxX) p.x = b.maxX;
+    if (p.z < b.minZ) p.z = b.minZ;
+    else if (p.z > b.maxZ) p.z = b.maxZ;
   }
 
   /** Lowest allowed camera y at (x, z). */
@@ -207,6 +233,71 @@ export class CameraObstacles {
   }
 }
 
+/** Metres kept above the floor (terrain + clearance) when the boom slides along it. */
+const FLOOR_SLIDE_MARGIN = 0.1;
+
+/**
+ * BUG-003: looking up swings the boom end below the ground. Pulling the camera in along the boom would drag it to the
+ * pivot (neck height, head filling the screen). Instead, keep the boom length and slide its end along the floor,
+ * farther behind the player: the camera sits low and behind, looking up past the character, as in most third-person
+ * shooters. Continuous with the normal boom at the pitch where the boom end first touches the floor. Leaves `d` alone
+ * when the pivot itself is at or below the floor (wading, walls, hills behind): normal collision handles those.
+ * Writes into `d`. Exported for tests.
+ */
+export function slideAlongFloor(cam: CameraView, d: Vec3, obstacles: CameraObstacles): void {
+  const t = cam.target;
+  let floor = obstacles.floorAt(d.x, d.z) + FLOOR_SLIDE_MARGIN;
+  if (d.y >= floor) return;
+  const len = Math.hypot(d.x - t.x, d.y - t.y, d.z - t.z);
+  let hx = d.x - t.x;
+  let hz = d.z - t.z;
+  let hl = Math.hypot(hx, hz);
+  if (hl < 1e-4) {
+    // Straight up with no shoulder offset: "behind" is -aim projected, i.e. (sin yaw, cos yaw).
+    hx = Math.sin(cam.yaw);
+    hz = Math.cos(cam.yaw);
+    hl = 1;
+  }
+  // Two passes so the end settles on sloped ground (the floor is re-read at the new spot).
+  for (let k = 0; k < 2; k++) {
+    const h = t.y - floor;
+    if (h <= 0.05) return;
+    const horiz = Math.sqrt(Math.max(len * len - h * h, 0));
+    const s = Math.max(horiz, hl) / hl;
+    d.x = t.x + hx * s;
+    d.z = t.z + hz * s;
+    d.y = floor;
+    floor = obstacles.floorAt(d.x, d.z) + FLOOR_SLIDE_MARGIN;
+  }
+  if (d.y < floor) d.y = floor;
+}
+
+/**
+ * M2b indoor: looking down at the subject swings the boom end above the ceiling (the carrier orbit flies 2 m under
+ * it). Same idea as slideAlongFloor: keep the boom length, put the end on the ceiling clamp and move it farther out
+ * horizontally, so the subject stays framed instead of the camera collapsing onto it. Writes into `d`. Exported for
+ * tests.
+ */
+export function slideAlongCeiling(cam: CameraView, d: Vec3, obstacles: CameraObstacles): void {
+  const ceil = obstacles.ceiling;
+  const t = cam.target;
+  if (!(d.y > ceil) || t.y >= ceil) return;
+  const len = Math.hypot(d.x - t.x, d.y - t.y, d.z - t.z);
+  let hx = d.x - t.x, hz = d.z - t.z;
+  let hl = Math.hypot(hx, hz);
+  if (hl < 1e-4) {
+    hx = Math.sin(cam.yaw);
+    hz = Math.cos(cam.yaw);
+    hl = 1;
+  }
+  const h = ceil - t.y;
+  const horiz = Math.sqrt(Math.max(len * len - h * h, 0));
+  const s = Math.max(horiz, hl) / hl;
+  d.x = t.x + hx * s;
+  d.z = t.z + hz * s;
+  d.y = ceil;
+}
+
 /**
  * Stateful wrapper: resolves the camera position each frame. Pull-ins snap immediately (never clip), releases
  * ease back out so the camera does not pop when an obstacle passes.
@@ -240,6 +331,10 @@ export class CameraRig {
    */
   update(cam: CameraView, dt: number, collide = true): Vec3 {
     const d = desiredCameraPosition(cam, this.desired);
+    if (collide && this.obstacles) {
+      slideAlongFloor(cam, d, this.obstacles);
+      slideAlongCeiling(cam, d, this.obstacles);
+    }
     const t = cam.target;
     const len = Math.hypot(d.x - t.x, d.y - t.y, d.z - t.z);
     let allowed = 1;
@@ -256,8 +351,10 @@ export class CameraRig {
     p.x = t.x + (d.x - t.x) * f;
     p.y = t.y + (d.y - t.y) * f;
     p.z = t.z + (d.z - t.z) * f;
-    // Final safety: never below terrain/water even if the pivot itself is low (e.g. wading).
+    // Final safety: never below terrain/water even if the pivot itself is low (e.g. wading); M2b: never above the
+    // ceiling or outside the indoor floor.
     if (this.obstacles) {
+      this.obstacles.clampLimits(p);
       const floor = this.obstacles.floorAt(p.x, p.z);
       if (p.y < floor) p.y = floor;
     }

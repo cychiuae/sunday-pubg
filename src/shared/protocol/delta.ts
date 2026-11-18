@@ -6,13 +6,21 @@
  * given (`base` tick for players, `lootDelta.from` for loot). On any mismatch it drops the snapshot, forgets its
  * state and asks for a full snapshot (`{ t: 'resync' }`); the server then resets this encoder.
  *
+ * M2a (PROTOCOL_VERSION 2): the new PlayerState fields (vestTier, helmetTier, stance, stanceFrom, stanceProgress,
+ * anim.ads, anim.cooking) go through `diffPlayer` like every other field, so a settled player costs nothing. Loot
+ * `durability` is part of an entry (a change re-adds it). `grenades` is NOT delta-encoded: the full list rides in every
+ * snapshot (NETCODE.md "Grenades on the wire"). `local` is always sent whole.
+ *
  * Only clients that join with the `delta1` capability get deltas. Others get the M1 format (full players, loot
  * omitted when the version is unchanged), so a stale cached client keeps working.
  *
  * Imports only shared types and the protocol module (dependency rule §3).
  */
 import type { LootId, LootState, PlayerId, PlayerState, WorldSnapshot } from '../types';
-import { isPlayerState, type LootDelta, type PlayerPatch, type WireSnapshot } from './messages';
+import { isPlayerState, type LootDelta, type PlayerPatch, type WireMatch, type WireSnapshot } from './messages';
+
+/** M2b: `match.route` (C-gate field; read loosely so this compiles before and after the gate). */
+const routeOf = (m: object): unknown => (m as { route?: unknown }).route;
 
 /** Join capability that enables delta snapshots. */
 export const CAP_DELTA = 'delta1';
@@ -59,6 +67,8 @@ export function diffPlayer(prev: PlayerState, cur: PlayerState): PlayerPatch | P
 export class SnapshotDeltaEncoder {
   private players: Map<PlayerId, PlayerState> | null = null;
   private tick = -1;
+  /** match.route of the base snapshot (undefined = none yet). */
+  private route: unknown = undefined;
   private loot: Map<LootId, LootState> | null = null;
   private lootVersion: number | null = null;
 
@@ -68,6 +78,7 @@ export class SnapshotDeltaEncoder {
   reset(): void {
     this.players = null;
     this.tick = -1;
+    this.route = undefined;
     this.loot = null;
     this.lootVersion = null;
   }
@@ -77,6 +88,7 @@ export class SnapshotDeltaEncoder {
    * sent. `snap` should already be quantized (`quantizeDeep`) so the base equals what the client decodes.
    */
   encode(snap: WorldSnapshot): WireSnapshot {
+    // `rest` carries match, zone, local and the full `grenades` list unchanged in both formats.
     const { loot, players, ...rest } = snap;
     if (!this.deltas) {
       // M1 format: full players; loot omitted when this socket already has the version.
@@ -87,6 +99,12 @@ export class SnapshotDeltaEncoder {
     const wire: WireSnapshot = { ...rest, players };
     // Players: patches against the previous snapshot sent on this socket.
     if (this.players !== null) {
+      // M2b: the route is fixed for a World; omit it while it equals the base's (the decoder carries it forward).
+      const route = routeOf(rest.match);
+      if (route !== undefined && sameValue(route, this.route)) {
+        const { route: _r, ...matchNoRoute } = rest.match as WireMatch;
+        wire.match = matchNoRoute;
+      }
       const patches: (PlayerPatch | PlayerState)[] = [];
       for (const cur of players) {
         const prev = this.players.get(cur.id);
@@ -107,6 +125,7 @@ export class SnapshotDeltaEncoder {
     }
     this.players = new Map(players.map((p) => [p.id, p]));
     this.tick = snap.tick;
+    this.route = routeOf(snap.match);
     if (this.lootVersion !== snap.lootVersion || this.loot === null) {
       this.loot = new Map(loot.map((l) => [l.id, l]));
       this.lootVersion = snap.lootVersion;
@@ -115,7 +134,10 @@ export class SnapshotDeltaEncoder {
   }
 }
 
-/** Changes from `base` to `cur`. An entry whose item, position or tier changed is re-added (replaced in place). */
+/**
+ * Changes from `base` to `cur`. An entry whose item, position, tier or (M2a) durability changed is re-added (replaced
+ * in place); only a pure quantity change goes in `qty`.
+ */
 export function diffLoot(from: number, base: ReadonlyMap<LootId, LootState>, cur: readonly LootState[]): LootDelta {
   const add: LootState[] = [];
   const qty: [LootId, number][] = [];
@@ -141,6 +163,7 @@ export type DeltaDecodeResult = { ok: true; snap: WorldSnapshot } | { ok: false;
 export class SnapshotDeltaDecoder {
   private players: Map<PlayerId, PlayerState> | null = null;
   private tick = -1;
+  private route: unknown = undefined;
   private loot: Map<LootId, LootState> | null = null;
   private lootList: LootState[] = [];
   private lootVersion: number | null = null;
@@ -149,6 +172,7 @@ export class SnapshotDeltaDecoder {
   reset(): void {
     this.players = null;
     this.tick = -1;
+    this.route = undefined;
     this.loot = null;
     this.lootList = [];
     this.lootVersion = null;
@@ -170,7 +194,12 @@ export class SnapshotDeltaDecoder {
   }
 
   private tryApply(w: WireSnapshot): DeltaDecodeResult {
-    const { base, lootDelta, loot: wireLoot, players: wirePlayers, ...rest } = w;
+    const { base, lootDelta, loot: wireLoot, players: wirePlayers, match: wireMatch, ...rest } = w;
+    // M2b: a delta snapshot omits an unchanged route; restore it from the base.
+    let match = wireMatch as WorldSnapshot['match'];
+    if (base !== undefined && routeOf(wireMatch) === undefined && this.route !== undefined) {
+      match = { ...wireMatch, route: this.route } as WorldSnapshot['match'];
+    }
     // Players.
     const players: PlayerState[] = [];
     const seen = new Set<PlayerId>();
@@ -215,9 +244,10 @@ export class SnapshotDeltaDecoder {
     }
     this.players = new Map(players.map((p) => [p.id, p]));
     this.tick = w.tick;
+    this.route = routeOf(match);
     this.loot = lootMap;
     this.lootList = lootList;
     this.lootVersion = w.lootVersion;
-    return { ok: true, snap: { ...rest, players, loot: lootList } };
+    return { ok: true, snap: { ...rest, match, players, loot: lootList } };
   }
 }
