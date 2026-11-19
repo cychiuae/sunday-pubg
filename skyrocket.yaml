@@ -1,0 +1,13 @@
+name: sunday-pubg
+
+# Single container: the Node game server serves the built client (dist/) and the WebSocket endpoint (/ws)
+# on the same origin. Health check: GET /healthz.
+port: 8797
+
+resources:
+  postgresql:
+    enable: false
+  s3:
+    enable: false
+  redis:
+    enable: false
