@@ -3,7 +3,7 @@
  * HP and armor durability stay floats (the UI shows ceil, combat.md). Timers and progress bars are extrapolated to `now`
  * so they tick smoothly between 20 Hz snapshots.
  */
-import { zoneThemeOf, type Balance, type ZoneTheme } from '../shared/balance';
+import { compatibleScopes, effectiveSight, weaponBalance, zoneThemeOf, type Balance, type ZoneTheme } from '../shared/balance';
 import { isIndoor } from '../shared/maps';
 import type {
   AdsBlockReason,
@@ -26,15 +26,19 @@ import type {
   ArmorSlot,
   ConnectionStatus,
   LocalPlayerState,
+  M2cThrowableId,
   MapData,
+  MatchLayoutRef,
   PlayerId,
   PlayerState,
+  ScopeId,
   Stance,
   Vec3,
+  WeaponSlotState,
   WorldSnapshot,
   ZoneState,
 } from '../shared/types';
-import { armorIdOf, FISTS_SLOT, GRENADE_SLOT } from '../shared/types';
+import { armorIdOf, FISTS_SLOT, GRENADE_SLOT, isM2cThrowableId } from '../shared/types';
 import { secondsUntil } from './zoneView';
 
 export interface LocalPose {
@@ -88,6 +92,37 @@ export interface HudBuildInput {
   spectateView?: 'firstPerson' | 'chase';
   /** REVIEW-M2a addendum: RMB held with a sighted weapon while a reload or heal blocks ADS. */
   adsBlocked?: AdsBlockReason | null;
+  // ---- M2c (optional here; absent = no layout, not in smoke) ----
+  /** This match's layout (HudMinimapView.layout; HudView.layout takes seed and look). Absent = null. */
+  layout?: MatchLayoutRef | null;
+  /** The camera is inside an opaque smoke cloud (HudView.inSmoke). Absent = false. */
+  inSmoke?: boolean;
+  /** Predicted M2c local fields (throwable selection, T switch, melee recovery). Absent = from snapshot.local. */
+  predicted?: HudLocalPrediction | null;
+}
+
+/**
+ * M2c: local HUD fields that must react within a frame (UI M2c §2.1, §4, §16.4), predicted by ClientGame
+ * (m2cPrediction.ts). Without it the HUD shows snapshot.local as is.
+ */
+export interface HudLocalPrediction {
+  selectedThrowable: M2cThrowableId;
+  /** Mounted scope per gun slot, with a T switch's target already applied. */
+  slotScopes: readonly [ScopeId | null, ScopeId | null];
+  spareScope: ScopeId | null;
+  scopeSwapProgress: number | null;
+  meleeRecovery: number | null;
+}
+
+/** The HUD prediction that equals the snapshot (no pending change). */
+export function snapshotPrediction(local: LocalPlayerState, now: number, snapshotTime: number, balance: Balance): HudLocalPrediction {
+  return {
+    selectedThrowable: local.selectedThrowable,
+    slotScopes: [local.slots[0]?.scope ?? null, local.slots[1]?.scope ?? null],
+    spareScope: local.spareScope,
+    scopeSwapProgress: timerProgress(local.scopeSwapRemainingMs, balance.scopes.swapMs, snapshotTime, now),
+    meleeRecovery: null,
+  };
 }
 
 /** HudView.rooms before the hello reply (also the default for callers that pass none). */
@@ -107,16 +142,52 @@ export function timerProgress(remainingMs: number, totalMs: number, snapshotTime
   return clamp(1 - left / totalMs, 0, 1);
 }
 
-export function buildSlots(local: LocalPlayerState): [HudSlotView, HudSlotView, HudSlotView, HudSlotView] {
+/** M2c fields of a non-gun slot (fists, throwables, empty): no level, no scope, no sight. */
+const NO_SIGHT_FIELDS = { level: null, scope: null, sight: 'none', builtInSight: 'none', compatibleScopes: [] } as const;
+
+/** M2c fields of a gun slot (levels.md, scopes.md): absent level = L1; `scope` is the (predicted) mounted scope. */
+function gunSlotFields(
+  s: WeaponSlotState,
+  scope: ScopeId | null,
+  balance: Balance,
+): Required<Pick<HudSlotView, 'level' | 'scope' | 'sight' | 'builtInSight' | 'compatibleScopes'>> {
+  return {
+    level: s.level ?? 1,
+    scope,
+    sight: effectiveSight(balance, s.weapon, scope),
+    builtInSight: weaponBalance(balance, s.weapon).sight,
+    compatibleScopes: compatibleScopes(balance, s.weapon),
+  };
+}
+
+/** Carried count of one throwable type. */
+export const throwableCount = (local: Pick<LocalPlayerState, 'grenades' | 'smokes'>, t: M2cThrowableId): number =>
+  t === 'smoke' ? local.smokes : local.grenades;
+
+/**
+ * Slot row (combat.md "Inventory and keys"): 0/1 guns with level and (predicted) sight, 2 = fists or the carried melee
+ * weapon with its level, 3 = the SELECTED throwable (predicted) and that type's count.
+ */
+export function buildSlots(
+  local: LocalPlayerState,
+  balance: Balance,
+  predicted: Pick<HudLocalPrediction, 'selectedThrowable' | 'slotScopes'> | null = null,
+): [HudSlotView, HudSlotView, HudSlotView, HudSlotView] {
   const slot = (i: 0 | 1): HudSlotView => {
     const s = local.slots[i];
-    return { slot: i, weapon: s ? s.weapon : null, mag: s ? s.mag : null, count: null };
+    if (!s) return { slot: i, weapon: null, mag: null, count: null, ...NO_SIGHT_FIELDS };
+    const scope = predicted ? predicted.slotScopes[i] : (s.scope ?? null);
+    return { slot: i, weapon: s.weapon, mag: s.mag, count: null, ...gunSlotFields(s, scope, balance) };
   };
+  const melee = local.melee;
+  const selected = predicted?.selectedThrowable ?? local.selectedThrowable;
   return [
     slot(0),
     slot(1),
-    { slot: FISTS_SLOT, weapon: 'fists', mag: null, count: null },
-    { slot: GRENADE_SLOT, weapon: 'grenade', mag: null, count: local.grenades },
+    melee
+      ? { slot: FISTS_SLOT, weapon: melee.weapon, mag: null, count: null, ...NO_SIGHT_FIELDS, level: melee.level }
+      : { slot: FISTS_SLOT, weapon: 'fists', mag: null, count: null, ...NO_SIGHT_FIELDS },
+    { slot: GRENADE_SLOT, weapon: selected, mag: null, count: throwableCount(local, selected), ...NO_SIGHT_FIELDS },
   ];
 }
 
@@ -130,20 +201,23 @@ export function buildArmorView(slot: ArmorSlot, piece: ArmorPieceState | null, b
 /** M2a: cook ring from the authoritative cookExplodesAt, or null when not cooking. */
 export function buildCookView(local: LocalPlayerState, now: number, balance: Balance): HudCookView | null {
   if (local.cookExplodesAt === null) return null;
-  return { fuseRemainingMs: Math.max(0, local.cookExplodesAt - now), fuseMs: balance.items.grenade.fuseMs };
+  // Only frags cook (smoke.md: not cookable), so a running fuse is always a frag's.
+  return { fuseRemainingMs: Math.max(0, local.cookExplodesAt - now), fuseMs: balance.items.grenade.fuseMs, throwable: 'grenade' };
 }
 
 export function buildLocalView(
   local: LocalPlayerState,
   player: PlayerState | undefined,
-  input: Pick<HudBuildInput, 'balance' | 'localName' | 'localPose' | 'outsideZone' | 'now' | 'localStance' | 'cook'>,
+  input: Pick<HudBuildInput, 'balance' | 'localName' | 'localPose' | 'outsideZone' | 'now' | 'localStance' | 'cook' | 'predicted'>,
   snapshotTime: number,
 ): HudLocalView {
   const { balance } = input;
-  const weapon = player?.weapon ?? 'fists';
+  const pred = input.predicted ?? snapshotPrediction(local, input.now, snapshotTime, balance);
   const active = local.activeSlot;
+  // The throwable slot shows the PREDICTED selection (a 4 / G cycle shows in the same frame).
+  const weapon = active === GRENADE_SLOT && isM2cThrowableId(player?.weapon) ? pred.selectedThrowable : (player?.weapon ?? 'fists');
   const activeGun = active === 0 || active === 1 ? local.slots[active] : null;
-  const wb = weapon === 'grenade' ? null : balance.weapons[weapon];
+  const wb = isM2cThrowableId(weapon) ? null : weaponBalance(balance, weapon);
   const ammoType = wb && weapon !== 'fists' ? wb.ammo : null;
   const isGun = ammoType !== null;
   const stance: LocalStanceView = input.localStance ?? {
@@ -162,7 +236,7 @@ export function buildLocalView(
     kills: player?.kills ?? 0,
     pos: input.localPose ? { ...input.localPose.pos } : { ...local.movement.pos },
     yaw: input.localPose?.yaw ?? player?.yaw ?? 0,
-    slots: buildSlots(local),
+    slots: buildSlots(local, balance, pred),
     activeSlot: active,
     weapon,
     mag: isGun && activeGun ? activeGun.mag : null,
@@ -183,9 +257,20 @@ export function buildLocalView(
     stance: stance.stance,
     stanceFrom: stance.stanceFrom,
     stanceProgress: clamp(stance.progress, 0, 1),
+    // M2c (ADR 0007 §8): levels, both throwable stacks, the predicted selection, melee recovery and the scope pouch.
+    weaponLevel: activeGun ? (activeGun.level ?? 1) : active === FISTS_SLOT ? (local.melee?.level ?? null) : null,
+    throwables: throwableCounts(local.grenades, local.smokes),
+    throwableMax: throwableCounts(balance.items.grenade.maxCarry, balance.items.smoke.maxCarry),
+    throwableSelected: pred.selectedThrowable,
+    meleeRecovery: active === FISTS_SLOT && local.melee ? pred.meleeRecovery : null,
+    scopeStash: pred.spareScope ? [pred.spareScope] : [],
+    scopeStashMax: balance.scopes.spareSlots,
+    scopeSwapProgress: pred.scopeSwapProgress,
     ...(balance.player.lowHpThreshold !== undefined ? { lowHpThreshold: balance.player.lowHpThreshold } : {}),
   };
 }
+
+const throwableCounts = (grenade: number, smoke: number): Record<M2cThrowableId, number> => ({ grenade, smoke });
 
 export function buildZoneView(zone: ZoneState, now: number): HudZoneView {
   return {
@@ -232,7 +317,7 @@ export function buildHudView(input: HudBuildInput): HudView {
     local,
     zone: input.zone ? buildZoneView(input.zone, input.now) : null,
     // `as MapData`: a no-op after the C-gate (MapData = AnyMapData); before it the HUD type is still island-only.
-    minimap: { map: input.map as MapData, self, route: input.route ?? null },
+    minimap: { map: input.map as MapData, layout: input.layout ?? null, self, route: input.route ?? null },
     spectate: target
       ? {
           targetId: target.id,
@@ -240,6 +325,9 @@ export function buildHudView(input: HudBuildInput): HudView {
           targetHp: target.hp,
           targetMaxHp: input.balance.player.maxHp,
           view: input.spectateView ?? 'firstPerson',
+          // M2c (P2): the target's held item and its level (spectate bar badge).
+          weapon: target.weapon,
+          weaponLevel: target.weaponLevel ?? null,
         }
       : null,
     pointerLocked: input.pointerLocked,
@@ -253,5 +341,7 @@ export function buildHudView(input: HudBuildInput): HudView {
     drop: input.drop ?? null,
     zoneTheme: input.zoneTheme ?? zoneThemeOf(input.balance, input.map.id, isIndoor(input.map) ? 'indoor' : 'island'),
     cameraView: input.cameraView ?? 'orbit',
+    inSmoke: input.inSmoke ?? false,
+    layout: input.layout ? { seed: input.layout.seed, look: input.layout.look } : null,
   };
 }

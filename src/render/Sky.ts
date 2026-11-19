@@ -5,6 +5,7 @@
  */
 import * as THREE from 'three';
 import { skyFragment, skyVertex } from './shaders/sky';
+import type { LookId } from '../shared/types';
 import { buildMerged, palette, type Piece } from './procedural';
 
 /** Direction TO the sun (normalised). Late-morning sun from the south-east so shadows fall north-west. */
@@ -25,16 +26,25 @@ export class Sky {
   private readonly clouds: THREE.Mesh;
   private readonly materials: THREE.Material[] = [];
 
-  constructor() {
+  /** @param look M2c look preset (sky colours, sun disc, clouds); absent fields keep the shipped noon sky. */
+  constructor(look: SceneLook = ISLAND_LOOK) {
     this.group.name = 'sky';
+    const sky = look.sky;
+    const disc = sunDiscCosines(sky?.sunDiscScale ?? 1, sky ? sky.sunDisc === null : false);
     const domeGeo = new THREE.SphereGeometry(LIGHTING.skyRadius, 32, 16);
     const domeMat = new THREE.ShaderMaterial({
       name: 'sky',
       uniforms: {
-        uTop: { value: new THREE.Color(palette.skyTop) },
-        uHorizon: { value: new THREE.Color(palette.skyHorizon) },
-        uSun: { value: new THREE.Color(palette.sunLight).lerp(new THREE.Color(0xffffff), 0.5) },
-        uSunDir: { value: SUN_DIRECTION.clone() },
+        uTop: { value: new THREE.Color(sky?.top ?? palette.skyTop) },
+        uHorizon: { value: new THREE.Color(sky?.horizon ?? palette.skyHorizon) },
+        uSun: {
+          value: sky?.sunDisc != null
+            ? new THREE.Color(sky.sunDisc)
+            : new THREE.Color(palette.sunLight).lerp(new THREE.Color(0xffffff), 0.5),
+        },
+        uSunDir: { value: look.sunDir.clone().normalize() },
+        uDiscCos: { value: disc.disc },
+        uHaloCos: { value: disc.halo },
       },
       vertexShader: skyVertex,
       fragmentShader: skyFragment,
@@ -50,23 +60,25 @@ export class Sky {
     this.materials.push(domeMat);
     this.group.add(this.dome);
 
-    this.clouds = this.buildClouds();
+    this.clouds = this.buildClouds(look.clouds);
     this.group.add(this.clouds);
   }
 
-  private buildClouds(): THREE.Mesh {
+  private buildClouds(cfg: SceneLook['clouds']): THREE.Mesh {
     const pieces: Piece[] = [];
+    const lit = cfg?.lit ?? 0xffffff, mid = cfg?.mid ?? 0xf1f8ff, shade = cfg?.shade ?? 0xd9ecfa;
+    const hMul = cfg?.height ?? 1, sMul = cfg?.size ?? 1;
     let seed = 7;
     const rnd = () => {
       seed = (seed * 16807) % 2147483647;
       return seed / 2147483647;
     };
-    const COUNT = 14;
+    const COUNT = cfg?.count ?? 14;
     for (let i = 0; i < COUNT; i++) {
       const a = (i / COUNT) * Math.PI * 2 + rnd() * 0.3;
       const dist = 1150 + rnd() * 350;
-      const cx = Math.cos(a) * dist, cz = Math.sin(a) * dist, cy = 170 + rnd() * 200;
-      const scale = 40 + rnd() * 45;
+      const cx = Math.cos(a) * dist, cz = Math.sin(a) * dist, cy = (170 + rnd() * 200) * hMul;
+      const scale = (40 + rnd() * 45) * sMul;
       const blobs = 4 + Math.floor(rnd() * 3);
       for (let b = 0; b < blobs; b++) {
         const t = b / (blobs - 1) - 0.5;
@@ -78,11 +90,11 @@ export class Sky {
         );
         pieces.push({
           geo: new THREE.IcosahedronGeometry(1, 1),
-          color: 0xffffff,
+          color: lit,
           matrix: m,
           flat: true,
           outline: false,
-          colorFn: (n) => (n.y < -0.25 ? 0xd9ecfa : n.y < 0.2 ? 0xf1f8ff : 0xffffff),
+          colorFn: (n) => (n.y < -0.25 ? shade : n.y < 0.2 ? mid : lit),
         });
       }
     }
@@ -115,6 +127,8 @@ export class Sky {
  * Applied by Renderer on a map change.
  */
 export interface SceneLook {
+  /** M2c: the preset id (absent on the shipped noon / day objects, which ARE those presets). */
+  id?: LookId;
   /** Direction TO the key light (normalised by the rig). */
   sunDir: THREE.Vector3;
   sunColor: number;
@@ -130,6 +144,30 @@ export interface SceneLook {
   /** Shadow depth bias and normal bias (the office's tall walls under an overhead light need more). */
   shadowBias?: number;
   shadowNormalBias?: number;
+  // ---- M2c look presets (looks.ts, art M2c §10). Absent = the shipped value. ----
+  /** Tone-mapping exposure (1). */
+  exposure?: number;
+  /** Island sky dome: zenith / horizon (= fog), sun disc colour (null = hidden) and size. */
+  sky?: { top: number; horizon: number; sunDisc: number | null; sunDiscScale: number };
+  /** Island toon clouds: count, lit / mid / shade colours, height and size multipliers. */
+  clouds?: { count: number; lit: number; mid: number; shade: number; height: number; size: number };
+  /** Island sea bands and glints (density multiplier, colour). */
+  sea?: { shallow: number; deep: number; abyss: number; glint: number; glintColor: number };
+  /** Tiki flame brightness (unlit colour multiplier). */
+  flameScale?: number;
+  /**
+   * Office extras. `panelColor` and `underDesk` are applied now; `panelsDimmed` (needs `MatchLayout.lightsOn`),
+   * `screensGlow` (needs the monitor `screen` part), `lampsOn` (needs `deskLamp`) and `blinds` are Phase 2 seams.
+   */
+  office?: { panelColor: number; underDesk: number; panelsDimmed: boolean; screensGlow: boolean; lampsOn: boolean; blinds: boolean };
+}
+
+/** Sky disc / halo cosine thresholds for a disc scale (1 = the shipped 0.99935 / 0.9965; hidden = never reached). */
+export function sunDiscCosines(scale: number, hidden: boolean): { disc: number; halo: number } {
+  if (hidden) return { disc: 2, halo: 2 };
+  if (scale === 1) return { disc: 0.99935, halo: 0.9965 };
+  // The halo grows half as fast as the disc (a 1.6x disc with a 1.6x halo reads as a smear low on the horizon).
+  return { disc: Math.cos(Math.acos(0.99935) * scale), halo: Math.cos(Math.acos(0.9965) * (1 + (scale - 1) * 0.5)) };
 }
 
 export const ISLAND_LOOK: SceneLook = {

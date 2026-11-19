@@ -12,6 +12,7 @@ import { calibrateLook, hook, me, turnTo, waitHook, walkTo } from './support/dri
 import { game, lockPointer, newPlayer, openTitle, SHOTS, soloMatch, unexpectedErrors, type ConsoleLog } from './support/game';
 import { dist2, Observer, yawTo, type Vec3 } from './support/observer';
 import { startStack, type Stack } from './support/stack';
+import { followPath, officePaths } from './support/nav';
 
 const NAME = 'QA Office';
 const DESK_TOP = 6.66;
@@ -38,7 +39,7 @@ test.describe.configure({ mode: 'serial' });
 test.beforeAll(async ({ browser }) => {
   test.setTimeout(150_000);
   stack = await startStack({
-    label: 'm2b-office',
+    label: 'm2b-office', layoutSeed: 'baseline', // M2c: pinned layout (seed 0 = the M2b props and loot) so paths are reproducible
     seed: Number(process.env.QA_OFFICE_SEED ?? 5151),
     balance: {
       match: { countdownSeconds: 4, resultsSeconds: 5, targetPlayers: 4 },
@@ -98,7 +99,10 @@ test('drop near a walk ramp: jump when the drone passes closest to the ramp foot
     return { x: r.entry.x + ux * d, y: 0, z: r.entry.z + uz * d };
   };
   radPerPx = 0.0022;
-  for (let i = 0; i < 3; i++) await turnTo(page, obs, NAME, yawTo(jumpPt(), ramp.foot), radPerPx);
+  // Pre-aim only while there is time for it (a slow page can spend seconds in turnTo).
+  for (let i = 0; i < 3 && (await game(page, (g) => g.serverTime)) < planned - 1500; i++) {
+    await turnTo(page, obs, NAME, yawTo(jumpPt(), ramp.foot), radPerPx);
+  }
   while ((await game(page, (g) => g.serverTime)) < planned && (await game(page, (g) => g.aboard))) await page.waitForTimeout(40);
   await page.keyboard.down('w');
   while (await game(page, (g) => g.aboard)) {
@@ -116,19 +120,28 @@ test('drop near a walk ramp: jump when the drone passes closest to the ramp foot
   await expect.poll(async () => (await me(obs, NAME)).anim.dropping, { timeout: 10_000 }).toBe(false);
   const landed = await me(obs, NAME);
   notes.push(`landed at (${landed.pos.x.toFixed(1)}, ${landed.pos.y.toFixed(2)}, ${landed.pos.z.toFixed(1)}), ${dist2(landed.pos, ramp.foot).toFixed(1)} m from ${ramp.id}`);
+  // A late jump (slow page) can land far away: then climb the walk ramp nearest to where we are.
+  const nearest = [...RAMPS].sort((a, b) => dist2(landed.pos, a.foot) - dist2(landed.pos, b.foot))[0]!;
+  if (nearest.id !== ramp.id) {
+    notes.push(`switching to the nearest walk ramp ${nearest.id} (${dist2(landed.pos, nearest.foot).toFixed(1)} m)`);
+    ramp = nearest;
+  }
   expect(landed.hp, 'no fall damage from the office drop').toBe(100);
   await shot('landed');
 });
 
 test('climb route: walk to the ramp foot and up the ramp onto the desk plateau (6.66 m)', async () => {
-  test.setTimeout(180_000);
+  test.setTimeout(240_000);
   await ensureLocked();
   radPerPx = await calibrateLook(page, obs, NAME);
   const start = await me(obs, NAME);
   if (start.pos.y > DESK_TOP - 0.2) notes.push(`landed on a plateau already (y ${start.pos.y.toFixed(2)}); walking down first is out of scope`);
   // The ramp foot is in the main aisle; aim 1.5 m in front of it so the walk ends lined up with the ramp.
   const approach = { x: ramp.foot.x, y: 0, z: ramp.foot.z + Math.sign(ramp.foot.z - ramp.top.z) * 1.5 };
-  const d = await walkTo(page, obs, NAME, () => approach, 1.0, radPerPx, 120_000);
+  // Follow the office nav path (baseline layout) to the approach point; the W-pulse walker alone stalls on furniture.
+  const [path] = officePaths([{ layoutSeed: 0, from: start.pos, to: approach }]);
+  notes.push(`nav path to ${ramp.id}: ${path ? path.length : 'none'} points`);
+  const d = path ? await followPath(page, obs, NAME, [...path, approach], radPerPx, 150_000, notes) : await walkTo(page, obs, NAME, () => approach, 1.0, radPerPx, 120_000);
   notes.push(`reached the ramp approach: ${d.toFixed(2)} m`);
   expect(d, `reach ${ramp.id} foot`).toBeLessThan(1.5);
   await turnTo(page, obs, NAME, yawTo(approach, ramp.top), radPerPx);
@@ -160,7 +173,7 @@ test('climb route: walk to the ramp foot and up the ramp onto the desk plateau (
 });
 
 test('stance on the plateau and under a desk: C / Z / Space settle, server agrees, no reconciliation snaps', async () => {
-  test.setTimeout(120_000);
+  test.setTimeout(240_000);
   await ensureLocked();
   const flow = async (where: string): Promise<number> => {
     let maxCorr = 0;

@@ -185,7 +185,9 @@ describe('World options (ADR 0006 §2): matchStart, timeOriginMs, finished', () 
     const b = balanceWith(() => {});
     const rt = prepareMap(map, b);
     const w = createDebugWorld({ map, balance: b, seed: 1, botNames: [], runtime: rt });
-    expect(w.debugContext()).toBe(rt.ctx);
+    // M2c: the World wraps the shared colliders with its own broken-glass set; the collider list and grid are shared.
+    expect(w.debugContext().colliders.colliders).toBe(rt.ctx.colliders.colliders);
+    expect(w.debugContext().colliders.cells).toBe(rt.ctx.colliders.cells);
     expect(rt.nav).toBeNull(); // island: no nav graph
   });
 });

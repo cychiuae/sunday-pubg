@@ -43,8 +43,9 @@ state.
 | Sky dome + 14 clouds | `Sky.ts`, `shaders/sky.ts` | 2 | Gradient + hard-edged toon sun disc, pinned to the far plane. Not tone mapped, so the horizon equals the fog colour exactly. |
 | Terrain | `TerrainMesh.ts`, `radialMesh.ts` | 1 | Polar grid, ~36k vertices, ~72k tris. Rings every 1.25 m inland, 0.75 m across the beach band, coarser at sea. Vertex colours (dry sand, wet sand, grass, seabed) with the shared toon material. Receives shadows; does not cast. |
 | Water to the horizon | `Water.ts`, `shaders/water.ts` | 1 | One polar mesh from just inside the beach to r = 2400 m. Uses a half-float height texture (512², ±185 m) for depth. |
-| Props | `PropLayer.ts`, `instancing.ts` | ≤ 21 (+≤ 10 shadow) | One InstancedMesh per (kind × part): body + outline hull, plus a flame for torches (flicker in the vertex shader). |
-| Loot | `LootLayer.ts` | ≤ ~30 | Every distinct (geometry, material) part of `createLootModel(item, tier)` is one InstancedMesh shared by all loot. |
+| Props | `PropLayer.ts`, `mergeBuilder.ts` | 2 per visible chunk (16 chunks) + 1 flame (+ shadow per chunk in the shadow frustum) | M2c: merged per 56 m chunk at build (body + hull with per-vertex width); tiki flames stay instanced. M1 path (one InstancedMesh per kind × part) behind `PROP_LAYER_DEFAULTS.merge = false`. See §10.3. |
+| Loot | `LootLayer.ts`, `ModelBatch.ts` | 2 (+1 shadow) for every item mesh + ≤ ~11 marker parts | M2c: item meshes in one BatchedMesh pair by material (any mix of item × level × scope); marker parts instanced with the colour per instance. See §10.4. |
+| Smoke clouds (M2c) | `SmokeLayer.ts` | 3 (+1 veil while inside) | Same on every preset. See §10.2. |
 | Chibis | `PlayerViews.ts`, `chibiSkin.ts`, `characterPose.ts` | 2 per chibi + 2 per held item (+1-2 shadow) | See §3. Worn vest and helmet are merged into the skinned mesh: 0 extra calls. |
 | Tide wall + target ring | `TideWall.ts`, `shaders/tideWall.ts` | 2 | |
 | Name tags | `NameTags.ts` | 1 | Other living players within 45 m. Names rasterised once into a 512×1280 canvas atlas (one row per player, redrawn only on join or rename); camera-facing quads in one InstancedBufferGeometry. Constant on-screen height (2.6 % of the viewport), depth-tested (terrain and props hide them, so no wallhack), fade 30-45 m. Hidden for the local player, the spectate target and the dead. |
@@ -384,3 +385,181 @@ Effects farther than 160 m from the camera are skipped.
 | Island: chute 3P / seaplane / FP on foot | | 43 / 223k, 41 / 142k, 35 / 228k | |
 All inside the 150 calls / 300k tris medium budget. Building the office scene takes 67 ms cold, 25-35 ms warm (Node, merging +
 cover data), hidden in the countdown.
+
+## 10. M2c: looks, island chunks, smoke and per-level models (ARCHITECTURE §16, art M2c §4, §10, §11, §15)
+
+Phase 1 (gate prep) state, 2026-11-18. Measurements: harness `scratchpad/ge3/h` (real `Renderer`, fake `FrameView`s,
+headless Chromium SwiftShader, 1280x720, `renderer.info` after a full frame incl. the shadow pass, 40 frames; calls
+and triangles are exact, fps is not meaningful). "Crowd" = 16 chibis within 13 m inland, 3P chase, all 77 island
+loot spawns populated (21 item kinds); "fight" = 6 chibis; "grove" = FP across the island; "orbit" = title orbit.
+
+### 10.1 Look presets (`looks.ts`, `Sky.ts`, `Water.ts`, ADR 0007 §1.8)
+- `sceneLookFor(kind, lookId)` gives a `SceneLook`. `noon` IS `ISLAND_LOOK` and `day` IS `OFFICE_LOOK` (the same
+  objects), and every new `SceneLook` field is optional with the shipped value as the default, so the baseline is
+  unchanged by construction: the sky disc / glint thresholds keep the shipped literals (`0.99935`, `0.9965`, `0.965`;
+  unit-tested), and the grove view rebuilt with `look: 'noon'` renders pixel-identical (same PNG checksum) to the view
+  with no look.
+- Plumbing: `mapChanged.look` (optional today) -> `Renderer.setMap` -> `IslandScene(map, quality, look)` /
+  `IndoorScene({ look })`. The renderer rebuilds the same map when the look **or the layout seed**
+  (`mapChanged.layout.seed`) changes, because per-match layouts replace the props and the chunks are baked.
+- Island: key light, hemisphere, fog, exposure (overcast 1.05), sky top / horizon, sun disc colour and size (golden
+  ×1.6; the halo grows half as fast; overcast hidden), cloud count / colours / height / size, sea bands, glint density
+  and colour (water `uGlintCut`, `uGlintColor`), tiki flame brightness. Office: key light, hemisphere, fog, clear colour,
+  light-panel colour (evening warm white), under-desk darkening (after hours 0.85).
+- **Art table vs the shipped look.** The art's `noon` column (sun 2.4, hemisphere 1.0, fog 60-260 m, direction
+  (-0.55, 0.75, 0.35)) is not today's M1 look (sun 1.65, hemisphere 1.55, fog 140-900 m, direction (0.48, 0.78, 0.40)).
+  Noon must not change, so colours are used as written and intensities and fog distances are applied **relative** to
+  the art noon column (morning sun = 2.0 / 2.4 × 1.65 = 1.375; fog far = 240 / 260 × 900 = 831 m). All guardrails hold
+  (unit-tested: fog = horizon, sun lowest channel ≥ 0.6 × highest, hemisphere ≥ 0.85, island fog far ≥ 200 m, office
+  ≥ 250 m, sun elevation ≥ 20°). Golden / overcast cloud mid colours (`#E8C6CC`, `#CED4DD`) are interpolated (not in
+  the table).
+- Cost: none per frame. A look change rebuilds the scene once (island 70-75 ms in the harness, office 43-58 ms).
+  Grove FP view: noon 63 calls / 244k, morning 64 / 245k, golden 65 / 243k, overcast 63 / 241k.
+- Phase 2 seams: after-hours panels by rows / rooms need `MatchLayout.lightsOn`; screen glow and desk lamps need the
+  monitor `screen` part and `deskLamp` (spec only in A1); blinds stripes (one decal mesh) not built.
+
+### 10.2 Smoke clouds (`SmokeLayer.ts`, art §4.2)
+- Input: `FrameView.smokes` (`SmokeCloudView`, radius = `smokeRadiusAt`, centre = `smokeCenter`). The renderer already
+  draws it when present; until ClientGame fills it, `cloudViewsFrom(states, t, cfg, out)` builds the same views from
+  plain `SmokeCloudState`s with `src/shared/smoke.ts` (used by the harness and tests).
+- Opaque core icosphere (320 tris) at 0.88 r, 22 puffs (80 tris + hull) per cloud on a 0.70-1.02 r shell, seeded by
+  the cloud id (mulberry32), none below ground + 0.15 r. Unlit vertex colours with the lit / mid / shadow bands baked by
+  normal (the volume must read the same in every look preset, art §10 guardrail). Fade: 4×4 Bayer screen-space
+  dissolve, top puffs first, core last, on top of the shrinking sim radius. Churn ±0.04 r and a 0.3 s pop overshoot,
+  both off with reduced motion. No shadows.
+- Veil: a clip-space quad in the world pass at render order 10000 (after all transparents, before the viewmodel
+  pass), `#EFDDF2` at `smoothstep(r, 0.75 r, d) × 0.96` plus a 30 % lilac vignette.
+- **Fairness: no quality knob is read**: the same size, opacity and veil on low, medium and high (unit-tested).
+- Measured: 8 clouds in view: fight view 114 -> 117 calls (+3), +30k triangles (= the art's 30k), the same +3 on low
+  and high. Camera inside a cloud: +1 call (veil).
+- Phase 2: name tags / spectate outline from `PlayerView.smokeHidden`, the canister model (`GrenadeView.kind`), puffs
+  from the can in flight.
+
+### 10.3 Island static props merged per chunk (`PropLayer.ts`, art §11.1)
+Every placement is baked into its chunk's body and hull (`MergeBucket`; hull width per vertex from the kind's outline
+material, `createMergedHullMaterial`). The grid covers the placements' bounds (56 m: 4×4 on island01 = 16 chunks,
+83k body + 67k hull tris). Chunks past `propDrawDistance` hide, hulls past `outlineDistance` hide per chunk, three.js
+frustum-culls each chunk in the colour and the shadow pass. Tiki flames stay one InstancedMesh (vertex flicker).
+Build: 20-40 ms in the browser harness (≤ 120 ms target), hidden in the countdown. Camera colliders are unchanged
+(unit-tested equal to the instanced path). The only visual difference: torches and driftwood now receive shadows.
+
+| View (medium, old loot path) | Instanced per kind (before) | 56 m chunks (after) | 72 m | 110 m |
+|---|---|---|---|---|
+| Crowd | 143 / 278k | 143 / 317k | 139 / 373k | 128 / 401k |
+| Fight | 114 / 254k | 114 / 292k | 110 / 349k | |
+| Grove (FP) | 68 / 188k | 63 / 244k | 58 / 267k | |
+| Beach | 48 / 134k | 43 / 166k | 38 / 169k | |
+| Title orbit | 38 / 316k | 52 / 326k | 34 / 331k | |
+
+With today's 10 kinds the merge is call-neutral (+14 % triangles: whole chunks draw where instancing culled per
+instance). It is the M2c plan because the instanced cost grows with kinds: 21 sim kinds + 15 decor kinds + variants
+would be about 2 calls per visible kind (~70 + shadows, art §11.1), while chunks stay at 2 per visible chunk whatever
+is in them. Decor (`MatchLayout.decor` through `getDecorParts`) and `variant` geometry (`getPropParts(kind, variant)`)
+go into the same buckets in Phase 2 (`addToChunk`); re-measure then. 56 m is kept (72 m saves 4-5 calls for +50k tris).
+
+### 10.4 A model per item level (Addendum 2): batching by material (`ModelBatch.ts`, `LootLayer.ts`)
+**Plan.** Never one draw call per (weapon, level, scope). Everything that uses the shared `vertexColorToon()` body and
+an ink hull goes into one `THREE.BatchedMesh` for bodies and one for hulls (per-vertex hull width; the hull shader
+handles `USE_BATCHING`). Geometry is keyed by string, built lazily on first use (the designer's `(id, level, scope)`
+caches underneath), and capacity grows by doubling. Per instance: matrix, visibility (hull separately, for outline
+LOD) and a colour multiplier. Without `WEBGL_multi_draw` three.js loops `drawArrays` inside the same program and
+buffers (correct; `info.calls` then counts per instance).
+- **Ground loot (done now).** `LootLayer` acquires one handle per loot id (`item|level|scope`), swaps on a level or
+  scope change, releases on pickup. Marker parts that differ only in colour (level / tier disc, ring, ring2, sparkles)
+  share one InstancedMesh with a white material copy and the colour per instance. Markers switch to the M2c set (level
+  / supply) from the first `LootState.level` of a match; until then the M2b tier glow, so today's look is unchanged.
+- **Held weapons, third person (done in Phase 2, §11.1).** Before: 2 calls (+1 shadow) per armed player. Plan: the same batch pair for
+  every held item; per frame the matrix = `handR` world × the item offset (`userData.holdOffset` for the rpg); anchors
+  (`muzzle`, `sight`) read from a per-key table instead of the Object3D; fade and first-person hiding through
+  visibility; hit flash through the colour multiplier. Measured cost to remove: office, 12 players, no loot: 131 calls
+  armed vs 97 with fists (34 calls).
+- **Viewmodel.** One item: keep the designer's cached `(id, level, scope)` Object3D (2 calls).
+- Memory: a model is 0.3-1.4k tris; only combinations that appear are built (52 in the pile test: 1-2 ms each).
+
+| View (medium) | Before (one InstancedMesh per item part) | After (ModelBatch + tinted markers) |
+|---|---|---|
+| Loot pile: 13 weapons × levels 1-4 (+ scopes on L3/L4), 52 items in view | 108 / 333k | **58** / 350k (72 with batched items only) |
+| Office, 12 players, 50 loot spots mixed weapons / levels / scopes | 194 / 224k | **150** / 226k |
+| Office, same + 4 clouds (art §11.2 worst case) | — | **153** / 241k (low 127, high 159) |
+| Island crowd, 77 loot (today's items, no levels) | 143 / 317k | **108** / 316k (low 100, high 109) |
+| Island crowd, 77 loot mixed levels / scopes | 149 / 317k | **111** / 319k |
+| Fight / beach / orbit (today's items) | 114 / 43 / 52 | 79 / 38 / 52 |
+
+The office worst case (12 armed players, 4 clouds, a dense mixed loot view) is 3 calls over 150 on medium. The
+held-weapon batch removes about 30: measured 121 after it (§11.4).
+
+### 10.5 C-gate prep (§16.2)
+`FLASH_SCALE` / `TRACER_WIDTH` (`Record<M2cWeaponId>`; rpg flash = shotgun size, no tracer; melee none), the armor
+shard colours (`Record<M2cArmorTier>`; L4 `#B963E3`), `VM_RECOIL_ROLL` / `VM_MAG_POINT` (`Record<M2cGunId>`, art §7.1),
+`TWO_HANDED` (`Record<M2cHeldId>`; paddle two hands), `GLINT_FORWARD` (`M2cSightType`) and the `FrameView` test
+fixture. `src/render/**` compiles before and after the trial flip (`scratchpad/tl/flip.py`).
+
+## 11. M2c Phase 2 (after the C-gate)
+
+Same harness as §10 (`scratchpad/ge3/h`), now with M2c players (`weaponLevel` 1-4, mixed sights incl. `scope_2x`,
+held rpg / dbshotgun / revolver / melee / smoke cans), the real layout generator (`buildMatchLayout(base, seed,
+{ decor: true })` + `applyLayout`, emitted on `mapChanged` with `layout` and `look`), and loot spots filled with a
+mix of all 13 levelled weapons at levels 1-4 with scopes.
+
+### 11.1 One item batch for everything held, dropped and thrown
+`Renderer` owns one `ModelBatch` ('items': a BatchedMesh for toon bodies + one for hulls, shadows cast, not received)
+and shares it with `LootLayer` (ground items), `PlayerViews` (held items, third person), `GrenadeLayer` (frags and
+smoke cans in flight) and `RocketLayer` (rockets in flight). Keys: `loot:item|level|scope`, `held:id|level|scope`,
+`held:grenade:pin|cook`, `held:smoke:pin|cook`, `throw:grenade`, `throw:smoke`, `rocket`; each built lazily once.
+- Held: the per-(id, level, scope) Object3D stays in the hand as an anchor proxy (muzzle, sight, fuse, the see-through
+  red-dot lens) with its toon body and hull hidden; each frame the batch instance takes the proxy's world matrix.
+  Visibility follows the pose (`weaponVisible`), the close-camera fade, death and the first-person subject; the hull
+  follows the outline distance. The rpg sits at `userData.holdOffset`. The scope drawn on a held gun comes from the
+  effective `PlayerState.sight` (`heldScope`: none when it is the gun's built-in sight).
+- Cost: **2 draw calls (+1 shadow) for every item on screen**, whatever the mix of weapons, levels and scopes.
+
+### 11.2 Viewmodel, poses, rockets, glass, smoke hiding
+- Viewmodel (`viewmodelAnim.ts`, `ViewmodelPass.ts`): new ids (revolver, dbshotgun, rpg, knife, machete, paddle,
+  smoke / smoke_cooking); `{ level, scope }` from `ViewmodelView.level` / `sight` into `applyViewmodelPose` (the ADS
+  pose comes from the mounted sight: the sight anchor is on the view axis for every tested gun/scope pair, unit test);
+  melee `swing` uses `meleeSwingPose` (absolute socket arc, forehand/backhand alternation, view kick at the hit
+  frame); `scopeSwap` tilt, `cycle` dip; break-open, swing-out and front-load reloads (art §7.1).
+- Third person (`characterPose.ts`): melee swing keys of art §8 blended by phase (`swingWeights`; prone = arms only at
+  half range), the rpg on the shoulder (right arm at π/2 + 0.15), paddle two-handed. Input `PlayerView.swing`.
+- `RocketLayer.ts`: one batch instance per rocket, nose along the velocity, 6 rad/s roll (none with reduced motion);
+  flame every frame, cream puffs every 0.35 m and spark stars every 0.7 m along the travelled segment (pooled
+  particles, 0 calls). Vfx: launch flash (shotgun size) + 6-ball back-blast on `rocketFired`, dud puff, rocket
+  explosion = the grenade boom at the rocket radius + fireworks burst (10 stars, 5 reduced) + white star on `direct`,
+  no ground ring / dust on `airburst`, shake ×1.5.
+- `GlassLayer.ts`: merged glass and frost carry a per-triangle `paneId` (glass walls by wall, kit glass by the nearest
+  glass collider box); a 1-row mask texture collapses broken panes in the vertex shader (still 1 + 1 calls); one
+  debris mesh (+1 call while any pane is broken) with 8 teeth per pane on the frame edges and 12 flat floor glints;
+  the shatter burst on `glassBroken` (16-20 shards, chip ring ×2, 6 sparkles; reduced motion 10 shards).
+- Smoke: name tags and remote scope glints are not drawn for `PlayerView.smokeHidden` players.
+
+### 11.3 Per-match layouts in the static world
+- Island: props grouped by `(kind, variant)` (`createProp(kind, variant)`), decor (`MatchLayout.decor`,
+  `createDecor`) merged into the same chunk bodies (no hull; y 0 = on the terrain): 0 extra calls. Worst seed
+  (165749527, 621 placements): 105k body + 67k hull tris in 16 chunks, 255 decor (19k tris), build 27-34 ms.
+- Office: `paperSheets` decor joins the 40 m chunks; After Hours: the light-panel glow takes a colour per instance from
+  `MatchLayout.lightsOn` (lit = the preset's panel colour, off = `#5A6270`), still one glow call.
+- The renderer rebuilds the scene when the layout seed or the look changes (§10.1).
+
+### 11.4 Budgets on the worst layout seeds (LV13b), medium unless noted
+| View | Calls | Triangles |
+|---|---|---|
+| **Office worst seed (641515587, 727 placements)**: FP down the main aisle, 12 armed players (all M2c weapons, levels 1-4, scopes), 4 clouds, 50 loot spots mixed weapons/levels/scopes | **121** (low 107, high 128) | 262k (low 222k, high 289k) |
+| Same, After Hours | 122 | 266k |
+| Same view, baseline seed 0 | 121 | 252k |
+| Island worst seed (165749527): crowd of 16 M2c players, 77 mixed loot | **90** (low 83, high 91) | 370k (low 332k, high 393k) |
+| Island worst seed: grove FP / title orbit / 8 clouds + 6 players | 49 / 52 / 75 | 274k / 371k / 371k |
+| Island baseline seed 0: crowd | 86 | 348k |
+
+Before / after the held-item batch (office, 12 armed players, mixed loot, 4 clouds, medium): **153 -> 121 calls**
+(armed vs fists without loot: 131 vs 97 before, 102 vs 97 after). Office ≤ 150 holds on every preset with 29 calls of
+headroom on medium. Island calls are far under 250; island triangles in the crowd view (370k medium) are above the
+generic 300k medium figure but inside the island budget (art §11.2 ≤ 450k, B8 ≤ 600k). The first cut if needed: decor
+hulls do not exist, so drop the decor of chunks beyond the outline distance (about 19k tris), then lower the 56 m chunk
+size for culling.
+
+### 11.5 Not done (needs models or data)
+- After Hours monitor screen glow and desk lamps: the monitor `screen` part split and `deskLamp` are spec-only (A1).
+- Blinds stripes (evening): optional, not built.
+- The throw-arc landing ring colour for smoke (lilac at the final cloud radius) needs the throwable kind on
+  `GrenadeArcView` (the ring stays danger red for both today).
+- L4 collar glint (optional, art §1.4) and the L4 marker ring pulse: not built.

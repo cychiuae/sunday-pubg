@@ -7,16 +7,23 @@ import type { Balance } from '../shared/balance';
 import type { EventBus, GameEvents } from '../shared/events';
 import type {
   ActionFailReason,
+  ItemLevel,
   LocalPlayerState,
   LootState,
   MatchState,
   PlayerId,
   PlayerState,
+  ScopeId,
+  SlotIndex,
   Surface,
   Vec3,
   ZoneState,
 } from '../shared/types';
-import { AMMO_IDS, ARMOR_PIECES, HEAL_IDS, isArmorId, type AmmoId, type HealId } from '../shared/types';
+import { pickupRefusal as simPickupRefusal } from '../shared/sim/inventory';
+import { isArmorId, isM2cGunId, isMeleeId } from '../shared/types';
+
+/** M2c (levels.md): items that carry a level: guns (incl. the rpg) and melee weapons. */
+const isLeveledItem = (item: unknown): boolean => isM2cGunId(item) || isMeleeId(item);
 import { secondsUntil } from './zoneView';
 
 export type Bus = Pick<EventBus<GameEvents>, 'emit'>;
@@ -131,27 +138,20 @@ export function findNearestLoot(loot: readonly LootState[], pos: Vec3, range: nu
 }
 
 /**
- * M2a: the reason E on `loot` would be refused right now, predicted from the latest snapshot.local (the prompt warns
- * before the press). Armor: tier <= the worn piece's tier in that slot -> betterArmor (armor.md "Equipping").
- * Grenades, ammo and heals at their carry limit -> inventoryFull. Guns are never refused (they swap).
+ * The reason E on `loot` would be refused right now, predicted from the latest snapshot.local (the prompt warns before
+ * the press). One rule with the World: the sim's `pickupRefusal` (betterArmor, inventoryFull for ammo, heals and both
+ * throwable stacks, M2c scopePouchFull for a scope with nowhere to go). `activeSlot` = the predicted held slot (the
+ * scope rules prefer the held gun); absent = the snapshot's.
  */
-export function pickupRefusal(loot: LootState, local: LocalPlayerState, balance: Balance): ActionFailReason | null {
-  const item = loot.item;
-  if (isArmorId(item)) {
-    const { slot, tier } = ARMOR_PIECES[item];
-    const worn = slot === 'vest' ? local.vest : local.helmet;
-    return worn && worn.tier >= tier ? 'betterArmor' : null;
-  }
-  if (item === 'grenade') return local.grenades >= balance.items.grenade.maxCarry ? 'inventoryFull' : null;
-  if ((AMMO_IDS as readonly string[]).includes(item)) {
-    const ammo = item as AmmoId;
-    return local.ammo[ammo] >= balance.items[ammo].maxCarry ? 'inventoryFull' : null;
-  }
-  if ((HEAL_IDS as readonly string[]).includes(item)) {
-    const heal = item as HealId;
-    return local.heals[heal] >= balance.items[heal].maxStack ? 'inventoryFull' : null;
-  }
-  return null;
+export function pickupRefusal(loot: LootState, local: LocalPlayerState, balance: Balance, activeSlot: SlotIndex = local.activeSlot): ActionFailReason | null {
+  const ground = { item: loot.item, qty: loot.qty, mag: null, level: loot.level ?? null, scope: loot.scope ?? null };
+  return simPickupRefusal({ ...local, activeSlot }, local, ground, balance);
+}
+
+/** M2c prompt details computed by ClientGame (scopes.ts): the slot E would replace, where a scope would go. */
+export interface PromptExtras {
+  replacesSlot: SlotIndex | null;
+  scopeTarget: 0 | 1 | 'pouch' | null;
 }
 
 /** interactPromptChanged when the nearest pickable loot (id, item, qty, durability) or its refusal changes. */
@@ -162,6 +162,10 @@ export class InteractPromptTracker {
   private durability: number | null = null;
   private refusal: ActionFailReason | null = null;
   private maxDurability: number | null = null;
+  private level: ItemLevel | null = null;
+  private scope: ScopeId | null = null;
+  private replacesSlot: SlotIndex | null = null;
+  private scopeTarget: 0 | 1 | 'pouch' | null = null;
 
   get currentLootId(): number | null {
     return this.lootId;
@@ -171,20 +175,29 @@ export class InteractPromptTracker {
    * `balance` (optional for old callers) fills `maxDurability` = items.<armor>.durability for armor pickups
    * (REVIEW-M2a M6), null for every other item.
    */
-  set(loot: LootState | null, bus: Bus, refusal: ActionFailReason | null = null, balance?: Balance): void {
+  set(loot: LootState | null, bus: Bus, refusal: ActionFailReason | null = null, balance?: Balance, extras?: PromptExtras): void {
     const id = loot ? loot.id : null;
     const item = loot ? loot.item : null;
     const qty = loot ? loot.qty : 0;
     const durability = loot?.durability ?? null;
     const why = loot ? refusal : null;
     const maxDurability = item !== null && balance && isArmorId(item) ? balance.items[item].durability : null;
+    // M2c: weapons carry a level (absent = L1, levels.md); guns may carry a mounted scope (scopes.md).
+    const level = loot && isLeveledItem(loot.item) ? (loot.level ?? 1) : null;
+    const scope = loot && isM2cGunId(loot.item) ? (loot.scope ?? null) : null;
+    const replacesSlot = loot ? (extras?.replacesSlot ?? null) : null;
+    const scopeTarget = loot ? (extras?.scopeTarget ?? null) : null;
     if (
       id === this.lootId &&
       item === this.item &&
       qty === this.qty &&
       durability === this.durability &&
       why === this.refusal &&
-      maxDurability === this.maxDurability
+      maxDurability === this.maxDurability &&
+      level === this.level &&
+      scope === this.scope &&
+      replacesSlot === this.replacesSlot &&
+      scopeTarget === this.scopeTarget
     ) {
       return;
     }
@@ -194,7 +207,22 @@ export class InteractPromptTracker {
     this.durability = durability;
     this.refusal = why;
     this.maxDurability = maxDurability;
-    bus.emit('interactPromptChanged', { lootId: id, item, qty, durability, maxDurability, refusal: why });
+    this.level = level;
+    this.scope = scope;
+    this.replacesSlot = replacesSlot;
+    this.scopeTarget = scopeTarget;
+    bus.emit('interactPromptChanged', {
+      lootId: id,
+      item,
+      qty,
+      durability,
+      maxDurability,
+      refusal: why,
+      level,
+      scope,
+      replacesSlot,
+      scopeTarget,
+    });
   }
 
   /** Forget the prompt without emitting (new match). */
@@ -205,6 +233,10 @@ export class InteractPromptTracker {
     this.durability = null;
     this.refusal = null;
     this.maxDurability = null;
+    this.level = null;
+    this.scope = null;
+    this.replacesSlot = null;
+    this.scopeTarget = null;
   }
 }
 

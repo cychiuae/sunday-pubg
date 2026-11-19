@@ -11,11 +11,15 @@ import { MAPS, getMap } from '../src/game/levels';
 import { balanceForMap, type RoomsBalance } from '../src/shared/balance';
 import { PROTOCOL_VERSION } from '../src/shared/constants';
 import { CAP_DELTA, SnapshotDeltaDecoder } from '../src/shared/protocol/delta';
+import { CAP_ROWS } from '../src/shared/protocol/rows';
+import { LAYOUT_FORMAT_VERSION, layoutHash } from '../src/shared/layout';
+import { buildMatchLayout } from '../src/game/levels/layout';
+import { LEVEL_LAYOUTS } from './app';
 import { decodeServerMessage, encode, quantizeDeep, type ClientMessage, type ServerMessage } from '../src/shared/protocol/messages';
 import { resolveMapChoice } from '../src/shared/sim/mapVote';
 import { prepareMap } from '../src/shared/sim/movement';
 import { createWorld } from '../src/shared/sim/World';
-import type { DropRoute, RoomState, WorldSnapshot } from '../src/shared/types';
+import { baselineLook, type DropRoute, type RoomState, type WorldSnapshot } from '../src/shared/types';
 import { SILENT_LOGGER, type RoomSocket, type SimMap } from './common';
 import { loadBalance } from './config';
 import { RoomManager, type RoomManagerOptions } from './RoomManager';
@@ -114,7 +118,7 @@ function manager(over: Partial<RoomManagerOptions> = {}): RoomManager {
 function client(mgr: RoomManager, name: string): Client {
   const c = new Client(mgr);
   c.conn = mgr.connect(c, '127.0.0.1')!;
-  c.msg({ t: 'hello', name, protocolVersion: PROTOCOL_VERSION, clientToken: `${name}-token-0123456789`, caps: [CAP_DELTA] });
+  c.msg({ t: 'hello', name, protocolVersion: PROTOCOL_VERSION, clientToken: `${name}-token-0123456789`, caps: [CAP_DELTA, CAP_ROWS] });
   return c;
 }
 
@@ -232,5 +236,60 @@ describe('several rooms with the real World', () => {
     // On the wire, only the first (full) snapshot of the match carried it.
     const wireWithRoute = h.all.filter((m) => m.t === 'snapshot' && (m.snap.match as { route?: unknown }).route !== undefined);
     expect(wireWithRoute).toHaveLength(1);
+    // M2c: the welcome names the layout the World runs (the base map, until the N2 layout lock); after the first
+    // snapshot the local player rides as a patch (rows, carry-forward and local patches all matched the World above).
+    const map = mapsById[mapId]!;
+    expect((h.welcomes[0] as { layout?: unknown }).layout).toEqual({
+      seed: 0, version: LAYOUT_FORMAT_VERSION, hash: layoutHash(map.props, map.lootSpawns), look: baselineLook(map.kind),
+    });
+    expect(h.all.filter((m) => m.t === 'snapshot' && m.snap.local === undefined).length).toBeGreaterThan(20);
+  });
+
+  // Island: two matches (the FAST zone ends them). Office: the first lock only (its own zone override keeps it running).
+  it.each([
+    ['island01', 2],
+    ['office', 1],
+  ] as const)('M2c layouts on %s: each match locks a layout; welcome.layout matches the client build; the World runs the applied map', (mapId, want) => {
+    const mgr = manager({ layouts: LEVEL_LAYOUTS });
+    const h = client(mgr, 'Host');
+    h.msg({ t: 'createRoom', settings: { mapMode: mapId } });
+    const g = client(mgr, 'Guest');
+    g.msg({ t: 'joinRoom', code: h.room!.code });
+    const roomStates: RoomState[] = [];
+    let matches = 0;
+    let prev = 'waiting';
+    h.msg({ t: 'startMatch' });
+    for (let i = 0; i < 400 && matches < want && !(want === 1 && h.snapshots.length > 40); i++) {
+      run(mgr, 100);
+      if (h.room!.map && h.room!.phase !== 'waiting') roomStates.push(h.room!);
+      const world = mgr.room(h.room!.id)?.world;
+      if (world && h.welcomes.length > 0) {
+        // The World holds the layout-applied map (props and loot points of the welcome's seed).
+        const w = h.welcomes.at(-1) as { layout?: { seed: number } };
+        const built = buildMatchLayout(mapsById[mapId]!, w.layout!.seed, { decor: false });
+        expect((world as unknown as { map: SimMap }).map.props).toEqual(built.props);
+      }
+      if (prev !== 'waiting' && h.room!.phase === 'waiting') {
+        matches++;
+        if (matches < want) h.msg({ t: 'startMatch' });
+      }
+      prev = h.room!.phase;
+    }
+    for (const c of [h, g]) {
+      expect(c.mismatches).toEqual([]);
+      expect(c.resyncs).toBe(0);
+      expect(c.welcomes).toHaveLength(want);
+    }
+    const layouts = h.welcomes.map((w) => (w as { layout?: { seed: number; version: number; hash: number; look: string } }).layout!);
+    for (const l of layouts) {
+      const built = buildMatchLayout(mapsById[mapId]!, l.seed, { decor: true }); // what the browser builds
+      expect(l).toEqual({ seed: l.seed, version: LAYOUT_FORMAT_VERSION, hash: built.hash, look: built.look });
+      expect(l.seed).not.toBe(0);
+    }
+    if (want === 2) expect(layouts[0]!.seed).not.toBe(layouts[1]!.seed);
+    // RoomState.map.layout (waiting-room card) = the welcome's seed and look, from the lock on.
+    const cards = new Set(roomStates.map((r) => JSON.stringify(r.map!.layout)));
+    expect([...cards]).toEqual(layouts.map((l) => JSON.stringify({ seed: l.seed, look: l.look })));
+    expect(mgr.stats().layouts).toMatchObject({ builds: want, cacheHits: 0 });
   });
 });

@@ -39,10 +39,13 @@ describe('zone (the tide)', () => {
     expect(z.state.radius).toBeCloseTo(106.25, 9);
   });
 
-  it('timeline: phases end at 120/225/320/390/440/480 s; collapse shrinks from 500 s and closes at 520 s (AT6)', () => {
+  it('timeline: each phase ends after its wait + shrink; the collapse waits, shrinks, then closes (AT6, from balance)', () => {
     const rng = createRng(2);
     const z = createZone(b, ISLAND, rng, 0);
-    const endS = [120, 225, 320, 390, 440, 480];
+    const endS = phaseEndsS(b);
+    const lastS = endS[endS.length - 1]!;
+    const collapseStart = (lastS + b.zone.finalCollapseDelaySeconds) * 1000;
+    const closeAt = collapseStart + b.zone.finalCollapseSeconds * 1000;
     for (let i = 0; i < endS.length; i++) {
       updateZone(z, b, ISLAND, rng, endS[i]! * 1000 - 1);
       expect(z.state.phaseIndex).toBe(i);
@@ -52,17 +55,17 @@ describe('zone (the tide)', () => {
       expect(z.state.radius).toBeCloseTo(b.zone.phases[i]!.radiusFraction * b.zone.startRadius, 9);
     }
     expect(z.state.dps).toBe(b.zone.finalCollapseDps);
-    updateZone(z, b, ISLAND, rng, 499_999);
+    updateZone(z, b, ISLAND, rng, collapseStart - 1);
     expect(z.state.shrinking).toBe(false);
-    updateZone(z, b, ISLAND, rng, 500_000);
+    updateZone(z, b, ISLAND, rng, collapseStart);
     expect(z.state.shrinking).toBe(true);
-    updateZone(z, b, ISLAND, rng, 519_999);
+    updateZone(z, b, ISLAND, rng, closeAt - 1);
     expect(z.closed).toBe(false);
     expect(z.state.radius).toBeGreaterThan(0);
-    updateZone(z, b, ISLAND, rng, 520_000);
+    updateZone(z, b, ISLAND, rng, closeAt);
     expect(z.state.radius).toBe(0);
     expect(z.closed).toBe(true);
-    expect(TIMELINE_MS).toBe(520_000);
+    expect(TIMELINE_MS).toBe(closeAt);
   });
 
   it('every target lies inside the previous one and on land, over 1000 seeds (AT2)', () => {
@@ -101,3 +104,9 @@ describe('zone (the tide)', () => {
     expect(isOutsideZone(z.state, 125.01, 0)).toBe(true);
   });
 });
+
+/** Phase end times in s from balance: cumulative waitSeconds + shrinkSeconds per phase. */
+function phaseEndsS(bal: typeof b): number[] {
+  let t = 0;
+  return bal.zone.phases.map((p) => (t += p.waitSeconds + p.shrinkSeconds));
+}

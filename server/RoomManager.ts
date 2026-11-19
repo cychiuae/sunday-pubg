@@ -21,6 +21,7 @@ import {
   type RoomSummary,
 } from '../src/shared/types';
 import { CAP_DELTA } from '../src/shared/protocol/delta';
+import { CAP_ROWS } from '../src/shared/protocol/rows';
 import {
   CLOSE,
   LOBBY_LIMITS,
@@ -32,6 +33,7 @@ import {
   type SimMap,
   type WorldFactory,
 } from './common';
+import { LayoutService, type LayoutGenerator } from './layoutLock';
 import { GameRoom, applySettings, type GameRoomStats, type MatchDeps, type SeatStats } from './GameRoom';
 import { NO_LAG, type LagConfig } from './lag';
 import { Session, type LobbyBuckets, type SessionHost } from './Session';
@@ -54,6 +56,10 @@ export interface RoomManagerOptions {
   resolveMapChoice(i: MapChoiceInput): MapChoice;
   botNames: readonly string[];
   worldDrop?: boolean;
+  /** M2c LAYOUT_SEED pin (0 = baseline), else null/absent = a fresh layout per match. */
+  layoutPin?: number | null;
+  /** M2c layout generator (src/game/levels/layout/). Absent: every match runs the base map (room tests). */
+  layouts?: LayoutGenerator;
   maxRooms: number;
   maxConnections: number;
   simHz: number;
@@ -91,6 +97,8 @@ export interface ManagerStats {
   loopDelayP99Ms: number;
   loopDelayMaxMs: number;
   perRoom: GameRoomStats[];
+  /** M2c layout builds since start (ms; build = layout + apply, nav = prepareMap incl. the indoor nav graph). */
+  layouts: { builds: number; cacheHits: number; avgLayoutMs: number; maxLayoutMs: number; avgNavMs: number; maxNavMs: number };
 }
 
 const LOOP_WINDOW_MS = 10_000;
@@ -136,7 +144,8 @@ export class RoomManager implements SessionHost {
   private readonly codeCooldown = new Map<string, number>();
   private roomSerial = 0;
   private readonly deps: MatchDeps;
-  private readonly prepared = new Map<MapId, { balance: Balance; runtime?: MapRuntime }>();
+  /** M2c: seed choice, layout build and the per-layout prepareMap LRU (shared by every room). */
+  readonly layouts: LayoutService;
 
   // Room list.
   private listRev = 0;
@@ -170,6 +179,20 @@ export class RoomManager implements SessionHost {
       this.histogram = monitorEventLoopDelay({ resolution: LOOP_RESOLUTION_MS });
       this.histogram.enable();
     }
+    const balances = new Map<MapId, Balance>();
+    this.layouts = new LayoutService({
+      generator: opts.layouts ?? null,
+      getMap: opts.getMap,
+      // One effective balance object per map id: World reuses a runtime only when its balance is the same object.
+      balanceFor: (mapId) => {
+        let b = balances.get(mapId);
+        if (!b) balances.set(mapId, (b = opts.balanceForMap(opts.balance, mapId)));
+        return b;
+      },
+      ...(opts.prepareMap ? { prepareMap: opts.prepareMap } : {}),
+      pin: opts.layoutPin ?? null,
+      now: this.now,
+    });
     this.deps = {
       createWorld: opts.createWorld,
       getMap: opts.getMap,
@@ -178,7 +201,7 @@ export class RoomManager implements SessionHost {
       resolveMapChoice: opts.resolveMapChoice,
       botNames: opts.botNames,
       ...(opts.worldDrop !== undefined ? { worldDrop: opts.worldDrop } : {}),
-      prepared: (mapId) => this.preparedFor(mapId),
+      lockLayout: (mapId, worldSeed, previous) => this.layouts.lock(mapId, worldSeed, previous),
     };
     if (opts.autoPoll !== false) {
       this.pollTimer = setInterval(() => this.poll(), ROOM_TIMING.pollMs);
@@ -191,19 +214,6 @@ export class RoomManager implements SessionHost {
     return this.now() - this.t0;
   }
 
-  /** Effective balance and prepared map, built once per map id (ADR 0005 §6). */
-  private preparedFor(mapId: MapId): { balance: Balance; runtime?: MapRuntime } {
-    let p = this.prepared.get(mapId);
-    if (!p) {
-      const balance = this.opts.balanceForMap(this.opts.balance, mapId);
-      const t = this.now();
-      const runtime = this.opts.prepareMap?.(this.opts.getMap(mapId), balance);
-      p = runtime ? { balance, runtime } : { balance };
-      this.prepared.set(mapId, p);
-      this.log.info(`[rooms] prepared map ${mapId} in ${(this.now() - t).toFixed(1)} ms`);
-    }
-    return p;
-  }
 
   // -------------------------------------------------------------------------------------------
   // Connections
@@ -308,6 +318,7 @@ export class RoomManager implements SessionHost {
     s.name = name;
     s.token = validClientToken(token) ?? `anon-${s.id}-${this.randomInt(2 ** 30).toString(36)}`;
     s.deltas = caps.includes(CAP_DELTA);
+    s.rows = caps.includes(CAP_ROWS);
     s.state = 'browser';
     s.clearHelloTimer();
     this.log.info(`[rooms] ${s.label} hello "${name}"`);
@@ -641,6 +652,14 @@ export class RoomManager implements SessionHost {
         const st = r.stats();
         return { ...st, avgTickMs: round2(st.avgTickMs), maxTickMs: round2(st.maxTickMs), matchAvgTickMs: round2(st.matchAvgTickMs), matchMaxTickMs: round2(st.matchMaxTickMs) };
       }),
+      layouts: (() => {
+        const l = this.layouts.stats;
+        const n = Math.max(1, l.builds);
+        return {
+          builds: l.builds, cacheHits: l.hits, avgLayoutMs: round2(l.sumLayoutMs / n), maxLayoutMs: round2(l.maxLayoutMs),
+          avgNavMs: round2(l.sumNavMs / n), maxNavMs: round2(l.maxNavMs),
+        };
+      })(),
     };
   }
 

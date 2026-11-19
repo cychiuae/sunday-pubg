@@ -16,7 +16,8 @@ import type {
   RoomView,
 } from '../shared/contracts';
 import type { MapId, MapVoteOption, MemberId, RoomMapMode } from '../shared/types';
-import { Flags, h, retrigger, Shown, TextSlot } from './dom';
+import { DataSlot, Flags, h, retrigger, Shown, TextSlot } from './dom';
+import { lookGlyph, lookLine } from './logic';
 import { Minimap, type CoastlineFn } from './minimap';
 import {
   checkRoomCode,
@@ -880,6 +881,10 @@ export class WaitingRoom {
   private readonly routeLegend: Shown;
   private readonly carrierText: TextSlot;
   private readonly loading: Shown;
+  private readonly look: Shown;
+  private readonly lookGlyph: DataSlot;
+  private readonly lookText: TextSlot;
+  private readonly lookFlavour: TextSlot;
   private room: RoomView | null = null;
 
   constructor(
@@ -1027,12 +1032,23 @@ export class WaitingRoom {
     this.routeLegend = new Shown(legend);
     const loading = h('p', 'ui-chip ui-mapcard__loading', { role: 'status' }, h('span', 'ui-spinner ui-spinner--small', { 'aria-hidden': 'true' }), t('lobby.map.loading'));
     this.loading = new Shown(loading);
+    // M2c (UI M2c §7.2): the look line once the vote locked (glyph is decoration; the text carries the meaning).
+    const lookGlyphEl = h('span', 'ui-glyph ui-look__glyph', { 'aria-hidden': 'true' });
+    const lookText = h('span', 'ui-look__text');
+    const lookFlavour = h('span', 'ui-look__flavour');
+    const look = h('p', 'ui-look', { role: 'status' }, lookGlyphEl, h('span', 'ui-look__body', null, lookText, lookFlavour));
+    this.look = new Shown(look);
+    this.lookGlyph = new DataSlot(lookGlyphEl, 'look');
+    this.lookText = new TextSlot(lookText);
+    this.lookFlavour = new TextSlot(lookFlavour);
+    this.look.set(false);
     const card = h(
       'div',
       'ui-panel ui-panel--menu ui-panel--mapcard',
       null,
       h('div', 'ui-mapcard__head', null, this.cardGlyph, cardTitle),
       cardTagline,
+      look,
       this.minimap.el,
       legend,
       loading,
@@ -1253,7 +1269,24 @@ export class WaitingRoom {
     // The minimap needs the map's data, which the client has only once it is the active map (HudMinimapView.map).
     const haveMap = hud.minimap.map.id === id;
     this.minimapShown.set(haveMap);
-    if (haveMap) this.minimap.update({ map: hud.minimap.map, self: null, route: hud.minimap.route ?? null }, null, nowMs, { preFlight: true });
+    // M2c: the layout's props draw once the vote locked (HudMinimapView.map is then the applied map).
+    if (haveMap) {
+      this.minimap.update(
+        { map: hud.minimap.map, layout: hud.minimap.layout ?? null, self: null, route: hud.minimap.route ?? null },
+        null,
+        nowMs,
+        { preFlight: true },
+      );
+    }
+    const locked = room.lockedLayout ?? null;
+    const line = locked ? lookLine(id, locked.look) : null;
+    this.look.set(line !== null);
+    if (locked && line !== null) {
+      this.lookText.set(line);
+      const flavourKey = `look.${id}.${locked.look}.line`;
+      this.lookFlavour.set(hasKey(flavourKey) ? t(flavourKey) : '');
+      this.lookGlyph.set(lookGlyph(locked.look));
+    }
     const route = haveMap ? (hud.minimap.route ?? null) : null;
     this.routeLegend.set(route !== null);
     if (route) this.carrierText.set(`${t(`map.${id}.carrier`)} · ${t(`map.${id}.carrier.type`)}`);

@@ -4,13 +4,13 @@
  */
 import * as THREE from 'three';
 import { heightAt as simHeightAt, surfaceAt as simSurfaceAt } from '../shared/sim/terrain';
-import type { IslandMapData, Surface } from '../shared/types';
+import type { DecorPlacement, IslandMapData, Surface } from '../shared/types';
 import { CameraObstacles } from './cameraRig';
 import { bakeHeightField, type HeightField } from './heightField';
 import type { MapScene, MapSceneFrame } from './mapScene';
 import { PropLayer } from './PropLayer';
 import type { QualitySettings } from './quality';
-import { ISLAND_LOOK, Sky, SUN_DIRECTION, type SceneLook } from './Sky';
+import { ISLAND_LOOK, Sky, type SceneLook } from './Sky';
 import { buildTerrain } from './TerrainMesh';
 import { TideWall } from './TideWall';
 import { visualHeight } from './visualTerrain';
@@ -25,7 +25,7 @@ export class IslandScene implements MapScene {
   readonly kind = 'island' as const;
   readonly mapId: string;
   readonly group = new THREE.Group();
-  readonly look: SceneLook = ISLAND_LOOK;
+  readonly look: SceneLook;
   readonly obstacles: CameraObstacles;
   readonly orbitShadowExtent: number;
   readonly cameraFar = CAMERA_FAR;
@@ -39,8 +39,10 @@ export class IslandScene implements MapScene {
   readonly visualHeight: (x: number, z: number) => number;
   readonly surfaceAt: (x: number, z: number) => Surface;
 
-  constructor(map: IslandMapData, quality: QualitySettings) {
+  /** @param look M2c look preset (looks.ts `sceneLookFor`); default = the shipped noon look. */
+  constructor(map: IslandMapData, quality: QualitySettings, look: SceneLook = ISLAND_LOOK, decor: readonly DecorPlacement[] = []) {
     this.mapId = map.id;
+    this.look = look;
     this.group.name = `island:${map.id}`;
     this.orbitShadowExtent = map.islandRadius + 15;
     const terrainRadius = map.worldRadius + TERRAIN_MARGIN;
@@ -52,14 +54,15 @@ export class IslandScene implements MapScene {
     const dryR = Math.max(0, map.islandRadius - map.shoreNoise.amplitude - map.beachWidth);
     this.heightField = bakeHeightField(this.visualHeight, terrainRadius + 5, 512, dryR);
 
-    this.sky = new Sky();
+    this.sky = new Sky(look);
     this.terrain = buildTerrain(map, this.visualHeight, this.surfaceAt, terrainRadius).mesh;
-    this.water = new Water(map, this.heightField, SUN_DIRECTION, {
+    this.water = new Water(map, this.heightField, look.sunDir, {
       detail: quality.waterDetail,
       denseRadius: terrainRadius,
       horizonRadius: HORIZON_RADIUS,
+      look,
     });
-    this.props = new PropLayer(map, this.heightAt);
+    this.props = new PropLayer(map, this.heightAt, { flameScale: look.flameScale ?? 1, decor });
     this.tide = new TideWall(this.heightField, this.heightAt);
     this.group.add(this.sky.group, this.terrain, this.water.mesh, this.props.group, this.tide.group);
     this.obstacles = new CameraObstacles(this.heightAt, this.props.colliders, terrainRadius);

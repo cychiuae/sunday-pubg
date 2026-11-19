@@ -10,7 +10,7 @@
  * blended with the weights from `stanceBlend` (crouch weight c, then prone weight p on top). The stance pivot
  * (`parts.stance`) carries the crouch drop and the prone lie-down, so the root keeps world position + yaw.
  */
-import type { DropPhase, HeldId, PlayerAnim, Stance } from '../shared/types';
+import type { DropPhase, HeldId, M2cHeldId, PlayerAnim, Stance } from '../shared/types';
 import { CHIBI_FREEFALL, CHIBI_STANCES, freefallStanceOffset } from './procedural/chibi';
 
 export interface Pose {
@@ -57,6 +57,8 @@ export function makePose(): Pose {
     legRZ: 0, scale: 1, weaponVisible: true,
   };
 }
+
+const HALF_PI_C = Math.PI / 2;
 
 export interface PoseInput {
   time: number;
@@ -105,6 +107,38 @@ export interface PoseInput {
    */
   pronePitchMin?: number;
   pronePitchMax?: number;
+  /** M2c: the melee swing in progress (PlayerView.swing), else null / absent. */
+  swing?: { weapon: string; progress: number; hitFraction: number } | null;
+}
+
+/**
+ * M2c third-person melee swing keys (art M2c §8): right-arm (and paddle: both arms) pivots and the body twist at the end
+ * of the wind-up and at the end of the strike. `rotation.x > 0` swings forward.
+ */
+export const MELEE_SWING_3P: Readonly<Record<string, { windup: SwingKey; strike: SwingKey; both: boolean }>> = {
+  knife: { windup: { armX: HALF_PI_C, armZ: 0.7, bodyY: 0, bodyX: 0 }, strike: { armX: HALF_PI_C, armZ: -0.6, bodyY: -0.15, bodyX: 0 }, both: false },
+  machete: { windup: { armX: 2.7, armZ: 0.3, bodyY: 0, bodyX: 0 }, strike: { armX: 0.9, armZ: -0.3, bodyY: 0, bodyX: -0.12 }, both: false },
+  paddle: { windup: { armX: 1.2, armZ: 0, bodyY: 0.5, bodyX: 0 }, strike: { armX: 1.3, armZ: 0, bodyY: -0.6, bodyX: 0 }, both: true },
+};
+interface SwingKey { armX: number; armZ: number; bodyY: number; bodyX: number }
+/** RPG on the shoulder (art M2c §8): right arm raised to pi/2 + 0.15 (the model's holdOffset lifts the tube). */
+export const RPG_ARM_X = Math.PI / 2 + 0.15;
+
+/**
+ * Swing phase weights for progress t (0..1) with hit fraction h: wind-up 0 -> 0.7 h (ease in-out toward the wind-up
+ * key), strike 0.7 h -> h + 0.1 (fast toward the strike key), recover -> 1 (ease out back to the hold). Returns the
+ * weights of the wind-up and strike keys (the rest is the hold pose). Pure; exported for tests.
+ */
+export function swingWeights(t: number, h: number): { windup: number; strike: number } {
+  const tt = t < 0 ? 0 : t > 1 ? 1 : t;
+  const tw = 0.7 * h, ts = Math.min(0.95, h + 0.1);
+  const e = (k: number) => k * k * (3 - 2 * k);
+  if (tt <= tw) return { windup: e(tw > 0 ? tt / tw : 1), strike: 0 };
+  if (tt <= ts) {
+    const k = (tt - tw) / Math.max(1e-6, ts - tw);
+    return { windup: 1 - k, strike: k };
+  }
+  return { windup: 0, strike: 1 - e((tt - ts) / Math.max(1e-6, 1 - ts)) };
 }
 
 /** Seconds the topple takes and how long the body lies before the poof. */
@@ -193,12 +227,14 @@ export function stanceBlend(stance: Stance, from: Stance, progress: number, out:
   return out;
 }
 
-const TWO_HANDED: Readonly<Record<HeldId, boolean>> = {
+/** Keyed by the M2c union so it compiles before and after the C-gate (ADR 0007 §10). Paddle: two hands (art M2c §8). */
+const TWO_HANDED: Readonly<Record<M2cHeldId, boolean>> = {
   fists: false, pistol: false, grenade: false, smg: true, shotgun: true, rifle: true, dmr: true, sniper: true, lmg: true,
+  dbshotgun: true, revolver: false, rpg: true, knife: false, machete: false, paddle: true, smoke: false,
 };
 
 /** True when the held item is carried with both hands (long guns). */
-export function isTwoHanded(w: HeldId): boolean {
+export function isTwoHanded(w: HeldId | M2cHeldId): boolean {
   return TWO_HANDED[w] ?? false;
 }
 
@@ -376,10 +412,18 @@ function standPose(i: PoseInput, out: Pose): Pose {
       out.headX += (pitch * 0.85 - 0.1 - out.headX) * ads;
       out.headY *= 1 - ads;
     }
+    if (i.weapon === 'rpg' && !a.reloading) {
+      // On the shoulder: the arm stays raised whatever the aim pitch (the tube follows the body).
+      out.armRX = RPG_ARM_X + pitch * 0.4;
+      out.armRZ = -0.12;
+      out.armLX = HALF_PI + pitch * 0.6;
+      out.armLZ = 0.55;
+    }
     // Recoil kick: arm up, upper body back.
     out.armRX += i.recoil * 0.35;
     if (twoHanded) out.armLX += i.recoil * 0.3;
     out.bodyX += i.recoil * 0.06;
+    applySwing(i, out, 1);
   } else if (i.recoil > 0) {
     // Fist punch: quick forward jab with the right arm.
     const p = Math.sin(clamp01(i.recoil) * Math.PI);
@@ -537,8 +581,34 @@ function pronePose(i: PoseInput, out: Pose, still = false): Pose {
     // Lob from the ground: throwing arm cocked up beside the head.
     out.armRX = Math.PI * 0.62;
     out.armRZ = 0.35;
+  } else if (i.swing) {
+    // M2c prone swing: arms only, half range, no body twist (art M2c §8).
+    applySwing(i, out, 0.5, true);
   }
   return out;
+}
+
+/** Blend the melee swing keys over the arm block (`range` scales the swing; prone: arms only). */
+function applySwing(i: PoseInput, out: Pose, range: number, armsOnly = false): void {
+  const sw = i.swing;
+  if (!sw || i.deathTime >= 0) return;
+  const keys = MELEE_SWING_3P[sw.weapon];
+  if (!keys) return;
+  const w = swingWeights(sw.progress, sw.hitFraction);
+  const hold = 1 - w.windup - w.strike;
+  const ax = out.armRX * hold + (keys.windup.armX * w.windup + keys.strike.armX * w.strike);
+  const az = out.armRZ * hold + (keys.windup.armZ * w.windup + keys.strike.armZ * w.strike);
+  out.armRX += (ax - out.armRX) * range;
+  out.armRZ += (az - out.armRZ) * range;
+  if (keys.both) {
+    const lx = out.armLX * hold + (keys.windup.armX * w.windup + keys.strike.armX * w.strike);
+    out.armLX += (lx - out.armLX) * range;
+  }
+  if (!armsOnly) {
+    out.bodyY_rot += (keys.windup.bodyY * w.windup + keys.strike.bodyY * w.strike) * range;
+    out.bodyX += (keys.windup.bodyX * w.windup + keys.strike.bodyX * w.strike) * range;
+    if (sw.weapon === 'paddle') out.stanceZ -= 0.05 * w.strike * range;
+  }
 }
 
 /** Death while prone: no backward topple; roll onto the side, arms flop, then the usual poof. */

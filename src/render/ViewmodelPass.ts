@@ -260,9 +260,10 @@ export class ViewmodelPass {
   }
 
   private pose(rig: ViewmodelRig, vm: ViewmodelView, o: VmOut, time: number): void {
-    applyViewmodelPose(rig, o.item, o.ads);
-    if (this.remappedItem !== o.item) {
-      this.remappedItem = o.item;
+    applyViewmodelPose(rig, o.item, o.ads, { level: o.level, scope: o.scope });
+    const key = `${o.item}|${o.level ?? '-'}|${o.scope ?? '-'}`;
+    if (this.remappedItem !== key) {
+      this.remappedItem = key;
       this.remapMaterials(rig.root);
     }
     const sock = rig.itemSocket;

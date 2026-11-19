@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { BALANCE } from '../shared/balance';
+import { BALANCE, compatibleScopes } from '../shared/balance';
+import type { LocalPlayerState } from '../shared/types';
 import { buildHudView, timerProgress, type HudBuildInput } from './hudBuilder';
-import { makeLocal, makeMatch, makePlayer, makeSnapshot, makeZone, TEST_MAP } from './testFixtures';
+import { makeAmmo, makeLocal, makeMatch, makePlayer, makeSnapshot, makeZone, TEST_MAP } from './testFixtures';
 
 function base(overrides: Partial<HudBuildInput> = {}): HudBuildInput {
   return {
@@ -54,7 +55,7 @@ describe('buildHudView', () => {
     const local = makeLocal(1, {
       slots: [{ weapon: 'smg', mag: 17 }, { weapon: 'shotgun', mag: 2 }],
       activeSlot: 0,
-      ammo: { ammo_light: 60, ammo_heavy: 0, ammo_shell: 8, ammo_sniper: 0 },
+      ammo: makeAmmo({ ammo_light: 60, ammo_heavy: 0, ammo_shell: 8, ammo_sniper: 0 }),
       heals: { bandage: 2, medkit: 1 },
       reloadRemainingMs: 1000,
       reloadTotalMs: 2000,
@@ -74,11 +75,20 @@ describe('buildHudView', () => {
     expect(l.vest).toBeNull();
     expect(l.helmet).toBeNull();
     expect(l.kills).toBe(2);
+    // M2c gate prep: guns are L1 with their built-in sight; fists and the frag have no level or sight.
+    const none = { level: null, scope: null, sight: 'none', builtInSight: 'none', compatibleScopes: [] };
+    const gun = (id: 'smg' | 'shotgun') => ({
+      level: 1,
+      scope: null,
+      sight: BALANCE.weapons[id].sight,
+      builtInSight: BALANCE.weapons[id].sight,
+      compatibleScopes: compatibleScopes(BALANCE, id),
+    });
     expect(l.slots).toEqual([
-      { slot: 0, weapon: 'smg', mag: 17, count: null },
-      { slot: 1, weapon: 'shotgun', mag: 2, count: null },
-      { slot: 2, weapon: 'fists', mag: null, count: null },
-      { slot: 3, weapon: 'grenade', mag: null, count: 0 },
+      { slot: 0, weapon: 'smg', mag: 17, count: null, ...gun('smg') },
+      { slot: 1, weapon: 'shotgun', mag: 2, count: null, ...gun('shotgun') },
+      { slot: 2, weapon: 'fists', mag: null, count: null, ...none },
+      { slot: 3, weapon: 'grenade', mag: null, count: 0, ...none },
     ]);
     expect(l.weapon).toBe('smg');
     expect(l.mag).toBe(17);
@@ -131,7 +141,7 @@ describe('buildHudView', () => {
   it('spectate view and minimap marker follow the spectate target', () => {
     const target = makePlayer(9, { name: 'Crab', hp: 40, pos: { x: 4, y: 0, z: -2 }, yaw: 1 });
     const hud = buildHudView(base({ snapshot: makeSnapshot(), spectateTarget: target }));
-    expect(hud.spectate).toEqual({ targetId: 9, targetName: 'Crab', targetHp: 40, targetMaxHp: BALANCE.player.maxHp, view: 'firstPerson' });
+    expect(hud.spectate).toEqual({ targetId: 9, targetName: 'Crab', targetHp: 40, targetMaxHp: BALANCE.player.maxHp, view: 'firstPerson', weapon: 'fists', weaponLevel: null });
     expect(hud.minimap.self).toEqual({ x: 4, z: -2, yaw: 1 });
     const chase = buildHudView(base({ snapshot: makeSnapshot(), spectateTarget: target, spectateView: 'chase', cameraView: 'chase' }));
     expect(chase.spectate?.view).toBe('chase');
@@ -153,14 +163,24 @@ describe('buildHudView (M2a)', () => {
     const l = buildHudView(base({ snapshot: snap, now: 1_500 })).local!;
     expect(l.weapon).toBe('grenade');
     expect(l.activeSlot).toBe(3);
-    expect(l.slots[3]).toEqual({ slot: 3, weapon: 'grenade', mag: null, count: 2 });
+    expect(l.slots[3]).toEqual({
+      slot: 3,
+      weapon: 'grenade',
+      mag: null,
+      count: 2,
+      level: null,
+      scope: null,
+      sight: 'none',
+      builtInSight: 'none',
+      compatibleScopes: [],
+    });
     expect(l.mag).toBeNull();
     expect(l.magSize).toBeNull();
     expect(l.reserve).toBeNull();
     expect(l.ammoType).toBeNull();
     expect(l.grenades).toBe(2);
     expect(l.grenadeMax).toBe(BALANCE.items.grenade.maxCarry);
-    expect(l.cook).toEqual({ fuseRemainingMs: 1_500, fuseMs: BALANCE.items.grenade.fuseMs });
+    expect(l.cook).toEqual({ fuseRemainingMs: 1_500, fuseMs: BALANCE.items.grenade.fuseMs, throwable: 'grenade' });
     // Past the fuse: clamped at 0. An explicit (predicted) cook overrides; null hides it.
     expect(buildHudView(base({ snapshot: snap, now: 9_000 })).local!.cook!.fuseRemainingMs).toBe(0);
     expect(buildHudView(base({ snapshot: snap, cook: null })).local!.cook).toBeNull();
@@ -170,7 +190,7 @@ describe('buildHudView (M2a)', () => {
     const local = makeLocal(1, {
       slots: [{ weapon: 'sniper', mag: 4 }, null],
       activeSlot: 0,
-      ammo: { ammo_light: 0, ammo_heavy: 0, ammo_shell: 0, ammo_sniper: 12 },
+      ammo: makeAmmo({ ammo_light: 0, ammo_heavy: 0, ammo_shell: 0, ammo_sniper: 12 }),
     });
     const l = buildHudView(base({ snapshot: makeSnapshot({ local, players: [makePlayer(1, { weapon: 'sniper' })] }) })).local!;
     expect(l).toMatchObject({ mag: 4, magSize: BALANCE.weapons.sniper.magSize, reserve: 12, ammoType: 'ammo_sniper' });
@@ -231,5 +251,76 @@ describe('timerProgress', () => {
     expect(timerProgress(0, 1000, 0, 0)).toBeNull();
     expect(timerProgress(1000, 1000, 0, 0)).toBe(0);
     expect(timerProgress(1000, 1000, 0, 5000)).toBe(1);
+  });
+});
+
+describe('buildHudView (M2c gate prep)', () => {
+  it('M2b-equivalent M2c fields: L1 held gun, frags only, no melee recovery, empty pouch, no smoke, no layout', () => {
+    const local = makeLocal(1, { slots: [{ weapon: 'rifle', mag: 5 }, null], activeSlot: 0, grenades: 2 });
+    const hud = buildHudView(base({ snapshot: makeSnapshot({ local, players: [makePlayer(1, { weapon: 'rifle' })] }) }));
+    const l = hud.local!;
+    expect(l.weaponLevel).toBe(1);
+    expect(l.throwables).toEqual({ grenade: 2, smoke: 0 });
+    expect(l.throwableMax).toEqual({ grenade: BALANCE.items.grenade.maxCarry, smoke: BALANCE.items.smoke?.maxCarry ?? 0 });
+    expect(l.throwableSelected).toBe('grenade');
+    expect(l.meleeRecovery).toBeNull();
+    expect(l.scopeStash).toEqual([]);
+    expect(l.scopeStashMax).toBe(BALANCE.scopes?.spareSlots ?? 0);
+    expect(l.scopeSwapProgress).toBeNull();
+    expect(hud.inSmoke).toBe(false);
+    expect(hud.layout).toBeNull();
+    expect(hud.minimap.layout).toBeNull();
+  });
+
+  it('a slot level and mounted scope pass through; fists in hand has no level', () => {
+    const local = makeLocal(1, { slots: [{ weapon: 'rifle', mag: 5, level: 3, scope: null }, null], activeSlot: 2 });
+    const l = buildHudView(base({ snapshot: makeSnapshot({ local, players: [makePlayer(1)] }) })).local!;
+    expect(l.slots[0]).toMatchObject({ level: 3, scope: null });
+    expect(l.weaponLevel).toBeNull();
+  });
+
+  it('layout and inSmoke inputs reach the HUD (seed and look for HudView.layout, the full ref for the minimap)', () => {
+    const ref = { seed: 42, version: 1, hash: 7, look: 'golden' as const };
+    const hud = buildHudView(base({ layout: ref, inSmoke: true }));
+    expect(hud.layout).toEqual({ seed: 42, look: 'golden' });
+    expect(hud.minimap.layout).toEqual(ref);
+    expect(hud.inSmoke).toBe(true);
+  });
+});
+
+describe('M2c HUD fields (ADR 0007 §8)', () => {
+  const snap = (local: Parameters<typeof makeLocal>[1], weapon: Parameters<typeof makePlayer>[1] = {}) =>
+    makeSnapshot({ match: makeMatch({ phase: 'playing' }), players: [makePlayer(1, weapon)], local: makeLocal(1, local) });
+
+  it('slot 2 shows the melee weapon and level; slot 3 the selected throwable and its count; pouch and maxima', () => {
+    const hud = buildHudView(
+      base({ snapshot: snap({ activeSlot: 2, melee: { weapon: 'machete', level: 2 }, grenades: 1, smokes: 2, selectedThrowable: 'smoke', spareScope: 'scope_2x' }, { weapon: 'machete' }) }),
+    );
+    const l = hud.local!;
+    expect(l.slots[2]).toMatchObject({ weapon: 'machete', level: 2, sight: 'none', compatibleScopes: [] });
+    expect(l.slots[3]).toMatchObject({ weapon: 'smoke', count: 2, level: null });
+    expect(l).toMatchObject({ weaponLevel: 2, throwables: { grenade: 1, smoke: 2 }, throwableSelected: 'smoke', scopeStash: ['scope_2x'] });
+    expect(l.scopeStashMax).toBe(BALANCE.scopes.spareSlots);
+    expect(hud.inSmoke).toBe(false);
+    expect(hud.layout).toBeNull();
+  });
+
+  it('predicted fields override the snapshot (T target sight, selection, recovery); the server scope timer shows progress', () => {
+    const local = { activeSlot: 0 as const, slots: [{ weapon: 'rifle', mag: 30, level: 3, scope: null }, null] as LocalPlayerState['slots'], scopeSwapRemainingMs: 300 };
+    const plain = buildHudView(base({ snapshot: snap(local, { weapon: 'rifle' }), now: 0 }));
+    expect(plain.local!.scopeSwapProgress).toBeCloseTo(1 - 300 / BALANCE.scopes.swapMs);
+    expect(plain.local!.slots[0]).toMatchObject({ level: 3, scope: null, sight: 'red_dot', builtInSight: 'red_dot', compatibleScopes: compatibleScopes(BALANCE, 'rifle') });
+    const hud = buildHudView(
+      base({
+        snapshot: snap(local, { weapon: 'rifle' }),
+        predicted: { selectedThrowable: 'smoke', slotScopes: ['scope_4x', null], spareScope: null, scopeSwapProgress: 0.25, meleeRecovery: 0.5 },
+        layout: { seed: 9, version: 1, hash: 1, look: 'golden' },
+        inSmoke: true,
+      }),
+    );
+    expect(hud.local!.slots[0]).toMatchObject({ scope: 'scope_4x', sight: 'scope_4x' });
+    expect(hud.local!).toMatchObject({ throwableSelected: 'smoke', scopeSwapProgress: 0.25, meleeRecovery: null, weaponLevel: 3 });
+    expect(hud).toMatchObject({ inSmoke: true, layout: { seed: 9, look: 'golden' } });
+    expect(hud.minimap.layout).toMatchObject({ seed: 9 });
   });
 });

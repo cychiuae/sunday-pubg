@@ -3,7 +3,7 @@
  * input sequence: seeded Rng streams, world time only, no globals.
  */
 import type { Balance } from '../balance';
-import { armorBalance } from '../balance';
+import { armorBalance, effectiveSight, rocketBlastMaxDamage } from '../balance';
 import { MAX_INPUT_REPEAT_TICKS, MAX_QUEUED_INPUTS, SIM_DT } from '../constants';
 import { carrierHeading, carrierPosAt } from '../maps';
 import { aimDirection, clamp, createRng, type Rng, wrapAngle } from '../math';
@@ -20,37 +20,54 @@ import type {
   GrenadeId,
   GrenadeState,
   HeldId,
+  ImpactSurface,
+  ItemLevel,
+  LocalM2cFields,
   LocalPlayerState,
   LootId,
   MatchPhase,
   MatchState,
   PlayerId,
   PlayerInput,
+  M2cThrowableId,
+  PaneId,
+  PlayerM2cFields,
+  RocketState,
   PlayerState,
+  ScopeId,
   ShotImpact,
   SimEvent,
+  SmokeCloudState,
   Standing,
   Vec2,
   Vec3,
   WeaponId,
   WorldSnapshot,
 } from '../types';
-import { FISTS_SLOT } from '../types';
+import { FISTS_SLOT, isM2cGunId, isMeleeId } from '../types';
 import {
   activeChangedByPickup,
   advanceActionTimers,
   applyActionEdges,
   cancelActionTimers,
   fireSlowedOf,
+  isSwapping,
+  slotUpgradedByPickup,
   TIMER_EPSILON_MS,
   type ActionEvent,
   type ActionHooks,
+  type SwingState,
 } from './actions';
+import { blastHits } from './blast';
+import { addCloud, deployCloud, liveClouds } from './clouds';
+import { effWeapon, slotWeapon } from './levels';
+import { meleeHitCheck, type MeleeCandidate } from './melee';
+import { createRocket, stepRocket, type RocketContact, type RocketEntity } from './rockets';
 import { assignBotDrops, botThink, createBotBrain, rollPersonality, type BotEnv, type BotGrenadeInfo, type RecentShot } from './bots';
 import { lineOfSight, raycastStatic } from './colliders';
 import { adsProgressOf, applyArmorPiece, effectiveSpreadDeg, pelletDamage, sampleCone, spreadRad } from './combat';
-import { dropLaunch, explosionDamage, stepGrenade, throwLaunch, type GrenadeBody } from './grenade';
-import { activeHeld, activeWeapon, applyPickup, createInventory, deathDrops, type GroundItem } from './inventory';
+import { dropLaunch, stepGrenade, throwLaunch, type GrenadeBody } from './grenade';
+import { activeHeld, activeLevel, activeSlotState, applyPickup, createInventory, deathDrops, type GroundItem, type Inventory } from './inventory';
 import { dropTierOf, scatterInDisc, spawnMatchLoot, toLootState, type LootEntity } from './loot';
 import {
   createMovementContext,
@@ -61,6 +78,7 @@ import {
   MAX_MOVE_INPUT_LEN,
   stepMovement,
   toMovementInput,
+  withBrokenGlass,
   type MapRuntime,
   type MovementContext,
 } from './movement';
@@ -163,6 +181,8 @@ export interface GrenadeEntity {
   explodesAt: number;
   /** Tick it was created on (it first moves on the next tick, grenades.md edge cases). */
   spawnTick: number;
+  /** M2c: frag or smoke canister. */
+  kind: M2cThrowableId;
 }
 
 /** hp + worn armor durability (placement tie-break, armor.md). */
@@ -215,7 +235,14 @@ class SimWorld implements World {
   private nextZoneDamageAt = 0;
   private recentShots: RecentShot[] = [];
   private grenades: GrenadeEntity[] = [];
+  /** One id space for grenades, rockets and smoke clouds (ADR 0007 §4). */
   private nextGrenadeId = 1;
+  /** M2c: live rockets (launch records + sweep bookkeeping), by id. */
+  private rockets: RocketEntity[] = [];
+  /** M2c: live smoke clouds, by id. */
+  private clouds: SmokeCloudState[] = [];
+  /** M2c: broken glass panes of this match (the movement context's colliders read it live). */
+  private readonly broken = new Set<PaneId>();
 
   private matchRng: Rng;
   private zoneRng: Rng;
@@ -231,7 +258,8 @@ class SimWorld implements World {
     this.seed = opts.seed >>> 0;
     this.botNames = opts.botNames;
     const rt = opts.runtime && opts.runtime.map === opts.map && opts.runtime.balance === opts.balance ? opts.runtime : null;
-    this.ctx = rt ? rt.ctx : createMovementContext(opts.map, opts.balance);
+    // M2c: one live broken-pane set per World over the shared (per-map) colliders.
+    this.ctx = withBrokenGlass(rt ? rt.ctx : createMovementContext(opts.map, opts.balance), this.broken);
     this.nav = rt ? rt.nav : null;
     const nt = navTuning(opts.balance);
     this.pathCache = this.nav ? new PathCache(nt.pathCacheSize) : null;
@@ -389,6 +417,9 @@ class SimWorld implements World {
       loot: inMatch ? this.loot.map(toLootState) : [],
       grenades: this.phase === 'playing' ? this.grenades.map(toGrenadeState) : [],
       local: viewer && !viewer.left ? this.toLocal(viewer) : null,
+      rockets: this.phase === 'playing' ? this.rockets.map((r) => cloneRocketState(r.state)) : [],
+      smokes: this.phase === 'playing' ? this.clouds.map((c) => ({ ...c, pos: { ...c.pos } })) : [],
+      brokenPanes: inMatch ? [...this.broken].sort((x, y) => x - y) : [],
     };
   }
 
@@ -454,6 +485,10 @@ class SimWorld implements World {
       cook: null,
       throwRecoveryMs: 0,
       lastGunSlot: FISTS_SLOT,
+      swing: null,
+      scopeSwap: null,
+      smokeHeld: false,
+      lastHurtAt: -Infinity,
       queue: [],
       lastInput: null,
       inputRepeatTicks: 0,
@@ -478,6 +513,9 @@ class SimWorld implements World {
     this.recentShots = [];
     this.grenades = [];
     this.nextGrenadeId = 1;
+    this.rockets = [];
+    this.clouds = [];
+    this.broken.clear();
 
     const humans = [...this.humans.values()].filter((h) => h.queued).slice(0, b.match.maxPlayers);
     const list: SimPlayer[] = [];
@@ -570,6 +608,9 @@ class SimWorld implements World {
     this.zone = null;
     this.recentShots = [];
     this.grenades = [];
+    this.rockets = [];
+    this.clouds = [];
+    this.broken.clear();
     this.route = null;
     this.phase = 'lobby';
     this.phaseEndsAt = null;
@@ -593,8 +634,10 @@ class SimWorld implements World {
     }
     // drop.md edge case: aboard players are ranked like other alive players; the flight is over.
     for (const p of this.participants.values()) p.aboard = false;
-    // Live grenades are removed without exploding (grenades.md test 17).
+    // Live grenades, rockets and clouds are removed without exploding (grenades.md test 17, rpg.md, smoke.md).
     this.grenades = [];
+    this.rockets = [];
+    this.clouds = [];
     if (winner) winner.placement = 1;
     const standings: Standing[] = [...this.participants.values()]
       .map((p) => ({ id: p.id, name: p.name, isBot: p.isBot, kills: p.kills, placement: p.placement ?? this.totalPlayers }))
@@ -648,7 +691,9 @@ class SimWorld implements World {
       loot: this.loot,
       zone: this.zone ? this.zone.state : null,
       recentShots: this.recentShots,
-      grenades: this.grenades.map((g): BotGrenadeInfo => ({ id: g.id, ownerId: g.ownerId, pos: g.body.pos })),
+      // grenadeDanger: frags only (smoke canisters never threaten).
+      grenades: this.grenades.filter((g) => g.kind === 'grenade').map((g): BotGrenadeInfo => ({ id: g.id, ownerId: g.ownerId, pos: g.body.pos })),
+      smokes: this.clouds,
       route: this.route,
       nav: this.nav,
       pathCache: this.pathCache,
@@ -665,7 +710,7 @@ class SimWorld implements World {
       if (!p.alive || p.left) continue;
       this.processPlayer(p, dt, prevMs, now);
     }
-    this.stepGrenades(dt, now);
+    this.stepProjectiles(dt, now);
 
     if (this.zone) {
       updateZone(this.zone, b, this.map, this.zoneRng, now);
@@ -759,6 +804,7 @@ class SimWorld implements World {
       selectSlot: slot === 0 || slot === 1 || slot === 2 || slot === 3 ? slot : -1,
       ads: input.ads === true,
       stanceToggle: input.stanceToggle === 'crouch' || input.stanceToggle === 'prone' ? input.stanceToggle : null,
+      cycleScope: input.cycleScope === true,
     };
   }
 
@@ -789,14 +835,20 @@ class SimWorld implements World {
   private actionHooks(p: SimPlayer): ActionHooks {
     return {
       event: (e: ActionEvent) => {
-        if (e.type === 'grenadeCook') this.events.push({ type: 'grenadeCook', playerId: p.id, pos: this.eyeOf(p), explodesAt: e.explodesAt });
-        else this.events.push({ ...e, playerId: p.id });
+        if (e.type === 'grenadeCook') {
+          this.events.push({ type: 'grenadeCook', playerId: p.id, pos: this.eyeOf(p), explodesAt: e.explodesAt, kind: 'grenade' });
+        } else if (e.type === 'meleeSwing') {
+          this.events.push({ type: 'meleeSwing', playerId: p.id, weapon: e.weapon, level: e.level, pos: { ...p.move.pos }, hitAt: e.hitAt, cycleMs: e.cycleMs });
+        } else this.events.push({ ...e, playerId: p.id });
       },
       failed: (action, reason) => this.actionFailed(p, action, reason),
       fire: (weapon) => this.fireShot(p, weapon),
-      release: (how, explodesAt) => this.spawnCookEntity(p, how, explodesAt),
-      cookOut: () => this.explode(this.nextGrenadeId++, p.id, this.eyeOf(p), true),
+      release: (how, explodesAt, kind) => this.spawnCookEntity(p, how, explodesAt, kind),
+      cookOut: () => this.explodeFrag(this.nextGrenadeId++, p.id, this.eyeOf(p), true),
       interact: () => this.tryPickup(p),
+      meleeHit: (sw) => this.meleeHit(p, sw),
+      scopeChanged: (slot, gun, from, to) =>
+        this.events.push({ type: 'scopeChanged', playerId: p.id, slot, gun, from, to, auto: false, pos: { ...p.move.pos } }),
     };
   }
 
@@ -822,12 +874,16 @@ class SimWorld implements World {
       healing: p.heal !== null,
       reloading: p.reload !== null,
       held,
-      swapping: p.swapRemainingMs > 0,
+      swapping: isSwapping(p),
       fireSlowed: fireSlowedOf(p, now, b),
+      scope: activeSlotState(p.inv)?.scope ?? null,
     };
     const adsBefore = p.move.adsMs;
     const res = stepMovement(p.move, toMovementInput(input, status, b), dt, this.ctx);
     p.move = res.state;
+    // BUG-012: clamp the pitch with the post-request stance, so entering prone clamps on the transition's first tick.
+    const pl = pitchLimits(p.move, b);
+    p.pitch = clamp(p.pitch, pl.min, pl.max);
     // BUG-010: a stall-neutral input freezes ADS instead of releasing it (the client still holds RMB).
     if (p.stalled && adsBefore > 0 && p.move.adsMs === 0) p.move = { ...p.move, adsMs: adsBefore };
     if (res.stanceChanged) {
@@ -872,7 +928,8 @@ class SimWorld implements World {
       }
     }
     if (!best) return;
-    const o = applyPickup(p.inv, p, { item: best.item, qty: best.qty, mag: best.mag, durability: best.durability }, this.balance);
+    const ground: GroundItem = { item: best.item, qty: best.qty, mag: best.mag, durability: best.durability, level: best.level ?? null, scope: best.scope ?? null };
+    const o = applyPickup(p.inv, p, ground, this.balance);
     if (o.kind === 'refused') {
       this.actionFailed(p, 'pickup', o.reason);
       return;
@@ -882,13 +939,23 @@ class SimWorld implements World {
     this.lootVersion++;
     const ev: SimEvent = { type: 'pickup', playerId: p.id, lootId: best.id, item: best.item, qty: o.taken, pos: { ...best.pos } };
     if (o.durability !== undefined) ev.durability = o.durability;
+    if (isM2cGunId(best.item) || isMeleeId(best.item)) ev.level = best.level ?? 1;
+    if (isM2cGunId(best.item)) ev.scope = best.scope ?? null;
     this.events.push(ev);
     if (o.dropped) {
-      this.spawnLootAt({ item: o.dropped.weapon, qty: 1, mag: o.dropped.mag }, pos.x, pos.z, pos.y);
+      const d = o.dropped;
+      this.spawnLootAt({ item: d.weapon, qty: 1, mag: d.mag, level: d.level ?? 1, scope: d.scope ?? null }, pos.x, pos.z, pos.y);
     }
+    if (o.droppedMelee) this.spawnLootAt({ item: o.droppedMelee.weapon, qty: 1, mag: null, level: o.droppedMelee.level }, pos.x, pos.z, pos.y);
+    if (o.droppedScope) this.spawnLootAt({ item: o.droppedScope, qty: 1, mag: null }, pos.x, pos.z, pos.y);
     if (o.droppedArmor) {
       this.spawnLootAt({ item: o.droppedArmor.item, qty: 1, mag: null, durability: o.droppedArmor.durability }, pos.x, pos.z, pos.y);
     }
+    if (o.scopeMount) {
+      const m = o.scopeMount;
+      this.events.push({ type: 'scopeChanged', playerId: p.id, slot: m.slot, gun: m.gun, from: m.from, to: m.to, auto: true, pos: { ...p.move.pos } });
+    }
+    if (o.upgradedSlot !== null && slotUpgradedByPickup(p, o.upgradedSlot, this.balance, this.actionHooks(p))) this.endAds(p);
     if (o.activeChanged && activeChangedByPickup(p, this.balance, this.actionHooks(p))) this.endAds(p);
   }
 
@@ -903,6 +970,8 @@ class SimWorld implements World {
       pos: { x, y, z },
       tier: dropTierOf(g.item),
       durability: g.durability ?? null,
+      level: g.level ?? null,
+      scope: g.scope ?? null,
     });
     this.lootVersion++;
     return id;
@@ -936,16 +1005,17 @@ class SimWorld implements World {
   }
 
   /**
-   * The grenade in hand becomes an entity: 'throw' (LMB release), 'switch' (short drop on a slot change), 'death'
+   * The throwable in hand becomes an entity: 'throw' (LMB release), 'switch' (short drop on a slot change), 'death'
    * (drop at the eye with zero velocity). Keeps the remaining fuse. Recovery and the auto-switch are the action step's.
+   * M2c: `kind` 'smoke' uses items.smoke throw and physics keys; its fuse end deploys a cloud.
    */
-  private spawnCookEntity(p: SimPlayer, how: 'throw' | 'switch' | 'death', explodesAt: number): void {
+  private spawnCookEntity(p: SimPlayer, how: 'throw' | 'switch' | 'death', explodesAt: number, kind: M2cThrowableId = 'grenade'): void {
     const eye = this.eyeOf(p);
     let launch: { pos: Vec3; vel: Vec3 };
     if (how === 'throw') {
       const proneSettled = p.move.stance === 'prone' && isStanceSettled(p.move);
-      launch = throwLaunch(eye, p.yaw, p.pitch, proneSettled, this.ctx);
-    } else if (how === 'switch') launch = dropLaunch(eye, p.yaw, this.ctx);
+      launch = throwLaunch(eye, p.yaw, p.pitch, proneSettled, this.ctx, kind);
+    } else if (how === 'switch') launch = dropLaunch(eye, p.yaw, this.ctx, kind);
     else launch = { pos: eye, vel: { x: 0, y: 0, z: 0 } };
     const id = this.nextGrenadeId++;
     this.grenades.push({
@@ -954,6 +1024,7 @@ class SimWorld implements World {
       body: { pos: { ...launch.pos }, vel: { ...launch.vel }, inWater: false },
       explodesAt,
       spawnTick: this._tick,
+      kind,
     });
     this.events.push({
       type: 'grenadeThrown',
@@ -963,62 +1034,293 @@ class SimWorld implements World {
       vel: { ...launch.vel },
       explodesAt,
       dropped: how !== 'throw',
+      kind,
     });
   }
 
-  /** Moves every live grenade (id order) and explodes those whose fuse ended. New grenades first move next tick. */
-  private stepGrenades(dt: number, now: number): void {
-    if (this.grenades.length === 0) return;
-    const g = this.balance.items.grenade;
-    const keep: GrenadeEntity[] = [];
-    const due: GrenadeEntity[] = [];
-    for (const e of this.grenades) {
-      if (e.spawnTick === this._tick) {
-        keep.push(e);
-        continue;
+  /**
+   * Moves every live grenade and rocket, then resolves this tick's fuse ends and rocket contacts in entity id order
+   * (one id space, rpg.md edge cases). Frags explode, smoke canisters deploy a cloud. Clouds past their fade are
+   * removed. New grenades and rockets first move on the next tick.
+   */
+  private stepProjectiles(dt: number, now: number): void {
+    const b = this.balance;
+    const due: { id: number; run: () => void }[] = [];
+    if (this.grenades.length > 0) {
+      const keep: GrenadeEntity[] = [];
+      for (const e of this.grenades) {
+        if (e.spawnTick === this._tick) {
+          keep.push(e);
+          continue;
+        }
+        const r = stepGrenade(e.body, dt, this.ctx, e.kind);
+        e.body = r.body;
+        const c = r.contact;
+        const tb = e.kind === 'smoke' ? b.items.smoke : b.items.grenade;
+        if (c && (c.surface === 'water' || c.speed >= tb.bounceEventMinSpeed)) {
+          this.events.push({ type: 'grenadeBounce', id: e.id, pos: { ...c.pos }, surface: c.surface, speed: c.speed, kind: e.kind });
+        }
+        if (now >= e.explodesAt - TIMER_EPSILON_MS) {
+          due.push({
+            id: e.id,
+            run: () => (e.kind === 'smoke' ? this.deploySmoke(e, now) : this.explodeFrag(e.id, e.ownerId, e.body.pos, false)),
+          });
+        } else keep.push(e);
       }
-      const r = stepGrenade(e.body, dt, this.ctx);
-      e.body = r.body;
-      const c = r.contact;
-      if (c && (c.surface === 'water' || c.speed >= g.bounceEventMinSpeed)) {
-        this.events.push({ type: 'grenadeBounce', id: e.id, pos: { ...c.pos }, surface: c.surface, speed: c.speed });
-      }
-      if (now >= e.explodesAt - TIMER_EPSILON_MS) due.push(e);
-      else keep.push(e);
+      this.grenades = keep;
     }
-    this.grenades = keep;
-    for (const e of due) this.explode(e.id, e.ownerId, e.body.pos, false);
+    if (this.rockets.length > 0) {
+      const rb = b.weapons.rpg.rocket;
+      const range = b.weapons.rpg.range;
+      const keep: RocketEntity[] = [];
+      for (const r of this.rockets) {
+        if (r.state.firedAt >= now) {
+          keep.push(r);
+          continue;
+        }
+        const contact = stepRocket(r, now, rb, range, this.ctx.colliders, this.map, this.rocketTargets(r.state.ownerId), b);
+        if (contact) due.push({ id: r.state.id, run: () => this.endRocket(r, contact) });
+        else keep.push(r);
+      }
+      this.rockets = keep;
+    }
+    due.sort((x, y) => x.id - y.id);
+    for (const d of due) d.run();
+    if (this.clouds.length > 0) this.clouds = liveClouds(this.clouds, now, b.items.smoke.cloud);
+  }
+
+  /** M2c (smoke.md "The cloud"): a canister's fuse ended: a cloud keeps its id; maxActive forces the oldest to fade. */
+  private deploySmoke(e: GrenadeEntity, now: number): void {
+    const cfg = this.balance.items.smoke.cloud;
+    const cloud = deployCloud(e.id, e.ownerId, e.body.pos, e.body.inWater, now, cfg);
+    addCloud(this.clouds, cloud, now, cfg);
+    this.events.push({ type: 'smokeDeployed', ...cloud, pos: { ...cloud.pos } });
   }
 
   /**
-   * Blast (grenades.md "Explosion"): explosion event, then one damage event per victim in range with line of sight from
-   * pos + losHeightOffset to the stance chest point (props and terrain block, players do not). Vest only.
+   * Frag blast (grenades.md "Explosion"): explosion event, then one damage event per victim in range with line of sight
+   * from pos + losHeightOffset to the stance chest point (props, terrain and intact glass block; players and smoke do
+   * not). Vest only.
    */
-  private explode(id: GrenadeId, ownerId: PlayerId, pos: Vec3, inHand: boolean): void {
-    const b = this.balance;
-    const g = b.items.grenade;
+  private explodeFrag(id: GrenadeId, ownerId: PlayerId, pos: Vec3, inHand: boolean): void {
+    const g = this.balance.items.grenade;
     const at = { x: pos.x, y: pos.y, z: pos.z };
-    this.events.push({ type: 'explosion', id, ownerId, pos: at, radius: g.radius, inHand });
-    const losFrom = { x: pos.x, y: pos.y + g.losHeightOffset, z: pos.z };
-    for (const v of this.participants.values()) {
-      if (!v.alive || v.left || v.dying || v.aboard || v.move.dropping) continue;
-      if (v.id === ownerId && !g.selfDamage) continue;
-      const chest = chestPoint(v.move.pos, v.move, b);
-      const d = Math.hypot(chest.x - pos.x, chest.y - pos.y, chest.z - pos.z);
-      if (d > g.radius) continue;
-      const dmg = explosionDamage(d, b);
-      if (dmg <= 0) continue;
-      if (!lineOfSight(this.ctx.colliders, this.map, losFrom, chest)) continue;
-      this.applyExplosionDamage(v, ownerId, dmg, at, id);
+    this.events.push({ type: 'explosion', id, ownerId, pos: at, radius: g.radius, inHand, source: 'grenade' });
+    for (const h of blastHits(at, g, g.maxDamage, this.blastTargets(ownerId, g.selfDamage), this.ctx.colliders, this.map)) {
+      this.applyExplosionDamage(h.target, ownerId, h.damage, at, id, { weapon: 'grenade', weaponLevel: null });
     }
   }
 
-  private applyExplosionDamage(v: SimPlayer, ownerId: PlayerId, amount: number, src: Vec3, grenadeId: GrenadeId): void {
+  /** Alive, damageable participants as blast targets (chest points). */
+  private blastTargets(ownerId: PlayerId, selfDamage: boolean): { target: SimPlayer; chest: Vec3 }[] {
+    const out: { target: SimPlayer; chest: Vec3 }[] = [];
+    for (const v of this.participants.values()) {
+      if (!v.alive || v.left || v.dying || v.aboard || v.move.dropping) continue;
+      if (v.id === ownerId && !selfDamage) continue;
+      out.push({ target: v, chest: chestPoint(v.move.pos, v.move, this.balance) });
+    }
+    return out;
+  }
+
+  /** Hitbox candidates for melee and rockets: alive, non-dropping, not aboard, not `exceptId`. */
+  private hitCandidates(exceptId: PlayerId): MeleeCandidate[] {
+    const out: MeleeCandidate[] = [];
+    for (const o of this.participants.values()) {
+      if (o.id === exceptId || !o.alive || o.left || o.dying || o.aboard || o.move.dropping) continue;
+      out.push({ id: o.id, feet: o.move.pos, yaw: o.yaw, move: o.move });
+    }
+    return out;
+  }
+
+  private rocketTargets(ownerId: PlayerId): MeleeCandidate[] {
+    return this.hitCandidates(ownerId);
+  }
+
+  /** M2c (melee.md "Glass", rpg.md): a pane breaks for the rest of the match (colliders skip it from now on). */
+  private breakPane(pane: PaneId, pos: Vec3, byId: PlayerId | null, cause: 'melee' | 'rocket'): void {
+    if (this.broken.has(pane)) return;
+    this.broken.add(pane);
+    this.events.push({ type: 'glassBroken', paneId: pane, pos: { ...pos }, byId, cause });
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Rockets (rpg.md)
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Fires one rocket: origin = eye + aim (in the launch cone) x originForward; a collider between the eye and the origin
+   * makes it a dud at that point. rocketFired = the launch record.
+   */
+  private fireRocket(p: SimPlayer, level: ItemLevel, scope: ScopeId | null): void {
+    const b = this.balance;
+    const rb = b.weapons.rpg.rocket;
+    const eye = this.eyeOf(p);
+    const half = spreadRad(
+      effectiveSpreadDeg('rpg', b, {
+        horizontalSpeed: horizontalSpeed(p.move),
+        airborne: !p.move.grounded,
+        adsProgress: adsProgressOf(p.move, 'rpg', b, scope),
+        stance: p.move.stance,
+        stanceSettled: isStanceSettled(p.move),
+      }, { level, scope }),
+    );
+    const d = sampleCone(aimDirection(p.yaw, p.pitch), half, this.combatRng);
+    const id = this.nextGrenadeId++;
+    const now = this._timeMs;
+    this.recentShots.push({ shooterId: p.id, origin: eye, at: now });
+    const block = raycastStatic(this.ctx.colliders, this.map, eye, d, rb.originForward);
+    const state = {
+      id,
+      ownerId: p.id,
+      level,
+      pos: { x: eye.x + d.x * rb.originForward, y: eye.y + d.y * rb.originForward, z: eye.z + d.z * rb.originForward },
+      vel: { x: d.x * rb.speed, y: d.y * rb.speed, z: d.z * rb.speed },
+      firedAt: now,
+    };
+    this.events.push({ type: 'rocketFired', ...cloneRocketState(state) });
+    if (block) {
+      const at = { x: eye.x + d.x * block.t, y: eye.y + d.y * block.t, z: eye.z + d.z * block.t };
+      const surface = block.kind === 'water' ? 'terrain' : block.kind;
+      this.endRocket(createRocket(state), { pos: at, surface, travelled: 0, dir: d, victimId: null, pane: block.pane ?? null });
+      return;
+    }
+    this.rockets.push(createRocket(state));
+  }
+
+  /**
+   * A rocket ended (rpg.md "Contact or range"). Under armDistance: dud (impact damage only on a struck player, a struck
+   * pane breaks, rocketDud). Else: glassBroken, impact damage (cause rocket, body, vest), explosion (source rocket) at
+   * the contact pulled back collisionRadius, blast damage with rocketBlastMaxDamage(level). Kill credit: the owner.
+   */
+  private endRocket(r: RocketEntity, c: RocketContact): void {
+    const b = this.balance;
+    const rpg = b.weapons.rpg;
+    const rb = rpg.rocket;
+    const st = r.state;
+    const victim = c.victimId !== null ? (this.participants.get(c.victimId) ?? null) : null;
+    const impact = effWeapon(b, 'rpg', st.level).damage;
+    const weaponFields = { weapon: 'rpg' as const, weaponLevel: st.level };
+    if (c.travelled < rb.armDistance) {
+      if (c.pane !== null) this.breakPane(c.pane, c.pos, st.ownerId, 'rocket');
+      if (victim) this.applyRocketImpact(victim, st.ownerId, impact, st.pos, st.id, st.level);
+      this.events.push({ type: 'rocketDud', id: st.id, ownerId: st.ownerId, pos: { ...c.pos }, surface: c.surface, victimId: c.victimId });
+      return;
+    }
+    if (c.pane !== null) this.breakPane(c.pane, c.pos, st.ownerId, 'rocket');
+    if (victim) this.applyRocketImpact(victim, st.ownerId, impact, st.pos, st.id, st.level);
+    const at = { x: c.pos.x - c.dir.x * rb.collisionRadius, y: c.pos.y - c.dir.y * rb.collisionRadius, z: c.pos.z - c.dir.z * rb.collisionRadius };
+    const ev: SimEvent = { type: 'explosion', id: st.id, ownerId: st.ownerId, pos: at, radius: rb.blast.radius, inHand: false, source: 'rocket' };
+    if (victim) ev.direct = true;
+    if (c.surface === 'range') ev.airburst = true;
+    this.events.push(ev);
+    const maxDamage = rocketBlastMaxDamage(b, st.level);
+    for (const h of blastHits(at, rb.blast, maxDamage, this.blastTargets(st.ownerId, rb.blast.selfDamage), this.ctx.colliders, this.map)) {
+      this.applyExplosionDamage(h.target, st.ownerId, h.damage, at, st.id, { ...weaponFields, direct: h.target === victim });
+    }
+  }
+
+  /** Rocket impact: body zone through the vest, cause 'rocket', weapon rpg at the rocket's level. */
+  private applyRocketImpact(v: SimPlayer, ownerId: PlayerId, amount: number, src: Vec3, rocketId: number, level: ItemLevel): void {
+    if (!v.alive || v.dying || v.left || v.aboard || v.move.dropping || amount <= 0) return;
     const before = v.vest;
     const r = before ? applyArmorPiece(before, amount, armorBalance(this.balance, 'vest', before.tier).absorbFraction) : null;
     v.vest = r ? r.piece : null;
     v.hp -= r ? r.hpLoss : amount;
     if (ownerId !== v.id) v.lastDamagedBy = { id: ownerId, at: this._timeMs };
+    v.lastHurtAt = this._timeMs;
+    const lethal = v.hp <= 0;
+    if (lethal) v.hp = 0;
+    this.events.push({
+      type: 'damage',
+      victimId: v.id,
+      attackerId: ownerId,
+      amount,
+      headshot: false,
+      cause: 'rocket',
+      sourcePos: { ...src },
+      hpAfter: v.hp,
+      vest: r ? armorHit(before, r.absorbed, r.broken) : null,
+      helmet: null,
+      grenadeId: rocketId,
+      weapon: 'rpg',
+      weaponLevel: level,
+    });
+    if (lethal) this.setDying(v, ownerId, { weapon: 'rpg', cause: 'rocket', headshot: false, weaponLevel: level, direct: true });
+  }
+
+  /** Kill bookkeeping for owner-attributed damage (rockets, blasts): a self-kill credits the last enemy damager. */
+  private setDying(v: SimPlayer, ownerId: PlayerId, d: Omit<NonNullable<SimPlayer['dying']>, 'killerId'>): void {
+    let killer: SimPlayer | null;
+    if (ownerId === v.id) killer = this.creditFor(v);
+    else killer = this.participants.get(ownerId) ?? null;
+    if (killer) killer.kills++;
+    v.dying = { killerId: killer ? killer.id : ownerId === v.id ? null : ownerId, ...d };
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Melee (melee.md)
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * The hit frame of a swing (melee.md "Swing" 3-5): centre ray, else sweep, from this tick's eye and aim. A glass pane
+   * on the centre ray breaks (no damage). A player hit takes damage (cause melee; head through the helmet, body through
+   * the vest) and, with the paddle, knockback.
+   */
+  private meleeHit(p: SimPlayer, sw: SwingState): void {
+    // A dying attacker still lands (melee.md: two players swinging on the same tick can both hit).
+    if (!p.alive || p.move.dropping) return;
+    const b = this.balance;
+    const ew = effWeapon(b, sw.weapon, sw.level);
+    const mb = b.weapons[sw.weapon];
+    const eye = this.eyeOf(p);
+    const aim = aimDirection(p.yaw, p.pitch);
+    const res = meleeHitCheck(eye, aim, ew.range, mb.sweepRadius, this.hitCandidates(p.id), this.ctx.colliders, this.map, b);
+    if (!res) return;
+    const base = { type: 'meleeHit' as const, attackerId: p.id, weapon: sw.weapon, level: sw.level, pos: { ...res.point } };
+    if (res.kind === 'glass') {
+      this.events.push({ ...base, surface: 'glass', victimId: null, headshot: false, knockback: false });
+      this.breakPane(res.pane, res.point, p.id, 'melee');
+      return;
+    }
+    if (res.kind === 'static') {
+      const surface: ImpactSurface = res.surface;
+      this.events.push({ ...base, surface, victimId: null, headshot: false, knockback: false });
+      return;
+    }
+    const v = this.participants.get(res.id);
+    if (!v) return;
+    const knock = mb.knockbackSpeed > 0 || mb.knockbackLift > 0;
+    this.events.push({ ...base, surface: 'player', victimId: v.id, headshot: res.headshot, knockback: knock });
+    const dmg = ew.damage * (res.headshot ? ew.headshotMultiplier : 1);
+    this.applyWeaponDamage(v, p, res.headshot ? dmg : 0, res.headshot ? 0 : dmg, sw.weapon, eye, { cause: 'melee', weaponLevel: sw.level });
+    if (knock && v.alive && !v.dying) {
+      // Paddle knockback: horizontal knockbackSpeed along the attacker's yaw; lift unless the target is settled prone.
+      const fx = -Math.sin(p.yaw);
+      const fz = -Math.cos(p.yaw);
+      const prone = v.move.stance === 'prone' && isStanceSettled(v.move);
+      const vy = prone ? v.move.vel.y : Math.max(v.move.vel.y, mb.knockbackLift);
+      v.move = {
+        ...v.move,
+        vel: { x: v.move.vel.x + fx * mb.knockbackSpeed, y: vy, z: v.move.vel.z + fz * mb.knockbackSpeed },
+        grounded: prone ? v.move.grounded : false,
+      };
+    }
+  }
+
+  private applyExplosionDamage(
+    v: SimPlayer,
+    ownerId: PlayerId,
+    amount: number,
+    src: Vec3,
+    grenadeId: GrenadeId,
+    w: { weapon: 'grenade' | 'rpg'; weaponLevel: ItemLevel | null; direct?: boolean },
+  ): void {
+    const before = v.vest;
+    const r = before ? applyArmorPiece(before, amount, armorBalance(this.balance, 'vest', before.tier).absorbFraction) : null;
+    v.vest = r ? r.piece : null;
+    v.hp -= r ? r.hpLoss : amount;
+    if (ownerId !== v.id) v.lastDamagedBy = { id: ownerId, at: this._timeMs };
+    v.lastHurtAt = this._timeMs;
     const lethal = v.hp <= 0;
     if (lethal) v.hp = 0;
     this.events.push({
@@ -1033,28 +1335,37 @@ class SimWorld implements World {
       vest: r ? armorHit(before, r.absorbed, r.broken) : null,
       helmet: null,
       grenadeId,
+      weapon: w.weapon,
+      weaponLevel: w.weaponLevel,
     });
     if (!lethal) return;
-    let killer: SimPlayer | null;
-    if (ownerId === v.id) killer = this.creditFor(v);
-    else killer = this.participants.get(ownerId) ?? null;
-    if (killer) killer.kills++;
-    v.dying = { killerId: killer ? killer.id : ownerId === v.id ? null : ownerId, weapon: 'grenade', cause: 'explosion', headshot: false };
+    const d: Omit<NonNullable<SimPlayer['dying']>, 'killerId'> = { weapon: w.weapon, cause: 'explosion', headshot: false, weaponLevel: w.weaponLevel };
+    if (w.direct) d.direct = true;
+    this.setDying(v, ownerId, d);
   }
 
   private fireShot(p: SimPlayer, weapon: WeaponId): void {
     const b = this.balance;
-    const wb = b.weapons[weapon];
+    const slot = activeSlotState(p.inv);
+    const level: ItemLevel = slot ? (slot.level ?? 1) : 1;
+    const scope: ScopeId | null = slot ? (slot.scope ?? null) : null;
+    if (weapon === 'rpg') {
+      this.fireRocket(p, level, scope);
+      return;
+    }
+    // levels.md / scopes.md: damage, spread and ADS numbers of this instance (effectiveWeapon).
+    const wb = slot ? slotWeapon(b, slot) : effWeapon(b, weapon);
+    const weaponLevel: ItemLevel | null = slot ? level : null;
     const eye = this.eyeOf(p);
     const aim = aimDirection(p.yaw, p.pitch);
     const half = spreadRad(
       effectiveSpreadDeg(weapon, b, {
         horizontalSpeed: horizontalSpeed(p.move),
         airborne: !p.move.grounded,
-        adsProgress: adsProgressOf(p.move, weapon, b),
+        adsProgress: adsProgressOf(p.move, weapon, b, scope),
         stance: p.move.stance,
         stanceSettled: isStanceSettled(p.move),
-      }),
+      }, { level, scope }),
     );
     const impacts: ShotImpact[] = [];
     const hits = new Map<PlayerId, { head: number; body: number }>();
@@ -1098,7 +1409,7 @@ class SimWorld implements World {
     this.recentShots.push({ shooterId: p.id, origin: eye, at: this._timeMs });
     for (const [vid, h] of hits) {
       const v = this.participants.get(vid);
-      if (v) this.applyWeaponDamage(v, p, h.head, h.body, weapon, eye);
+      if (v) this.applyWeaponDamage(v, p, h.head, h.body, weapon, eye, { cause: 'weapon', weaponLevel });
     }
   }
 
@@ -1118,7 +1429,15 @@ class SimWorld implements World {
    * One shot's damage on one victim (combat.md "Shot resolution" 6-7): the head sum goes through the helmet, the body
    * sum through the vest, one damage event.
    */
-  private applyWeaponDamage(v: SimPlayer, attacker: SimPlayer, head: number, body: number, weapon: WeaponId, src: Vec3): void {
+  private applyWeaponDamage(
+    v: SimPlayer,
+    attacker: SimPlayer,
+    head: number,
+    body: number,
+    weapon: WeaponId,
+    src: Vec3,
+    o: { cause: 'weapon' | 'melee'; weaponLevel: ItemLevel | null },
+  ): void {
     const amount = head + body;
     if (!v.alive || v.dying || v.left || v.aboard || v.move.dropping || amount <= 0) return;
     const b = this.balance;
@@ -1131,6 +1450,7 @@ class SimWorld implements World {
     v.hp -= (hr ? hr.hpLoss : head) + (vr ? vr.hpLoss : body);
     const headshot = head > 0;
     if (attacker.id !== v.id) v.lastDamagedBy = { id: attacker.id, at: this._timeMs };
+    v.lastHurtAt = this._timeMs;
     const lethal = v.hp <= 0;
     if (lethal) v.hp = 0;
     this.events.push({
@@ -1139,14 +1459,16 @@ class SimWorld implements World {
       attackerId: attacker.id,
       amount,
       headshot,
-      cause: 'weapon',
+      cause: o.cause,
       sourcePos: { ...src },
       hpAfter: v.hp,
       vest: vr ? armorHit(vb, vr.absorbed, vr.broken) : null,
       helmet: hr ? armorHit(hb, hr.absorbed, hr.broken) : null,
+      weapon,
+      weaponLevel: o.weaponLevel,
     });
     if (lethal) {
-      v.dying = { killerId: attacker.id, weapon, cause: 'weapon', headshot };
+      v.dying = { killerId: attacker.id, weapon, cause: o.cause, headshot, weaponLevel: o.weaponLevel };
       if (attacker.id !== v.id) attacker.kills++;
     }
   }
@@ -1168,6 +1490,7 @@ class SimWorld implements World {
       useVest && before ? applyArmorPiece(before, amount, armorBalance(this.balance, 'vest', before.tier).absorbFraction) : null;
     if (r) v.vest = r.piece;
     v.hp -= r ? r.hpLoss : amount;
+    v.lastHurtAt = this._timeMs;
     const lethal = v.hp <= 0;
     if (lethal) v.hp = 0;
     this.events.push({
@@ -1181,11 +1504,13 @@ class SimWorld implements World {
       hpAfter: v.hp,
       vest: r ? armorHit(before, r.absorbed, r.broken) : null,
       helmet: null,
+      weapon: null,
+      weaponLevel: null,
     });
     if (lethal) {
       const credit = this.creditFor(v);
       if (credit) credit.kills++;
-      v.dying = { killerId: credit ? credit.id : null, weapon: null, cause, headshot: false };
+      v.dying = { killerId: credit ? credit.id : null, weapon: null, cause, headshot: false, weaponLevel: null };
     }
   }
 
@@ -1235,6 +1560,8 @@ class SimWorld implements World {
         cause: d.cause,
         placement: p.placement,
         headshot: d.headshot === true,
+        weaponLevel: d.weaponLevel !== undefined ? d.weaponLevel : d.weapon !== null && isM2cGunId(d.weapon) ? 1 : null,
+        ...(d.direct ? { direct: true } : {}),
       });
     });
     return dying;
@@ -1261,7 +1588,9 @@ class SimWorld implements World {
       li.moveForward > 0 &&
       !li.fire &&
       p.heal === null;
-    const out: PlayerState = {
+    const held = activeHeld(p.inv);
+    const slot = activeSlotState(p.inv);
+    const out: PlayerState & PlayerM2cFields = {
       id: p.id,
       name: p.name,
       pos: { ...p.move.pos },
@@ -1272,7 +1601,7 @@ class SimWorld implements World {
       vestTier: p.vest ? p.vest.tier : 0,
       helmetTier: p.helmet ? p.helmet.tier : 0,
       alive: p.alive,
-      weapon: activeHeld(p.inv) as HeldId,
+      weapon: held as HeldId,
       stance: p.move.stance,
       stanceFrom: p.move.stanceFrom,
       stanceProgress: stanceProgress(p.move, b),
@@ -1293,6 +1622,9 @@ class SimWorld implements World {
       kills: p.kills,
       aboard: p.aboard,
       dropPhase: p.move.dropping ? p.move.dropPhase : null,
+      // M2c (levels.md, scopes.md): the held weapon's level; null for fists and throwables. Effective sight.
+      weaponLevel: activeLevel(p.inv),
+      sight: effectiveSight(b, held, slot?.scope ?? null),
     };
     return out;
   }
@@ -1300,7 +1632,7 @@ class SimWorld implements World {
   private toLocal(p: SimPlayer): LocalPlayerState {
     const inv = p.inv;
     const m = p.move;
-    const out: LocalPlayerState = {
+    const out: LocalPlayerState & LocalM2cFields = {
       id: p.id,
       lastProcessedInputSeq: p.lastProcessedInputSeq,
       movement: {
@@ -1315,7 +1647,7 @@ class SimWorld implements World {
         dropPhase: m.dropPhase,
         dropMs: m.dropMs,
       },
-      slots: [inv.slots[0] ? { ...inv.slots[0] } : null, inv.slots[1] ? { ...inv.slots[1] } : null],
+      slots: [localSlot(inv.slots[0]), localSlot(inv.slots[1])],
       activeSlot: inv.activeSlot,
       ammo: { ...inv.ammo },
       heals: { ...inv.heals },
@@ -1331,6 +1663,11 @@ class SimWorld implements World {
       healItem: p.heal ? p.heal.item : null,
       swapRemainingMs: p.swapRemainingMs,
       aboard: p.aboard,
+      melee: inv.melee ? { ...inv.melee } : null,
+      smokes: inv.smokes,
+      selectedThrowable: inv.selectedThrowable,
+      spareScope: inv.spareScope,
+      scopeSwapRemainingMs: p.scopeSwap ? Math.max(0, p.scopeSwap.remainingMs) : 0,
     };
     return out;
   }
@@ -1367,7 +1704,7 @@ class SimWorld implements World {
   }
 
   /** Places a live grenade (tests only): first moves next tick, explodes fuseMs from now. */
-  debugSpawnGrenade(ownerId: PlayerId, pos: Vec3, vel: Vec3, fuseMs: number): GrenadeId {
+  debugSpawnGrenade(ownerId: PlayerId, pos: Vec3, vel: Vec3, fuseMs: number, kind: M2cThrowableId = 'grenade'): GrenadeId {
     const id = this.nextGrenadeId++;
     this.grenades.push({
       id,
@@ -1375,10 +1712,30 @@ class SimWorld implements World {
       body: { pos: { ...pos }, vel: { ...vel }, inWater: false },
       explodesAt: this._timeMs + fuseMs,
       spawnTick: this._tick,
+      kind,
     });
     return id;
   }
+
+  /** M2c tests: live rockets, clouds and broken panes. */
+  debugRockets(): readonly RocketEntity[] {
+    return this.rockets;
+  }
+
+  debugClouds(): SmokeCloudState[] {
+    return this.clouds;
+  }
+
+  debugBrokenPanes(): ReadonlySet<PaneId> {
+    return this.broken;
+  }
 }
+
+/** Gun slot for the snapshot: level and scope always written (absent level = L1). */
+const localSlot = (s: Inventory['slots'][number]): Inventory['slots'][number] =>
+  s ? { weapon: s.weapon, mag: s.mag, level: s.level ?? 1, scope: s.scope ?? null } : null;
+
+const cloneRocketState = (r: RocketState): RocketState => ({ ...r, pos: { ...r.pos }, vel: { ...r.vel } });
 
 const toGrenadeState = (g: GrenadeEntity): GrenadeState => ({
   id: g.id,
@@ -1387,6 +1744,7 @@ const toGrenadeState = (g: GrenadeEntity): GrenadeState => ({
   vel: { ...g.body.vel },
   explodesAt: g.explodesAt,
   inWater: g.body.inWater,
+  kind: g.kind,
 });
 
 /** Fisher-Yates shuffle in place with the given Rng. */
@@ -1407,7 +1765,11 @@ export interface DebugWorld extends World {
   debugZone(): ZoneRuntime | null;
   debugContext(): MovementContext;
   debugGrenades(): readonly GrenadeEntity[];
-  debugSpawnGrenade(ownerId: PlayerId, pos: Vec3, vel: Vec3, fuseMs: number): GrenadeId;
+  debugSpawnGrenade(ownerId: PlayerId, pos: Vec3, vel: Vec3, fuseMs: number, kind?: M2cThrowableId): GrenadeId;
+  /** M2c: live rockets, smoke clouds (mutable for tests) and broken panes. */
+  debugRockets(): readonly RocketEntity[];
+  debugClouds(): SmokeCloudState[];
+  debugBrokenPanes(): ReadonlySet<PaneId>;
 }
 
 /** Same as createWorld, typed with the test/tool hooks. */

@@ -266,3 +266,51 @@ Euler XYZ). `applyViewmodelPose(rig, id, adsAmount)` sets everything. For every 
 
 ## Future
 glTF hero characters, dusk/night palettes, emotes, cosmetics, attachments (scopes as pickups, M2b+).
+
+## M2c (built A1; spec `docs/art/M2c.md`)
+Tris = colour + hull at scale 1. Per-level weapon models (Addendum 2): columns are the model with no level (M2b look, no
+collar) and levels 1–4 (collar + pips + per-level dressing). "Worst" = L4 + the heaviest balance-compatible scope.
+Length (Z) stays within ±10 % across levels (tested). Held: 2 draw calls (+1 red-dot lens).
+| Weapon | no level | L1 | L2 | L3 | L4 | Worst (L4 + scope) | Length |
+|---|---|---|---|---|---|---|---|
+| pistol | 104 + 56 | 200 + 92 | 140 + 68 | 244 + 100 | 288 + 112 | 368 + 140 | 0.28 m |
+| smg | 160 + 112 | 256 + 148 | 196 + 124 | 300 + 156 | 344 + 168 | 476 + 292 | 0.59 m |
+| shotgun | 192 + 144 | 308 + 200 | 228 + 156 | 332 + 188 | 376 + 200 | 456 + 228 | 1.01 m |
+| rifle (red dot) | 240 + 152 | 336 + 188 | 276 + 164 | 380 + 196 | 424 + 208 | 660 + 412 | 0.99 m |
+| lmg (red dot) | 420 + 212 | 536 + 268 | 456 + 224 | 560 + 256 | 604 + 268 | 840 + 472 | 1.12 m |
+| dmr (4x) | 500 + 368 | 596 + 404 | 536 + 380 | 640 + 412 | 684 + 424 | 684 + 424 | 1.11 m |
+| sniper (8x) | 596 + 440 | 692 + 476 | 632 + 452 | 736 + 484 | 780 + 496 | 780 + 496 | 1.33 m |
+| revolver | 300 + 200 | 444 + 284 | 364 + 240 | 468 + 272 | 512 + 284 | 592 + 312 | 0.32 m |
+| dbshotgun | 368 + 268 | 464 + 304 | 404 + 280 | 508 + 312 | 552 + 324 | 552 + 324 | 0.97 m |
+| rpg | 512 + 300 | 676 + 404 | 576 + 340 | 680 + 372 | 724 + 384 | 724 + 384 | 1.00 m |
+| knife | 164 + 140 | 328 + 244 | 228 + 180 | 332 + 212 | 376 + 224 | – | 0.31 m |
+| machete | 248 + 56 | 392 + 140 | 312 + 96 | 416 + 128 | 460 + 140 | – | 0.61 m |
+| paddle | 216 + 216 | 380 + 320 | 280 + 256 | 384 + 288 | 428 + 300 | – | 1.35 m |
+Budget (tested): worst ≤ 860 colour / ≤ 520 hull.
+
+**Rails and scopes** (`scopes.ts`, `SCOPE_GEOMETRY`; eye = rail + scope.eye). Rails: pistol (0, 0.095, −0.04) 0.10;
+revolver (0, 0.105, −0.06) 0.10; smg (0, 0.11, −0.06) 0.16; shotgun (0, 0.115, −0.02) 0.16; dbshotgun (0, 0.1175, 0)
+0.10; rifle (0, 0.115, −0.06) 0.24; lmg (0, 0.135, −0.07) 0.24; dmr (0, 0.115, −0.06) 0.26; sniper (0, 0.11, −0.07) 0.30;
+rpg and melee none. The default optics reproduce the M2b eye points exactly (tested).
+| Scope | Tris | axisY | eye (scope frame) | footprint | Loot scale |
+|---|---|---|---|---|---|
+| scope_red_dot | 76 + 28 (+ lens 40) | 0.050 | (0, 0.05, 0.3325) | 0.07 | ×2.2 |
+| scope_2x | 168 + 124 | 0.052 | (0, 0.052, 0.18) | 0.09 | ×2.0 |
+| scope_4x | 352 + 232 | 0.057 | (0, 0.057, 0.24) | 0.17 | ×1.6 |
+| scope_8x | 352 + 232 | 0.068 | (0, 0.068, 0.33) | 0.23 | ×1.3 |
+
+**Other M2c models**
+| Asset | Factory | Tris | Notes |
+|---|---|---|---|
+| rocket | `createRocketModel()` | 236 + 228 | 0.5 m, child `nozzle` (0, 0, 0.26); instance it |
+| ammo_rocket | loot | 308 + 240 | one rocket on a striped crate |
+| smoke can | `createSmokeModel({ pin })` | 260 + 208 | same anchors as the frag (`fuse`, hand offset, flight ×1.5) |
+| helmet_4 Ship's Bell | `createHelmetModel(4)` | 312 + 264 | loop on top to +0.38 above the head centre |
+| vest_4 Surfboard | `createVestModel(4)` | 284 + 188 | tail fin out the back |
+| vests 1–3 (+ level badge) | `createVestModel(t)` | 180 + 96 / 320 + 240 / 198 + 132 | accents recoloured to the level colours |
+| level marker L1..L4 | `createLootMarker(n)` | disc + ring + rim + N pips (8 each) (+ ring2 L3+, beam L2+, sparkles L4) | unlit |
+| supply marker | `createLootMarker('supply')` | disc + white ring + rim | non-levelled items |
+| decor (9 kinds) | `getDecorParts(kind, variant)` | 48–128, no hull | see M2c.md §9.0 |
+| waterCooler | office kit | ≤ 220 body | 3.34 × 9.9 × 3.33 world |
+| island variants | `getPropParts(kind, variant)` | ≤ v0 + ~60 | palm 2, rock 3, crate 3, hut 3, umbrella 4 |
+| icons | `icons.ts` `M2C_ICON_SVG` | 32 × 32 SVG | 14 icons + the 2x reticle |

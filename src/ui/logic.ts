@@ -6,7 +6,7 @@
  * right = (cos yaw, 0, -sin yaw). The minimap is north-up with north = -Z.
  */
 import { hasKey, keysWithPrefix, t, type StringVars } from '../content/strings';
-import { isScopeSight, type ZoneTheme } from '../shared/balance';
+import { hasScopeOverlay, isScopeSight, type ZoneTheme } from '../shared/balance';
 import { MAX_NAME_LENGTH } from '../shared/constants';
 import type {
   AdsView,
@@ -15,20 +15,28 @@ import type {
   HudCookView,
   HudDropView,
   HudLocalView,
+  HudSlotView,
   HudZoneView,
 } from '../shared/contracts';
 import {
-  ARMOR_PIECES,
-  isArmorId,
-  type ActionFailReason,
+  isMeleeId,
+  isScopeId,
+  M2C_ARMOR_PIECES,
   type ArmorSlot,
-  type ArmorTier,
+  type ItemLevel,
   type ConnectionStatus,
-  type DeathCause,
-  type FailedAction,
-  type HeldId,
-  type ItemId,
+  type M2cActionFailReason,
+  type M2cArmorId,
+  type M2cArmorTier,
+  type M2cDeathCause,
+  type M2cFailedAction,
+  type M2cHeldId,
+  type M2cItemId,
+  type M2cSightType,
+  type M2cThrowableId,
+  type MapId,
   type MatchPhase,
+  type ScopeId,
   type Rect,
   type RoomPhase,
   type Stance,
@@ -199,11 +207,20 @@ export function connectionErrorKey(reason: string | undefined, wasJoined: boolea
 export interface KillInfo {
   killerName: string | null;
   victimName: string;
-  /** M2a: HeldId ('grenade' for explosion kills). */
-  weapon: HeldId | null;
-  cause: DeathCause;
-  /** M2a: the victim's own grenade killed them (see isSelfGrenadeKill). */
+  /** M2a: HeldId ('grenade' for explosion kills). M2c: 'rpg' for rocket kills, a MeleeId for melee kills. */
+  weapon: M2cHeldId | null;
+  cause: M2cDeathCause;
+  /** M2a: the victim's own grenade (M2c: or rocket) killed them (see isSelfBlastKill). */
   self?: boolean;
+  /** M2c: a rocket kill by a direct hit (playerKilled.direct). */
+  direct?: boolean;
+  /** M2c (P2): the local camera's line to the victim crossed smoke (playerKilled.throughSmoke). */
+  throughSmoke?: boolean;
+}
+
+/** M2c: a blast or rocket-impact death (frag or rocket). */
+export function isBlastCause(cause: M2cDeathCause): boolean {
+  return cause === 'explosion' || cause === 'rocket';
 }
 
 /**
@@ -212,26 +229,51 @@ export interface KillInfo {
  * victim's most recent explosion damage (playerDamaged arrives before playerKilled).
  */
 export function isSelfGrenadeKill(
-  cause: DeathCause,
+  cause: M2cDeathCause,
   killerId: number | null,
   victimId: number,
   lastBlastAttacker: number | null | undefined,
 ): boolean {
-  if (cause !== 'explosion') return false;
+  if (!isBlastCause(cause)) return false;
   return killerId === null || killerId === victimId || lastBlastAttacker === victimId;
 }
 
-/** Which `feed.*` variant group describes a kill. */
-export function killFeedPrefix(k: KillInfo, headshot: boolean): string {
+/** M2c name (UI M2c §5): the same rule covers rockets. */
+export const isSelfBlastKill = isSelfGrenadeKill;
+
+/** M2c: a rocket kill (cause 'rocket' impact, or a blast from the rpg). */
+export function isRocketKill(k: Pick<KillInfo, 'cause' | 'weapon'>): boolean {
+  return k.cause === 'rocket' || (k.cause === 'explosion' && k.weapon === 'rpg');
+}
+
+/**
+ * Which `feed.*` variant group describes a kill (UI M2c §8, narrative M2c §5 routing). `has` checks that a per-weapon
+ * group exists (feed.<meleeId>.N), so a future melee id without lines falls back to feed.meleeWeapon.
+ */
+export function killFeedPrefix(k: KillInfo, headshot: boolean, has: (prefix: string) => boolean = hasVariants): string {
   if (k.cause === 'zone') return 'feed.zone';
   if (k.cause === 'fall') return 'feed.fall';
+  if (isRocketKill(k)) {
+    if (k.self === true) return 'feed.rocketSelf';
+    if (k.killerName === null) return 'feed.generic';
+    return k.direct === true && has('feed.rocketDirect') ? 'feed.rocketDirect' : 'feed.rocket';
+  }
   if (k.cause === 'explosion' || k.weapon === 'grenade') {
     if (k.self === true) return 'feed.grenadeSelf';
     return k.killerName === null ? 'feed.generic' : 'feed.grenade';
   }
   if (k.killerName === null || k.weapon === null) return 'feed.generic';
   if (k.weapon === 'fists') return 'feed.melee';
+  if (isMeleeId(k.weapon)) {
+    if (headshot) return 'feed.meleeHeadshot';
+    return has(`feed.${k.weapon}`) ? `feed.${k.weapon}` : 'feed.meleeWeapon';
+  }
+  if (k.throughSmoke === true && has('feed.smoke')) return 'feed.smoke';
   return headshot ? 'feed.headshot' : 'feed.kill';
+}
+
+function hasVariants(prefix: string): boolean {
+  return keysWithPrefix(prefix).length > 0;
 }
 
 /** M2a: feed lines that get the grenade glyph. */
@@ -239,10 +281,35 @@ export function isGrenadeFeedPrefix(prefix: string): boolean {
   return prefix === 'feed.grenade' || prefix === 'feed.grenadeSelf';
 }
 
+/** M2c: feed lines that lead with the rocket glyph. */
+export function isRocketFeedPrefix(prefix: string): boolean {
+  return prefix === 'feed.rocket' || prefix === 'feed.rocketDirect' || prefix === 'feed.rocketSelf';
+}
+
+/**
+ * M2c (UI M2c §8): the weapon icon + level badge after a feed line / on the death card. null for fists, frags,
+ * smoke, zone, fall, self-kills and lines without a killer weapon.
+ */
+export function killWeaponTag(
+  k: Pick<KillInfo, 'weapon' | 'cause' | 'self' | 'killerName'>,
+  level: ItemLevel | null | undefined,
+): { weapon: M2cHeldId; level: ItemLevel | null } | null {
+  if (k.cause === 'zone' || k.cause === 'fall' || k.self === true || k.killerName === null) return null;
+  const w = k.weapon;
+  if (w === null || w === 'fists' || w === 'grenade' || w === 'smoke') return null;
+  return { weapon: w, level: level ?? null };
+}
+
 /** Death-card cause line key (+ whether it takes the killer's name). */
-export function deathCauseKey(cause: DeathCause, killerName: string | null, self: boolean): string | null {
+export function deathCauseKey(
+  cause: M2cDeathCause,
+  killerName: string | null,
+  self: boolean,
+  weapon: M2cHeldId | null = null,
+): string | null {
   if (cause === 'zone') return 'death.eliminatedByTide';
   if (cause === 'fall') return 'death.eliminatedByFall';
+  if (self && isRocketKill({ cause, weapon })) return 'death.eliminatedBySelfRocket';
   if (cause === 'explosion' && self) return 'death.eliminatedBySelf';
   return killerName ? 'death.eliminatedBy' : null;
 }
@@ -294,9 +361,9 @@ function mergeLiterals(parts: TemplatePart[]): TemplatePart[] {
 // ---------------------------------------------------------------------------------------------
 // Items / pickup prompt
 // ---------------------------------------------------------------------------------------------
-export type ItemCategory = 'gun' | 'ammo' | 'heal' | 'armor' | 'throwable';
+export type ItemCategory = 'gun' | 'melee' | 'ammo' | 'heal' | 'armor' | 'throwable' | 'scope';
 
-export function itemCategory(item: ItemId): ItemCategory {
+export function itemCategory(item: M2cItemId): ItemCategory {
   switch (item) {
     case 'pistol':
     case 'smg':
@@ -305,11 +372,19 @@ export function itemCategory(item: ItemId): ItemCategory {
     case 'lmg':
     case 'dmr':
     case 'sniper':
+    case 'dbshotgun':
+    case 'revolver':
+    case 'rpg':
       return 'gun';
+    case 'knife':
+    case 'machete':
+    case 'paddle':
+      return 'melee';
     case 'ammo_light':
     case 'ammo_heavy':
     case 'ammo_shell':
     case 'ammo_sniper':
+    case 'ammo_rocket':
       return 'ammo';
     case 'bandage':
     case 'medkit':
@@ -317,13 +392,26 @@ export function itemCategory(item: ItemId): ItemCategory {
     case 'vest_1':
     case 'vest_2':
     case 'vest_3':
+    case 'vest_4':
     case 'helmet_1':
     case 'helmet_2':
     case 'helmet_3':
+    case 'helmet_4':
       return 'armor';
     case 'grenade':
+    case 'smoke':
       return 'throwable';
+    case 'scope_red_dot':
+    case 'scope_2x':
+    case 'scope_4x':
+    case 'scope_8x':
+      return 'scope';
   }
+}
+
+/** M2c: armor ids including level 4 (M2C_ARMOR_PIECES). */
+export function isM2cArmorId(item: unknown): item is M2cArmorId {
+  return typeof item === 'string' && item in M2C_ARMOR_PIECES;
 }
 
 export interface PromptChoice {
@@ -336,17 +424,29 @@ export interface PromptChoice {
 
 /** Local fields the prompt reads. The M1-fix carry limits are optional until every producer fills them. */
 export type PromptLocal = Pick<HudLocalView, 'slots' | 'heals' | 'reserve'> &
-  Partial<Pick<HudLocalView, 'vest' | 'helmet' | 'grenades' | 'grenadeMax' | 'healMax' | 'reserveMax' | 'ammoType'>>;
+  Partial<
+    Pick<
+      HudLocalView,
+      'vest' | 'helmet' | 'grenades' | 'grenadeMax' | 'healMax' | 'reserveMax' | 'ammoType' | 'throwables' | 'throwableMax'
+    >
+  >;
+
+/** M2c: carried count and carry limit of a throwable (throwables / throwableMax, else the M2a grenade fields). */
+export function throwableCarry(id: M2cThrowableId, local: PromptLocal): { count: number; max: number | null } {
+  const count = local.throwables?.[id] ?? (id === 'grenade' ? (local.grenades ?? 0) : 0);
+  const max = local.throwableMax?.[id] ?? (id === 'grenade' ? (local.grenadeMax ?? null) : null);
+  return { count, max: typeof max === 'number' && max > 0 ? max : null };
+}
 
 /** True when the pickup will be refused because that item is already at its carry limit (unknown limit = false). */
-export function isCarryFull(item: ItemId, local: PromptLocal): boolean {
+export function isCarryFull(item: M2cItemId, local: PromptLocal): boolean {
   if (item === 'bandage' || item === 'medkit') {
     const max = local.healMax?.[item];
     return max !== undefined && max > 0 && (local.heals[item] ?? 0) >= max;
   }
-  if (item === 'grenade') {
-    const max = local.grenadeMax;
-    return typeof max === 'number' && max > 0 && (local.grenades ?? 0) >= max;
+  if (item === 'grenade' || item === 'smoke') {
+    const c = throwableCarry(item, local);
+    return c.max !== null && c.count >= c.max;
   }
   if (itemCategory(item) === 'ammo') {
     // HudView only carries the reserve of the active weapon's ammo type, so other ammo types stay "unknown".
@@ -362,22 +462,25 @@ export function wornPiece(local: Pick<PromptLocal, 'vest' | 'helmet'>, slot: Arm
 }
 
 /** armor.md "Equipping": a same-or-lower tier is refused unless the worn piece is broken (broken pieces are removed). */
-export function armorRefused(item: ItemId, local: Pick<PromptLocal, 'vest' | 'helmet'>): boolean {
-  if (!isArmorId(item)) return false;
-  const piece = ARMOR_PIECES[item];
+export function armorRefused(item: M2cItemId, local: Pick<PromptLocal, 'vest' | 'helmet'>): boolean {
+  if (!isM2cArmorId(item)) return false;
+  const piece = M2C_ARMOR_PIECES[item];
   const worn = wornPiece(local, piece.slot);
   return worn !== null && worn.durability > 0 && piece.tier <= worn.tier;
 }
 
 /** Refusal string for an armor item by its slot (ARCHITECTURE §14 table); generic when the item is unknown. */
-export function betterArmorKey(item: ItemId | null): string {
-  if (item !== null && isArmorId(item)) return ARMOR_PIECES[item].slot === 'vest' ? 'hud.vest.better' : 'hud.helmet.better';
+export function betterArmorKey(item: M2cItemId | null): string {
+  if (item !== null && isM2cArmorId(item)) return M2C_ARMOR_PIECES[item].slot === 'vest' ? 'hud.vest.better' : 'hud.helmet.better';
   return 'hud.armor.better';
 }
 
-/** "Carry full" string: the grenade pouch has its own line. */
-export function inventoryFullKey(item: ItemId | null): string {
-  return item === 'grenade' ? 'hud.grenade.full' : 'hud.inventory.full';
+/** "Carry full" string: the grenade, smoke and scope pouches have their own lines. */
+export function inventoryFullKey(item: M2cItemId | null): string {
+  if (item === 'grenade') return 'hud.grenade.full';
+  if (item === 'smoke') return 'hud.smoke.full';
+  if (item !== null && isScopeId(item)) return 'hud.scope.stashFull';
+  return 'hud.inventory.full';
 }
 
 /**
@@ -385,15 +488,16 @@ export function inventoryFullKey(item: ItemId | null): string {
  * interactPromptChanged (M2a); when absent the UI predicts from the HUD fields itself.
  */
 export function pickupPromptChoice(
-  item: ItemId,
+  item: M2cItemId,
   qty: number,
   local: PromptLocal | null,
-  refusal: ActionFailReason | null = null,
+  refusal: M2cActionFailReason | null = null,
 ): PromptChoice {
   const cat = itemCategory(item);
   if (refusal === 'betterArmor' || (cat === 'armor' && local !== null && armorRefused(item, local))) {
     return { key: betterArmorKey(item), usesCount: false, blocked: true };
   }
+  if (refusal === 'scopePouchFull') return { key: 'hud.scope.stashFull', usesCount: false, blocked: true };
   if (refusal === 'inventoryFull' || (local !== null && isCarryFull(item, local))) {
     return { key: inventoryFullKey(item), usesCount: false, blocked: true };
   }
@@ -401,8 +505,12 @@ export function pickupPromptChoice(
     const full = local !== null && local.slots[0].weapon !== null && local.slots[1].weapon !== null;
     return { key: full ? 'hud.pickup.swap' : 'hud.pickup', usesCount: false, blocked: false };
   }
+  if (cat === 'melee') {
+    const held = local?.slots[2]?.weapon ?? null;
+    return { key: held !== null && isMeleeId(held) ? 'hud.pickup.swap' : 'hud.pickup', usesCount: false, blocked: false };
+  }
   if (cat === 'armor') {
-    const worn = local !== null && isArmorId(item) ? wornPiece(local, ARMOR_PIECES[item].slot) : null;
+    const worn = local !== null && isM2cArmorId(item) ? wornPiece(local, M2C_ARMOR_PIECES[item].slot) : null;
     return { key: worn !== null ? 'hud.pickup.upgrade' : 'hud.pickup', usesCount: false, blocked: false };
   }
   if (cat === 'ammo' || qty > 1) return { key: 'hud.pickup.ammo', usesCount: true, blocked: false };
@@ -411,18 +519,229 @@ export function pickupPromptChoice(
 
 /** Tier + durability detail for an armor pickup ("Lv.2" and "31/55"); null for other items. */
 export function armorPromptDetail(
-  item: ItemId,
+  item: M2cItemId,
   durability: number | null,
   maxDurability: number | null,
-): { tier: ArmorTier; tierKey: string; durability: string | null } | null {
-  if (!isArmorId(item)) return null;
-  const tier = ARMOR_PIECES[item].tier;
+): { tier: M2cArmorTier; tierKey: string; durability: string | null } | null {
+  if (!isM2cArmorId(item)) return null;
+  const tier = M2C_ARMOR_PIECES[item].tier;
   const cur = durability !== null && Number.isFinite(durability) ? Math.max(0, Math.ceil(durability)) : null;
   return {
     tier,
     tierKey: `gear.tier.${tier}`,
     durability: cur === null ? null : maxDurability !== null && maxDurability > 0 ? `${cur}/${Math.ceil(maxDurability)}` : String(cur),
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2c: item levels (docs/ui/M2c.md §1, §3)
+// ---------------------------------------------------------------------------------------------
+export interface LevelBadgeModel {
+  numeral: string;
+  /** CSS token / data-level value. */
+  token: 'lv1' | 'lv2' | 'lv3' | 'lv4';
+  /** L4 only: the sparkle corner (a shape cue on top of the numeral). */
+  sparkle: boolean;
+}
+
+export function levelBadgeModel(level: ItemLevel | null | undefined): LevelBadgeModel | null {
+  if (level !== 1 && level !== 2 && level !== 3 && level !== 4) return null;
+  return { numeral: String(level), token: `lv${level}`, sparkle: level === 4 };
+}
+
+/** "Lv.3 Hot" (level.label), or '' without a level. */
+export function levelLabel(level: ItemLevel | null | undefined): string {
+  if (level !== 1 && level !== 2 && level !== 3 && level !== 4) return '';
+  return t('level.label', { short: t(`level.${level}.short`), name: t(`level.${level}.name`) });
+}
+
+export type LevelCompare = 'up' | 'down' | 'same';
+
+/** ▲ / ▼ / = for a same-id swap; null when either level is unknown. */
+export function levelCompare(next: ItemLevel | null | undefined, current: ItemLevel | null | undefined): LevelCompare | null {
+  if (next == null || current == null) return null;
+  return next > current ? 'up' : next < current ? 'down' : 'same';
+}
+
+/** Pickup prompt inputs from interactPromptChanged (M2c fields optional; absent = M2a behaviour). */
+export interface PromptInput {
+  item: M2cItemId;
+  qty: number;
+  refusal: M2cActionFailReason | null;
+  level?: ItemLevel | null;
+  /** Scope on a ground gun. */
+  scope?: ScopeId | null;
+  replacesSlot?: number | null;
+  scopeTarget?: 0 | 1 | 'pouch' | null;
+}
+
+export interface PromptModel extends PromptChoice {
+  /** Template vars: item (name, with level.item when levelled), current (the replaced item's name). */
+  vars: StringVars;
+  level: ItemLevel | null;
+  /** The replaced item (swap prompts), its level, and the compare tag (same id only). */
+  replaced: { item: M2cHeldId; level: ItemLevel | null } | null;
+  compare: LevelCompare | null;
+  /** Scope pickups: where it goes. */
+  scopeTarget: { slot: 0 | 1; weapon: M2cHeldId | null } | 'pouch' | null;
+  /** "Fits: …" names, when the scope fits neither carried gun. */
+  fitsKey: boolean;
+  /** Extra detail key (e.g. hud.melee.replacesFists). */
+  noteKey: string | null;
+  /** Scope mounted on a ground gun. */
+  groundScope: ScopeId | null;
+}
+
+/** Slot fields the prompt reads (M2c optional). */
+type PromptSlots = PromptLocal['slots'];
+
+/**
+ * M2c pickup prompt (UI M2c §3, §16.3). Wraps the M2a choice with levels, swapFrom / levelUp, the compare tag, the melee
+ * note and the scope target. `has` guards keys narrative may not have yet.
+ */
+export function pickupPromptModel(p: PromptInput, local: PromptLocal | null, has: (key: string) => boolean = hasKey): PromptModel {
+  const base = pickupPromptChoice(p.item, p.qty, local, p.refusal);
+  const cat = itemCategory(p.item);
+  const level = p.level ?? null;
+  const name = t(`item.${p.item}.name`);
+  const model: PromptModel = {
+    ...base,
+    vars: { item: name, count: p.qty },
+    level,
+    replaced: null,
+    compare: null,
+    scopeTarget: null,
+    fitsKey: false,
+    noteKey: null,
+    groundScope: cat === 'gun' ? (p.scope ?? null) : null,
+  };
+  if (base.blocked || local === null) return model;
+  const slots: PromptSlots = local.slots;
+  if (cat === 'gun' || cat === 'melee') {
+    const idx = p.replacesSlot ?? null;
+    const replacedSlot = idx !== null && idx >= 0 && idx <= 2 ? (slots[idx as 0 | 1 | 2] as HudSlotView | undefined) : undefined;
+    const replacedWeapon = replacedSlot?.weapon ?? null;
+    if (replacedSlot && replacedWeapon !== null && replacedWeapon !== 'fists') {
+      const rLevel = replacedSlot.level ?? null;
+      model.replaced = { item: replacedWeapon, level: rLevel };
+      const same = replacedWeapon === p.item;
+      model.compare = same ? levelCompare(level, rLevel) : null;
+      if (same && model.compare === 'up' && has('hud.pickup.levelUp')) model.key = 'hud.pickup.levelUp';
+      else if (has('hud.pickup.swapFrom')) {
+        model.key = 'hud.pickup.swapFrom';
+        model.vars = { ...model.vars, current: t(`item.${replacedWeapon}.name`) };
+      } else model.key = 'hud.pickup.swap';
+    }
+    if (cat === 'melee' && (slots[2]?.weapon ?? 'fists') === 'fists' && has('hud.melee.replacesFists')) {
+      model.noteKey = 'hud.melee.replacesFists';
+    }
+    return model;
+  }
+  if (cat === 'scope') {
+    const target = p.scopeTarget ?? null;
+    if (target === 'pouch') model.scopeTarget = 'pouch';
+    else if (target === 0 || target === 1) model.scopeTarget = { slot: target, weapon: slots[target]?.weapon ?? null };
+    if (isScopeId(p.item)) {
+      const fitsEither = [0, 1].some((i) => (slots[i as 0 | 1] as HudSlotView | undefined)?.compatibleScopes?.includes(p.item as ScopeId) === true);
+      const known = [0, 1].some((i) => (slots[i as 0 | 1] as HudSlotView | undefined)?.compatibleScopes !== undefined);
+      model.fitsKey = known && !fitsEither;
+    }
+  }
+  return model;
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2c: throwable slot (UI M2c §2.1)
+// ---------------------------------------------------------------------------------------------
+export interface ThrowableSlotModel {
+  /** The selected type (main icon). */
+  main: M2cThrowableId;
+  mainCount: number;
+  /** The other type, only when carried (mini chip). */
+  other: M2cThrowableId | null;
+  otherCount: number;
+  /** Nothing carried at all (dashed, grey). */
+  empty: boolean;
+  /** The "[4] Swap" hint: only while the slot is active and both types are carried. */
+  cycleHint: boolean;
+}
+
+export function throwableSlotModel(local: PromptLocal & Partial<Pick<HudLocalView, 'throwableSelected' | 'activeSlot'>>): ThrowableSlotModel {
+  const selected: M2cThrowableId = local.throwableSelected ?? ((local.slots[3]?.weapon as M2cHeldId | null | undefined) === 'smoke' ? 'smoke' : 'grenade');
+  const other: M2cThrowableId = selected === 'grenade' ? 'smoke' : 'grenade';
+  const mainCount = throwableCarry(selected, local).count;
+  const otherCount = throwableCarry(other, local).count;
+  return {
+    main: selected,
+    mainCount,
+    other: otherCount > 0 ? other : null,
+    otherCount,
+    empty: mainCount <= 0 && otherCount <= 0,
+    cycleHint: local.activeSlot === 3 && mainCount > 0 && otherCount > 0,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2c: sight chip and scope pouch (UI M2c §16.1, §16.2)
+// ---------------------------------------------------------------------------------------------
+export interface SightChipModel {
+  /** none = built-in iron (or not a gun); builtIn = outline chip; mounted = filled chip. */
+  kind: 'none' | 'builtIn' | 'mounted';
+  /** "2×" / "4×" / "8×", or null for the red-dot glyph. */
+  label: string | null;
+  sight: M2cSightType;
+}
+
+const ZOOM_LABEL: Partial<Record<M2cSightType, string>> = { scope_2x: '2×', scope_4x: '4×', scope_8x: '8×' };
+
+export function sightChipModel(slot: Pick<HudSlotView, 'weapon' | 'scope' | 'sight' | 'builtInSight'> | null | undefined): SightChipModel {
+  const none: SightChipModel = { kind: 'none', label: null, sight: 'none' };
+  if (!slot || slot.weapon === null) return none;
+  const sight = slot.sight ?? 'none';
+  if (sight === 'none' || sight === 'iron') return { ...none, sight };
+  const mounted = slot.scope != null;
+  return { kind: mounted ? 'mounted' : 'builtIn', label: ZOOM_LABEL[sight] ?? null, sight };
+}
+
+/** Scope id -> sight type (balance scopes.<id>.sight is the same mapping by decision). */
+export function scopeSight(scope: ScopeId): M2cSightType {
+  return scope === 'scope_red_dot' ? 'red_dot' : scope;
+}
+
+export interface PouchChip {
+  scope: ScopeId;
+  /** Fits the active gun (full opacity); else faded AND slashed. */
+  fits: boolean;
+}
+
+export function pouchModel(stash: readonly ScopeId[] | undefined, active: Pick<HudSlotView, 'compatibleScopes'> | null | undefined): PouchChip[] {
+  const compatible = active?.compatibleScopes ?? [];
+  return (stash ?? []).slice(0, 4).map((scope) => ({ scope, fits: compatible.includes(scope) }));
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2c: smoke and per-match layout
+// ---------------------------------------------------------------------------------------------
+/** UI M2c §6.2: obscured body/head/armor markers hide; the kill marker always shows. */
+export function hitMarkerVisible(obscured: boolean | undefined, killed: boolean): boolean {
+  return killed || obscured !== true;
+}
+
+/** "Forecast: Mango Hour" (lobby.look.<mapId> + look.<mapId>.<look>), or null when either key is missing. */
+export function lookLine(mapId: MapId | null | undefined, look: string | null | undefined, has: (key: string) => boolean = hasKey): string | null {
+  if (!mapId || !look) return null;
+  const lineKey = `lobby.look.${mapId}`;
+  const nameKey = `look.${mapId}.${look}`;
+  if (!has(lineKey) || !has(nameKey)) return null;
+  return t(lineKey, { look: t(nameKey) });
+}
+
+/** Look family for the map-card glyph (sun / sunset / moon / cloud); the text always carries the meaning. */
+export function lookGlyph(look: string | null | undefined): 'sun' | 'sunset' | 'moon' | 'cloud' {
+  if (look === 'golden' || look === 'evening') return 'sunset';
+  if (look === 'afterHours') return 'moon';
+  if (look === 'overcast') return 'cloud';
+  return 'sun';
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -433,9 +752,9 @@ export function armorPromptDetail(
  * `promptItem` (the loot the prompt points at) picks the vest/helmet/grenade variants (ARCHITECTURE §14 table).
  */
 export function actionFailedKey(
-  action: FailedAction,
-  reason: ActionFailReason,
-  promptItem: ItemId | null = null,
+  action: M2cFailedAction,
+  reason: M2cActionFailReason,
+  promptItem: M2cItemId | null = null,
   has: (key: string) => boolean = hasKey,
 ): string | null {
   if (action === 'fire') return null;
@@ -451,7 +770,14 @@ export function actionFailedKey(
     case 'noAmmo':
       return 'hud.ammo.empty';
     case 'noGrenades':
-      return 'hud.grenade.none';
+      // M2c: the throwable slot covers frags and smoke.
+      return has('hud.throwable.none') ? 'hud.throwable.none' : 'hud.grenade.none';
+    case 'scopePouchFull':
+      return 'hud.scope.pouchFull';
+    case 'scopeCantFit':
+      return 'hud.scope.cantFit';
+    case 'scopeNoneFits':
+      return 'hud.scope.noneFits';
     case 'noHeadroom':
       return 'hud.stance.noRoom';
     case 'tooDeep':
@@ -788,7 +1114,8 @@ export function minimapPoiLabel(nameKey: string): string {
 // ---------------------------------------------------------------------------------------------
 // M2a: aim down sights (HudView.ads)
 // ---------------------------------------------------------------------------------------------
-export type ScopeSight = 'scope_4x' | 'scope_8x';
+/** M2c: the sights with a full-screen overlay (hasScopeOverlay: 2x, 4x, 8x). */
+export type ScopeSight = 'scope_2x' | 'scope_4x' | 'scope_8x';
 export type DotSight = 'iron' | 'red_dot';
 
 export interface AdsReticle {
@@ -820,13 +1147,14 @@ export { isScopeSight };
 export function adsReticle(ads: AdsView | null, firstPerson = false): AdsReticle {
   if (!ads || ads.sight === 'none') return { hip: 1, gapScale: 1, dot: null, dotOpacity: 0, scope: null };
   const b = q2(ads.cameraBlend);
-  if (isScopeSight(ads.sight)) {
-    if (ads.scoped) return { hip: 0, gapScale: 0, dot: null, dotOpacity: 0, scope: ads.sight };
+  const sight = ads.sight as Exclude<M2cSightType, 'none'>;
+  if (hasScopeOverlay(sight)) {
+    if (ads.scoped) return { hip: 0, gapScale: 0, dot: null, dotOpacity: 0, scope: sight };
     if (firstPerson) return { hip: q2(1 - b), gapScale: q2(1 - b), dot: null, dotOpacity: 0, scope: null };
     return { hip: q2(1 - b), gapScale: q2(1 - b), dot: b > 0 ? 'iron' : null, dotOpacity: b, scope: null };
   }
   if (firstPerson) return { hip: q2(1 - b), gapScale: q2(1 - b), dot: null, dotOpacity: 0, scope: null };
-  return { hip: q2(1 - b), gapScale: q2(1 - b), dot: b > 0 ? ads.sight : null, dotOpacity: b, scope: null };
+  return { hip: q2(1 - b), gapScale: q2(1 - b), dot: b > 0 ? sight : null, dotOpacity: b, scope: null };
 }
 
 /**
@@ -847,7 +1175,8 @@ export function reticleMode(o: {
 }): ReticleMode {
   if (o.alive && o.weapon !== null) {
     if (o.airborne || o.cameraView === 'orbit' || o.cameraView === 'chase') return 'none';
-    return o.weapon === 'fists' || o.weapon === 'grenade' ? 'dot' : 'full';
+    // M2c: melee weapons and the smoke can are dot-only too (UI M2c §4).
+    return o.weapon === 'fists' || o.weapon === 'grenade' || o.weapon === 'smoke' || isMeleeId(o.weapon) ? 'dot' : 'full';
   }
   return o.spectating && o.cameraView === 'firstPerson' ? 'spectate' : 'none';
 }
@@ -857,7 +1186,7 @@ export function reticleMode(o: {
 // ---------------------------------------------------------------------------------------------
 export interface GearView {
   state: 'none' | 'worn' | 'broken';
-  tier: 0 | ArmorTier;
+  tier: 0 | M2cArmorTier;
   /** 0..1, quantised. */
   ratio: number;
   /** "31/55", "Broken" or '' (empty slot). */
@@ -867,7 +1196,7 @@ export interface GearView {
 }
 
 /** `brokenTier` = tier of a piece that broke recently (shown crossed out for a moment), else 0. */
-export function gearView(piece: HudArmorView | null, brokenTier: 0 | ArmorTier = 0): GearView {
+export function gearView(piece: HudArmorView | null, brokenTier: 0 | M2cArmorTier = 0): GearView {
   if (piece && piece.durability > 0) {
     const r = ratio(piece.durability, piece.maxDurability);
     return {

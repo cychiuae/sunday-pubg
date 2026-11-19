@@ -90,6 +90,40 @@ export const palette = {
   gunWood: 0xb9783f,
   gunTip: 0xfff3d6,
 
+  // M2c weapons (docs/art/M2c.md §2)
+  revolver: 0x4fb4ee, // sky frame
+  sandDollar: 0xf2e2c2, // revolver cylinder
+  sandDollarDots: 0xc9a273,
+  walnut: 0x8a5a34,
+  dbBarrel: 0x7fddb8, // mint
+  waffle: 0xd9a05b,
+  waffleDark: 0xb07a3a,
+  scoopPink: 0xff8fb1,
+  rpgTube: 0xfff4e2, // cream
+  rpgStripe: 0xff5a5f, // coral spiral
+  sunburst: 0xffc43d,
+  steel: 0xd3dce6,
+  steelEdge: 0xf4f8fb,
+  steelSpine: 0x9aa6b4,
+  knifeHandle: 0xff7a5c,
+  macheteHandle: 0x34983f,
+  macheteWrap: 0x4cbb4a,
+  paddleTip: 0x2ec4b6,
+  // Smoke can (M2c §4)
+  smokeCan: 0xc9b6f2,
+  smokeHoop: 0xffb3d1,
+  smokeCap: 0xffd1e6,
+  smokeCap2: 0xf2b8f0,
+  smokeLight: 0xfbeaf6,
+  smokeMid: 0xebcff0,
+  smokeShadow: 0xc9aedf,
+  smokeVeil: 0xefddf2,
+  // Item levels (M2c §1): see levelCollar.ts LEVEL_COLORS
+  level1: 0xb8e7ff,
+  level2: 0xfff14d,
+  level3: 0xf2590d,
+  level4: 0xb963e3,
+
   // Sights (M2a)
   lensGlass: 0x9fe8f0,
   redDot: 0xff3b5c,
@@ -117,6 +151,19 @@ export const palette = {
   armor3Dark: 0x2a3342,
   armor3Accent: 0xff5c8a, // hibiscus pink
   armor3Accent2: 0xffc43d, // mango
+  // M2c: each tier's accent becomes its LEVEL colour (docs/art/M2c.md §1.5); the main colours stay.
+  armor1Level: 0xb8e7ff, // L1 ice: hat band, vest hem cord and pocket flaps
+  armor2Level: 0xfff14d, // L2 lemon: stripe, collar, side stripes
+  armor3Level: 0xf2590d, // L3 orange: brow lip, plate rims, crest, emblems
+  // L4 (from the wreck): Ship's Bell Helmet + Surfboard Vest
+  bellBrass: 0xc98b2e,
+  bellHighlight: 0xf2c46a,
+  bellLip: 0x8e5f1e,
+  armor4Level: 0xb963e3, // L4 UV violet: bell rope band, surfboard deck
+  armor4: 0xb963e3, // level 4 armor accent (= armor4Level; Vfx tier colour)
+  boardCream: 0xfff4e2,
+  tapeGrey: 0xc9ced6,
+  waxDot: 0xfff14d,
 
   // Heals / armor
   bandage: 0xfff8ee,

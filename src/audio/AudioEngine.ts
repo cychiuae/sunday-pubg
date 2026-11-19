@@ -15,11 +15,17 @@
  * on the sfx bus), and hands the per-map balance to the director. The carrier drop runs persistent DropLayers driven
  * by the director's DropTracker every frame; aboard, a cabin low-pass sits on the world (sfx + ambience). Grenade
  * fuse ticks come from setGrenades (FrameView.grenades), whose serverTime is also the clock for the carrier position.
+ *
+ * M2c (docs/audio/M2c.md): melee, the new guns, rockets (RocketLayers whistles from setRockets, dead-reckoned from
+ * rocketFired while main.ts does not call it), smoke (hiss loops started from smokeDeployed and setSmokes; an
+ * ambience-only "cocoon" low-pass while the listener is inside a cloud), glass, scopes, the level sparkle, and the
+ * per-match look preset (ambience colour + detail one-shots).
  */
 import type { Balance } from '../shared/balance';
-import type { GrenadeView, IAudio, UiSoundId } from '../shared/contracts';
+import type { GrenadeView, IAudio, RocketView, SmokeCloudView, UiSoundId } from '../shared/contracts';
 import type { EventBus, GameEventName, GameEvents } from '../shared/events';
-import type { Vec3 } from '../shared/types';
+import { rocketPosAt, rocketVelAt } from '../shared/rocket';
+import type { RocketId, RocketState, Vec3 } from '../shared/types';
 import { Ambience } from './Ambience';
 import { AudioDirector, type AudioCommand, type PlayCommand } from './AudioDirector';
 import { AUDIO_TUNING, CUES, type BusId, type CueId } from './cues';
@@ -28,6 +34,7 @@ import { Ducker } from './Ducker';
 import { FuseTicker } from './fuseTicks';
 import { createNoiseBank, createReverbBuffer, type NoiseBank } from './noise';
 import { RECIPES } from './recipes';
+import { RocketLayers } from './RocketLayers';
 import {
   AIR_FILTER_BYPASS_HZ,
   airCutoffHz,
@@ -39,7 +46,7 @@ import {
   variation,
   volumeToGain,
 } from './spatial';
-import type { AmbienceScene } from './soundMap';
+import { lookOf, type AmbienceLook, type AmbienceScene, type LookDetail } from './soundMap';
 import type { Voice } from './synth';
 import type { ZoneTheme } from '../shared/balance';
 import { VoicePool, type PoolVoice } from './VoicePool';
@@ -91,6 +98,18 @@ interface Graph {
   noise: NoiseBank;
   ambience: Ambience;
   drop: DropLayers;
+  /** M2c: ambience-only low-pass while the listener is inside a smoke cloud (idle 20 kHz). */
+  cocoon: BiquadFilterNode;
+  /** M2c: rocket whistle emitters. */
+  rockets: RocketLayers;
+}
+
+/** M2c: a rocket the engine dead-reckons (rocketFired) while main.ts does not call setRockets. */
+interface TrackedRocket {
+  rocket: RocketState;
+  gravity: number;
+  /** Server ms after which it is dropped (max flight time + slack), or null when unknown. */
+  until: number | null;
 }
 
 /** One playing sound: the Voice handed to its recipe plus the bookkeeping to stop and disconnect it. */
@@ -110,6 +129,7 @@ class ActiveVoice implements Voice {
     readonly durationS: number,
     readonly noise: NoiseBank,
     readonly rand: () => number,
+    readonly params: readonly number[] | undefined,
   ) {}
   addSource(s: AudioScheduledSourceNode): void {
     this.sources.push(s);
@@ -187,6 +207,21 @@ export class AudioEngine implements IAudio {
   private cabinOn = false;
   private cabinDuckUntil = 0;
 
+  // M2c
+  private look: AmbienceLook = lookOf('island', 'noon');
+  private lookId = 'noon';
+  /** Seconds to the next detail one-shot of each of the look's details. */
+  private readonly detailTimers: number[] = [];
+  private readonly detailPos: Vec3 = { x: 0, y: 0, z: 0 };
+  private readonly trackedRockets = new Map<RocketId, TrackedRocket>();
+  /** Pooled view objects for the dead-reckoned rockets, and the per-frame list handed to RocketLayers. */
+  private readonly fallbackPool: RocketView[] = [];
+  private readonly fallbackViews: RocketView[] = [];
+  /** Server ms of the last setRockets call (NaN = never): the dead-reckoning fallback runs only while it is stale. */
+  private rocketsFedAt = Number.NaN;
+  private inSmoke = false;
+  private smokeDuckUntil = 0;
+
   private readonly releaseVoice = (pv: PoolVoice<ActiveVoice>): void => {
     const v = pv.handle;
     if (v.loopKey !== null && this.loops.get(v.loopKey) === pv) this.loops.delete(v.loopKey);
@@ -200,6 +235,7 @@ export class AudioEngine implements IAudio {
     this.rand = options.rand ?? Math.random;
     this.gullTimer = this.nextGullDelay();
     this.keysTimer = this.nextKeysDelay();
+    this.resetDetailTimers();
     this.director = new AudioDirector((cmd) => this.exec(cmd), {
       lowHealthHp: resolveLowHealthHp(options.lowHealthHp),
       balance: options.balance,
@@ -248,6 +284,15 @@ export class AudioEngine implements IAudio {
     this.sub(bus, 'interactPromptChanged', (e) => d.interactPromptChanged(e));
     this.sub(bus, 'spectateTargetChanged', (e) => d.spectateTargetChanged(e));
     this.sub(bus, 'connectionStatus', (e) => d.connectionStatus(e));
+    // M2c
+    this.sub(bus, 'meleeSwing', (e) => d.meleeSwing(e));
+    this.sub(bus, 'meleeHit', (e) => d.meleeHit(e));
+    this.sub(bus, 'rocketFired', (e) => d.rocketFired(e));
+    this.sub(bus, 'rocketDud', (e) => d.rocketDud(e));
+    this.sub(bus, 'smokeDeployed', (e) => d.smokeDeployed(e));
+    this.sub(bus, 'glassBroken', (e) => d.glassBroken(e));
+    this.sub(bus, 'scopeChanged', (e) => d.scopeChanged(e));
+    this.sub(bus, 'throwableCycled', (e) => d.throwableCycled(e));
 
     // UI sounds arrive through playUi() (Ui -> UiCallbacks.playUiSound -> main.ts), and main.ts calls unlock() on
     // every pointerdown/keydown, so the only document listener left is tab visibility (suspend while hidden).
@@ -307,6 +352,7 @@ export class AudioEngine implements IAudio {
 
     g.ambience.update(now);
     this.updateDrop(dt, now);
+    this.updateRocketFallback();
 
     for (const bus of BUS_IDS) {
       const db = this.ducker.targetDb(bus, now);
@@ -327,6 +373,8 @@ export class AudioEngine implements IAudio {
         this.play({ kind: 'play', cue: 'heartbeat', pos: null });
       }
     }
+
+    this.updateDetails(step);
 
     if (this.scene === 'indoor') {
       this.keysTimer -= step;
@@ -365,9 +413,12 @@ export class AudioEngine implements IAudio {
     for (const d of this.dying) d.voice.disconnectAll();
     this.dying.length = 0;
     this.loops.clear();
+    this.trackedRockets.clear();
     if (this.graph) {
       this.graph.ambience.dispose();
       this.graph.drop.dispose();
+      this.graph.rockets.dispose();
+      this.graph.cocoon.disconnect();
       this.teardownReverb(this.graph);
       this.graph.cabin.disconnect();
       this.graph.dropBus.disconnect();
@@ -406,7 +457,77 @@ export class AudioEngine implements IAudio {
     this.fuseTicker.update(grenades, serverTime, this.listenerPos, this.director.fuseMs, this.onFuseTick);
   }
 
+  /**
+   * IAudio.setRockets (M2c §4.2): live rockets at serverTime (FrameView.rockets, from the shared rocketPosAt). Drives
+   * the whistle emitters (nearest 3) and fly-bys. While this is called, the rocketFired dead reckoning is off.
+   */
+  setRockets(rockets: readonly RocketView[], serverTime: number): void {
+    if (this.disposed || !Number.isFinite(serverTime)) return;
+    this.rocketsFedAt = serverTime;
+    this.serverNowMs = serverTime;
+    this.clockFresh = true;
+    const ctx = this.ctx;
+    const g = this.graph;
+    if (!ctx || !g || ctx.state !== 'running') return;
+    g.rockets.update(rockets, serverTime, this.listenerPos, this.onFlyby);
+  }
+
+  /**
+   * IAudio.setSmokes (M2c §5): live clouds at serverTime (FrameView.smokes; radius from the shared smokeRadiusAt).
+   * Starts the hiss of clouds this client never saw deploy (late joiners) and drives the ambience cocoon while the
+   * listener is inside one. Gameplay sounds are never muffled by smoke (M2c §5.3).
+   */
+  setSmokes(clouds: readonly SmokeCloudView[], serverTime: number): void {
+    if (this.disposed || !Number.isFinite(serverTime)) return;
+    const ctx = this.ctx;
+    const g = this.graph;
+    if (!ctx || !g) return;
+    // Only while running: a hiss dropped by a suspended context must start once the context resumes.
+    if (ctx.state === 'running') this.director.smokesSeen(clouds, serverTime);
+    let inside = false;
+    const p = this.listenerPos;
+    for (const c of clouds) {
+      const dx = p.x - c.center.x;
+      const dy = p.y - c.center.y;
+      const dz = p.z - c.center.z;
+      if (c.radius > 0 && dx * dx + dy * dy + dz * dz < c.radius * c.radius) {
+        inside = true;
+        break;
+      }
+    }
+    const now = ctx.currentTime;
+    if (inside !== this.inSmoke) {
+      this.inSmoke = inside;
+      g.cocoon.frequency.setTargetAtTime(inside ? AUDIO_TUNING.cocoonLowpassHz : MUFFLE_OPEN_HZ, now, 0.25);
+    }
+    // Re-arm the ambience duck a few times a second while inside (no per-frame allocation).
+    if (inside && now + 0.1 >= this.smokeDuckUntil) {
+      this.ducker.duck('ambience', AUDIO_TUNING.cocoonAmbienceDb, now, 0.3);
+      this.smokeDuckUntil = now + 0.3;
+    }
+  }
+
   // --- Extra API (not on IAudio) -----------------------------------------------------------
+
+  /** M2c: true while the listener is inside a smoke cloud (tests). */
+  get inSmokeCocoon(): boolean {
+    return this.inSmoke;
+  }
+
+  /** M2c: the active look id (tests). */
+  get ambienceLook(): string {
+    return this.lookId;
+  }
+
+  /** M2c: rocket whistle emitters (tests). */
+  get rocketLayers(): RocketLayers | null {
+    return this.graph?.rockets ?? null;
+  }
+
+  /** M2c: rockets dead-reckoned from rocketFired (tests). */
+  get trackedRocketCount(): number {
+    return this.trackedRockets.size;
+  }
 
   /** Live pooled voices of one cue (tests and debugging). */
   voicesOf(cue: CueId): number {
@@ -451,7 +572,19 @@ export class AudioEngine implements IAudio {
   private exec(cmd: AudioCommand): void {
     if (cmd.kind === 'map') {
       // Remembered before unlock too: buildGraph starts in this scene.
-      this.applyMap(cmd.scene, cmd.theme);
+      this.applyMap(cmd.scene, cmd.theme, cmd.look);
+      return;
+    }
+    if (cmd.kind === 'rocketFired') {
+      const T = AUDIO_TUNING;
+      if (this.trackedRockets.size >= 16) this.trackedRockets.clear();
+      const until = cmd.maxFlightMs !== null ? cmd.rocket.firedAt + cmd.maxFlightMs + T.rocketMissingMs : null;
+      this.trackedRockets.set(cmd.rocket.id, { rocket: cmd.rocket, gravity: cmd.gravity, until });
+      return;
+    }
+    if (cmd.kind === 'rocketGone') {
+      this.trackedRockets.delete(cmd.id);
+      this.graph?.rockets.stop(cmd.id);
       return;
     }
     const ctx = this.ctx;
@@ -514,9 +647,10 @@ export class AudioEngine implements IAudio {
     variation(def.pitchJitter, def.gainJitterDb, this.rand, this.vary);
     const out = ctx.createGain();
     out.gain.value = def.gain * (cmd.gain ?? 1) * this.vary[1] * distGain;
+    const delay = cmd.delayS !== undefined && cmd.delayS > 0 && Number.isFinite(cmd.delayS) ? cmd.delayS : 0;
     const voice = new ActiveVoice(
-      ctx, out, now + LOOKAHEAD_S, this.vary[0], cmd.intensity ?? 0, cmd.variant ?? '', pos === null, d,
-      cmd.durationS ?? 0, g.noise, this.rand,
+      ctx, out, now + LOOKAHEAD_S + delay, this.vary[0], cmd.intensity ?? 0, cmd.variant ?? '', pos === null, d,
+      cmd.durationS ?? 0, g.noise, this.rand, cmd.params,
     );
     voice.addNode(out);
 
@@ -592,15 +726,27 @@ export class AudioEngine implements IAudio {
     this.kill(pv, now, fade);
   }
 
-  private applyMap(scene: AmbienceScene, theme: ZoneTheme): void {
+  private applyMap(scene: AmbienceScene, theme: ZoneTheme, look: string): void {
     this.scene = scene;
     this.theme = theme;
+    if (look !== this.lookId || this.look.scene !== (scene === 'indoor' ? 'indoor' : 'island')) {
+      this.lookId = look;
+      this.look = lookOf(scene, look);
+      this.gullTimer = this.nextGullDelay();
+      this.keysTimer = this.nextKeysDelay();
+      this.resetDetailTimers();
+    }
     this.fuseTicker.reset();
     this.serverNowMs = Number.NaN;
     this.clockFresh = false;
+    this.trackedRockets.clear();
+    this.rocketsFedAt = Number.NaN;
+    this.inSmoke = false;
     const g = this.graph;
     if (!g) return;
-    g.ambience.setScene(scene, theme);
+    g.rockets.reset();
+    if (this.ctx) g.cocoon.frequency.setTargetAtTime(MUFFLE_OPEN_HZ, this.ctx.currentTime, 0.05);
+    g.ambience.setScene(scene, theme, look);
     if (scene === 'indoor') this.ensureReverb(g);
     else this.teardownReverb(g);
   }
@@ -660,6 +806,75 @@ export class AudioEngine implements IAudio {
     this.play({ kind: 'play', cue: 'grenade.fuseTick', pos, intensity: urgency });
   };
 
+  private readonly onFlyby = (pos: Vec3, closeness: number): void => {
+    this.play({ kind: 'play', cue: 'rocket.flyby', pos, intensity: closeness });
+  };
+
+  /** M2c: dead-reckons rocketFired rockets (shared rocketPosAt) while setRockets is not being called. */
+  private updateRocketFallback(): void {
+    const ctx = this.ctx;
+    const g = this.graph;
+    const t = this.serverNowMs;
+    if (!ctx || !g || ctx.state !== 'running' || !Number.isFinite(t)) return;
+    if (Number.isFinite(this.rocketsFedAt) && t - this.rocketsFedAt <= AUDIO_TUNING.rocketFeedStaleMs) return;
+    if (this.trackedRockets.size === 0) return;
+    let n = 0;
+    this.fallbackViews.length = 0;
+    for (const [id, tr] of this.trackedRockets) {
+      if (tr.until !== null && t > tr.until) {
+        this.trackedRockets.delete(id);
+        continue;
+      }
+      let view = this.fallbackPool[n];
+      if (!view) {
+        view = { id: 0, ownerId: 0, level: 1, pos: { x: 0, y: 0, z: 0 }, vel: { x: 0, y: 0, z: 0 }, origin: { x: 0, y: 0, z: 0 }, firedAt: 0 };
+        this.fallbackPool.push(view);
+      }
+      const r = tr.rocket;
+      view.id = r.id;
+      view.ownerId = r.ownerId;
+      view.level = r.level;
+      view.firedAt = r.firedAt;
+      view.origin.x = r.pos.x;
+      view.origin.y = r.pos.y;
+      view.origin.z = r.pos.z;
+      rocketPosAt(r, t, tr.gravity, view.pos);
+      rocketVelAt(r, t, tr.gravity, view.vel);
+      this.fallbackViews.push(view);
+      n++;
+    }
+    g.rockets.update(this.fallbackViews, t, this.listenerPos, this.onFlyby);
+  }
+
+  /** M2c: look-preset detail one-shots (birds, crickets, chime, palms, copier, cooler, damper) around the listener. */
+  private updateDetails(step: number): void {
+    const details = this.look.details;
+    for (let i = 0; i < details.length; i++) {
+      const d = details[i] as LookDetail;
+      const left = (this.detailTimers[i] ?? 0) - step;
+      if (left > 0) {
+        this.detailTimers[i] = left;
+        continue;
+      }
+      this.detailTimers[i] = this.nextDetailDelay(d);
+      const ang = this.rand() * Math.PI * 2;
+      const r = d.minR + this.rand() * (d.maxR - d.minR);
+      this.detailPos.x = this.listenerPos.x + Math.cos(ang) * r;
+      this.detailPos.y = Math.max(0, this.listenerPos.y + d.minUp + this.rand() * (d.maxUp - d.minUp));
+      this.detailPos.z = this.listenerPos.z + Math.sin(ang) * r;
+      this.play({ kind: 'play', cue: d.cue, pos: this.detailPos });
+    }
+  }
+
+  private resetDetailTimers(): void {
+    this.detailTimers.length = 0;
+    for (const d of this.look.details) this.detailTimers.push(this.nextDetailDelay(d));
+  }
+
+  private nextDetailDelay(d: LookDetail): number {
+    return d.minS + this.rand() * (d.maxS - d.minS);
+  }
+
   private buildGraph(ctx: AudioContext): Graph {
     const limiter = ctx.createDynamicsCompressor();
     limiter.threshold.value = -6;
@@ -701,10 +916,19 @@ export class AudioEngine implements IAudio {
     const [sfx, sfxDuck] = mk('sfx');
     const [ui, uiDuck] = mk('ui');
     const [amb, ambDuck] = mk('ambience');
+    // M2c: the smoke cocoon sits on the ambience path only (duck -> cocoon -> muffle); gameplay stays full-band.
+    const cocoon = ctx.createBiquadFilter();
+    cocoon.type = 'lowpass';
+    cocoon.frequency.value = MUFFLE_OPEN_HZ;
+    cocoon.Q.value = 0.6;
+    ambDuck.disconnect();
+    ambDuck.connect(cocoon);
+    cocoon.connect(muffle);
 
     const noise = createNoiseBank(ctx);
-    const ambience = new Ambience(ctx, noise, amb, this.scene, this.theme);
+    const ambience = new Ambience(ctx, noise, amb, this.scene, this.theme, this.lookId);
     const drop = new DropLayers(ctx, noise, sfx, dropBus, this.rand);
+    const rockets = new RocketLayers(ctx, noise, sfx, this.rand);
     const graph: Graph = {
       master,
       limiter,
@@ -717,6 +941,8 @@ export class AudioEngine implements IAudio {
       noise,
       ambience,
       drop,
+      cocoon,
+      rockets,
     };
     if (this.scene === 'indoor') this.ensureReverb(graph);
     return graph;
@@ -764,12 +990,14 @@ export class AudioEngine implements IAudio {
   };
 
   private nextKeysDelay(): number {
-    const { keysMinIntervalS: lo, keysMaxIntervalS: hi } = AUDIO_TUNING;
+    const l = this.look;
+    const [lo, hi] = l.scene === 'indoor' ? [l.keysMinS, l.keysMaxS] : [AUDIO_TUNING.keysMinIntervalS, AUDIO_TUNING.keysMaxIntervalS];
     return lo + this.rand() * (hi - lo);
   }
 
   private nextGullDelay(): number {
-    const { gullMinIntervalS: lo, gullMaxIntervalS: hi } = AUDIO_TUNING;
+    const l = this.look;
+    const [lo, hi] = l.scene === 'island' ? [l.gullMinS, l.gullMaxS] : [AUDIO_TUNING.gullMinIntervalS, AUDIO_TUNING.gullMaxIntervalS];
     return lo + this.rand() * (hi - lo);
   }
 }

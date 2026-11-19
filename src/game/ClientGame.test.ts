@@ -286,7 +286,9 @@ describe('ClientGame', () => {
     net.pushSnapshot(playing(true, { loot: [{ id: 7, item: 'rifle', qty: 1, pos: { x: 1, y: 0, z: 0 } }] }));
     game.update(0);
     const { frame } = game.update(0.016);
-    expect(of('interactPromptChanged')).toEqual([{ lootId: 7, item: 'rifle', qty: 1, durability: null, maxDurability: null, refusal: null }]);
+    expect(of('interactPromptChanged')).toEqual([
+      { lootId: 7, item: 'rifle', qty: 1, durability: null, maxDurability: null, refusal: null, level: 1, scope: null, replacesSlot: null, scopeTarget: null },
+    ]);
     expect(frame.highlightLootId).toBe(7);
   });
 
@@ -528,11 +530,11 @@ describe('ClientGame', () => {
     net.pushSnapshot(
       playing(true, {
         serverTime: 0,
-        grenades: [{ id: 1, ownerId: 2, pos: { x: 3, y: 0.1, z: 0 }, vel: { x: 0, y: 0, z: 0 }, explodesAt: 3_000, inWater: false }],
+        grenades: [{ id: 1, ownerId: 2, pos: { x: 3, y: 0.1, z: 0 }, vel: { x: 0, y: 0, z: 0 }, explodesAt: 3_000, inWater: false, kind: 'grenade' }],
       }),
     );
     net.pushEvents(
-      [{ type: 'grenadeThrown', id: 2, ownerId: 2, pos: { x: 40, y: 20, z: 0 }, vel: { x: 0, y: 0, z: 0 }, explodesAt: 3_100, dropped: false }],
+      [{ type: 'grenadeThrown', id: 2, ownerId: 2, pos: { x: 40, y: 20, z: 0 }, vel: { x: 0, y: 0, z: 0 }, explodesAt: 3_100, dropped: false, kind: 'grenade' }],
       10,
     );
     let { frame, hud } = game.update(0.016);
@@ -541,7 +543,7 @@ describe('ClientGame', () => {
     expect(hud.grenadeDanger.map((d) => d.id)).toEqual([1]);
     expect(hud.grenadeDanger[0]!.distance).toBeCloseTo(3);
     expect(hud.grenadeDanger[0]!.bearing).toBeCloseTo(Math.PI / 2); // +X is to the right at yaw 0
-    net.pushEvents([{ type: 'explosion', id: 1, ownerId: 2, pos: { x: 3, y: 0.1, z: 0 }, radius: 6, inHand: false }]);
+    net.pushEvents([{ type: 'explosion', id: 1, ownerId: 2, pos: { x: 3, y: 0.1, z: 0 }, radius: 6, inHand: false, source: 'grenade' }]);
     ({ frame, hud } = game.update(0.016));
     expect(frame.grenades.map((g) => g.id)).toEqual([2]);
     expect(hud.grenadeDanger).toEqual([]);
@@ -553,7 +555,7 @@ describe('ClientGame', () => {
     net.pushSnapshot(playing());
     game.update(0);
     const eye = BALANCE.movement.stances.stand.eyeHeight;
-    net.pushEvents([{ type: 'explosion', id: 1, ownerId: 2, pos: { x: 0, y: eye, z: 4 }, radius: 6, inHand: false }]);
+    net.pushEvents([{ type: 'explosion', id: 1, ownerId: 2, pos: { x: 0, y: eye, z: 4 }, radius: 6, inHand: false, source: 'grenade' }]);
     game.update(0);
     expect(of('explosion')[0]!.localDistance).toBeCloseTo(4);
   });
@@ -571,7 +573,7 @@ describe('ClientGame', () => {
     expect(frame.grenadeArc).not.toBeNull();
     expect(arcCalls.at(-1)!.fuseRemainingMs).toBe(BALANCE.items.grenade.fuseMs);
     expect(arcCalls.at(-1)!.eye.y).toBeCloseTo(BALANCE.movement.stances.stand.eyeHeight);
-    expect(hud.local!.slots[3]).toEqual({ slot: 3, weapon: 'grenade', mag: null, count: 2 });
+    expect(hud.local!.slots[3]).toMatchObject({ slot: 3, weapon: 'grenade', mag: null, count: 2, level: null, sight: 'none' });
     expect(hud.crosshairSpreadDeg).toBe(0);
 
     input.state.buttonDown(0);
@@ -616,7 +618,7 @@ describe('ClientGame', () => {
       }),
     );
     game.update(0.016);
-    expect(of('interactPromptChanged')).toEqual([{ lootId: 8, item: 'vest_1', qty: 1, durability: 20, maxDurability: BALANCE.items.vest_1.durability, refusal: 'betterArmor' }]);
+    expect(of('interactPromptChanged')).toEqual([{ lootId: 8, item: 'vest_1', qty: 1, durability: 20, maxDurability: BALANCE.items.vest_1.durability, refusal: 'betterArmor', level: null, scope: null, replacesSlot: null, scopeTarget: null }]);
   });
 
   it('dev hook: M2a armor, grenade and stance fields', () => {
@@ -626,7 +628,7 @@ describe('ClientGame', () => {
       playing(true, {
         players: [makePlayer(1, { name: 'Me', vestTier: 2, helmetTier: 1 })],
         local: makeLocal(1, { vest: { tier: 2, durability: 30 }, helmet: { tier: 1, durability: 12 }, grenades: 3 }),
-        grenades: [{ id: 5, ownerId: 1, pos: { x: 9, y: 0, z: 9 }, vel: { x: 0, y: 0, z: 0 }, explodesAt: 900, inWater: false }],
+        grenades: [{ id: 5, ownerId: 1, pos: { x: 9, y: 0, z: 9 }, vel: { x: 0, y: 0, z: 0 }, explodesAt: 900, inWater: false, kind: 'grenade' }],
       }),
     );
     game.update(0.016);

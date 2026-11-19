@@ -22,6 +22,9 @@ import * as THREE from 'three';
 import type { PropKind } from '../../shared/types';
 import { alongY, buildMerged, rng, xf, type Merged, type Piece, type V3 } from './builder';
 import { ensureOutlineNormals, OUTLINE, outlineMaterial, palette, vertexColorToon } from './materials';
+import { islandVariant, ISLAND_VARIANTS } from '../../shared/kits/island';
+
+export { ISLAND_VARIANTS };
 
 export const PROP_KINDS: readonly PropKind[] = [
   'palm', 'rock', 'bush', 'crate', 'hut', 'dock', 'umbrella', 'boat', 'tikiTorch', 'driftwood',
@@ -36,7 +39,7 @@ const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 // -------------------------------------------------------------------------------------------------
 // Piece lists per kind
 // -------------------------------------------------------------------------------------------------
-function palmPieces(): Piece[] {
+function palmPieces(variant = 0): Piece[] {
   const P: Piece[] = [];
   const SEGS = 7, H = 6.6, LEAN = 1.4;
   const pt = (t: number) => v(LEAN * t * t, H * t, 0);
@@ -62,7 +65,8 @@ function palmPieces(): Piece[] {
 
   const top = pt(1);
   P.push({ geo: new THREE.SphereGeometry(0.27, 6, 4), color: palette.palmLeafDark, matrix: xf([top.x, top.y, top.z]) });
-  for (let k = 0; k < 3; k++) {
+  const nuts = variant === 1 ? 2 : 3;
+  for (let k = 0; k < nuts; k++) {
     const a = (k / 3) * Math.PI * 2 + 0.4;
     P.push({
       geo: new THREE.SphereGeometry(0.15, 5, 3),
@@ -72,8 +76,10 @@ function palmPieces(): Piece[] {
   }
 
   // Fronds: 8 x (rising inner leaf + drooping outer leaf), flattened ellipsoids.
-  const r = rng(1337);
+  const r = rng(1337 + variant);
   const FRONDS = 8;
+  const leafA = variant === 1 ? palette.bushLight : palette.palmLeaf;
+  const leafB = variant === 1 ? palette.palmLeaf : palette.palmLeafDark;
   const leaf = (start: THREE.Vector3, yaw: number, pitch: number, len: number, width: number, color: number) => {
     const d = v(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
     const c = start.clone().addScaledVector(d, len / 2);
@@ -90,7 +96,7 @@ function palmPieces(): Piece[] {
   };
   for (let f = 0; f < FRONDS; f++) {
     const yaw = (f / FRONDS) * Math.PI * 2 + (r() - 0.5) * 0.35;
-    const col = f % 2 ? palette.palmLeafDark : palette.palmLeaf;
+    const col = f % 2 ? leafB : leafA;
     const start = top.clone().add(v(0, 0.08, 0));
     const mid = leaf(start, yaw, 0.28 + r() * 0.15, 1.5, 0.5, col);
     leaf(mid, yaw + (r() - 0.5) * 0.15, -0.6 - r() * 0.25, 1.35, 0.42, col);
@@ -98,7 +104,7 @@ function palmPieces(): Piece[] {
   return P;
 }
 
-function rockPieces(): Piece[] {
+function rockPieces(variant = 0): Piece[] {
   const jitter = (geo: THREE.BufferGeometry, amt: number, seedOff: number) => {
     // Displace by a hash of the ORIGINAL position so shared corners move together (watertight).
     const pos = geo.getAttribute('position');
@@ -117,8 +123,8 @@ function rockPieces(): Piece[] {
   };
   const shade = (n: THREE.Vector3) => (n.y > 0.55 ? palette.rockLight : n.y < -0.1 ? palette.rockDark : palette.rock);
   return [
-    { geo: jitter(new THREE.IcosahedronGeometry(1, 1), 0.16, 7), color: palette.rock, matrix: xf([0, 0.35, 0], [0, 0.3, 0], [1.5, 1.05, 1.35]), flat: true, colorFn: shade },
-    { geo: jitter(new THREE.IcosahedronGeometry(1, 0), 0.12, 11), color: palette.rock, matrix: xf([0.95, 0.12, 0.95], [0.4, 1.1, 0.2], [0.5, 0.42, 0.45]), flat: true, colorFn: shade },
+    { geo: jitter(new THREE.IcosahedronGeometry(1, 1), 0.16, 7 + variant * 13), color: palette.rock, matrix: xf([0, 0.35, 0], [0, 0.3 + variant * 1.3, 0], [1.5, 1.05, 1.35]), flat: true, colorFn: shade },
+    { geo: jitter(new THREE.IcosahedronGeometry(1, 0), 0.12, 11 + variant * 17), color: palette.rock, matrix: xf([variant === 2 ? -0.95 : 0.95, 0.12, 0.95], [0.4, 1.1, 0.2], [0.5, 0.42, 0.45]), flat: true, colorFn: shade },
   ];
 }
 
@@ -142,7 +148,7 @@ function bushPieces(): Piece[] {
   return P;
 }
 
-function cratePieces(): Piece[] {
+function cratePieces(variant = 0): Piece[] {
   const P: Piece[] = [];
   P.push({ geo: new THREE.BoxGeometry(0.92, 0.92, 0.92), color: palette.crate, matrix: xf([0, 0.5, 0]), outline: false });
   // 12 edge beams
@@ -160,11 +166,24 @@ function cratePieces(): Piece[] {
     P.push({ geo: new THREE.BoxGeometry(diag, 0.09, 0.04), color: palette.crateBand, matrix: xf([0, 0.5, s * 0.47], [0, 0, s * Math.PI / 4]), outline: false });
     P.push({ geo: new THREE.BoxGeometry(0.04, 0.09, diag), color: palette.crateBand, matrix: xf([s * 0.47, 0.5, 0], [s * Math.PI / 4, 0, 0]), outline: false });
   }
+  if (variant === 1) {
+    // rope net: two cream ropes over the top and down two sides
+    for (const x of [-0.2, 0.2]) {
+      P.push({ geo: new THREE.BoxGeometry(0.035, 0.02, 1.04), color: palette.stripeCream, matrix: xf([x, 1.005, 0]), outline: false });
+      for (const z of [-0.51, 0.51]) P.push({ geo: new THREE.BoxGeometry(0.035, 0.6, 0.02), color: palette.stripeCream, matrix: xf([x, 0.7, z]), outline: false });
+    }
+  } else if (variant === 2) {
+    // teal tarp draped over the top, one flap hanging down the +X side
+    P.push({ geo: new THREE.BoxGeometry(0.98, 0.04, 0.98), color: 0x2ec4b6, matrix: xf([0.01, 1.01, 0], [0, 0.12, 0]), outline: false });
+    P.push({ geo: new THREE.BoxGeometry(0.04, 0.4, 0.8), color: 0x229f93, matrix: xf([0.51, 0.82, 0], [0, 0.12, 0.08]), outline: false });
+  }
   P.push({ geo: new THREE.BoxGeometry(1, 1, 1), color: 0, matrix: xf([0, 0.5, 0]), outline: 'only' });
   return P;
 }
 
-function hutPieces(): Piece[] {
+function hutPieces(variant = 0): Piece[] {
+  const roofA = variant === 1 ? palette.palmLeaf : palette.thatch;
+  const roofB = variant === 1 ? palette.palmLeafDark : palette.thatchDark;
   const P: Piece[] = [];
   const WALL_H = 2.2, FLOOR_Y = 0.6, TOP = FLOOR_Y + WALL_H;
   // Stilts + floor
@@ -192,10 +211,16 @@ function hutPieces(): Piece[] {
     P.push({ geo: new THREE.CylinderGeometry(0.12, 0.12, WALL_H + 0.2, 6), color: palette.woodDark, matrix: xf([x, FLOOR_Y + WALL_H / 2 + 0.05, z]), flat: true });
   }
   // Two-layer thatched pyramid roof (4-sided cones rotated so faces align with walls)
-  P.push({ geo: new THREE.ConeGeometry(3.3, 1.9, 4, 1), color: palette.thatch, matrix: xf([0, TOP + 0.95, 0], [0, Math.PI / 4, 0]), flat: true });
-  P.push({ geo: new THREE.CylinderGeometry(2.38, 2.4, 0.14, 4, 1, true), color: palette.thatchDark, matrix: xf([0, TOP + 0.03, 0], [0, Math.PI / 4, 0], [1.4, 1, 1.4]), flat: true, outline: false });
-  P.push({ geo: new THREE.ConeGeometry(2.25, 1.35, 4, 1, true), color: palette.thatchDark, matrix: xf([0, TOP + 0.6 + 0.675, 0], [0, Math.PI / 4, 0]), flat: true });
+  P.push({ geo: new THREE.ConeGeometry(3.3, 1.9, 4, 1), color: roofA, matrix: xf([0, TOP + 0.95, 0], [0, Math.PI / 4, 0]), flat: true });
+  P.push({ geo: new THREE.CylinderGeometry(2.38, 2.4, 0.14, 4, 1, true), color: roofB, matrix: xf([0, TOP + 0.03, 0], [0, Math.PI / 4, 0], [1.4, 1, 1.4]), flat: true, outline: false });
+  P.push({ geo: new THREE.ConeGeometry(2.25, 1.35, 4, 1, true), color: roofB, matrix: xf([0, TOP + 0.6 + 0.675, 0], [0, Math.PI / 4, 0]), flat: true });
   P.push({ geo: new THREE.ConeGeometry(0.25, 0.5, 4), color: palette.woodDark, matrix: xf([0, TOP + 2.05, 0], [0, Math.PI / 4, 0]), flat: true });
+  if (variant === 2) {
+    // striped awning over the door (authoring frame: door on -Z)
+    for (let i = 0; i < 4; i++) {
+      P.push({ geo: new THREE.BoxGeometry(0.36, 0.05, 0.6), color: i % 2 ? palette.stripeCream : palette.stripeCoral, matrix: xf([-0.54 + i * 0.36, TOP - 0.15, -2.0], [-0.35, 0, 0]), });
+    }
+  }
   return P;
 }
 
@@ -228,7 +253,14 @@ function dockPieces(): Piece[] {
   return P;
 }
 
-function umbrellaPieces(): Piece[] {
+const UMBRELLA_COLOURS: readonly [number, number, number][] = [
+  [palette.stripeCoral, palette.stripeCream, palette.towel],
+  [palette.towel, 0xffffff, palette.stripeCoral],
+  [0xffc43d, 0x2ec4b6, 0xc9b6f2],
+  [0xc9b6f2, 0xffffff, 0xffc43d],
+];
+function umbrellaPieces(variant = 0): Piece[] {
+  const [ua, ub, towelCol] = UMBRELLA_COLOURS[variant % UMBRELLA_COLOURS.length];
   const P: Piece[] = [];
   const tilt = new THREE.Matrix4().makeRotationZ(0.12);
   const T = (m: THREE.Matrix4) => tilt.clone().multiply(m);
@@ -237,15 +269,15 @@ function umbrellaPieces(): Piece[] {
   for (let i = 0; i < WEDGES; i++) {
     P.push({
       geo: new THREE.ConeGeometry(1.2, 0.42, 2, 1, false, (i / WEDGES) * Math.PI * 2, (Math.PI * 2) / WEDGES),
-      color: i % 2 ? palette.stripeCream : palette.stripeCoral,
+      color: i % 2 ? ub : ua,
       matrix: T(xf([0, 2.25, 0])),
       flat: true,
     });
   }
-  P.push({ geo: new THREE.SphereGeometry(0.06, 6, 4), color: palette.stripeCoral, matrix: T(xf([0, 2.5, 0])), outline: false });
+  P.push({ geo: new THREE.SphereGeometry(0.06, 6, 4), color: ua, matrix: T(xf([0, 2.5, 0])), outline: false });
   // Towel with stripes
   const towel = xf([0.75, 0.015, 0.35], [0, 0.35, 0]);
-  P.push({ geo: new THREE.BoxGeometry(0.9, 0.03, 1.7), color: palette.towel, matrix: towel, outline: false });
+  P.push({ geo: new THREE.BoxGeometry(0.9, 0.03, 1.7), color: towelCol, matrix: towel, outline: false });
   for (const z of [-0.55, 0.55]) {
     P.push({ geo: new THREE.BoxGeometry(0.91, 0.032, 0.14), color: palette.stripeCream, matrix: towel.clone().multiply(xf([0, 0.002, z])), outline: false });
   }
@@ -311,7 +343,7 @@ function driftwoodPieces(): Piece[] {
   return P;
 }
 
-const PIECES: Record<PropKind, () => Piece[]> = {
+const PIECES: Record<PropKind, (variant: number) => Piece[]> = {
   palm: palmPieces,
   rock: rockPieces,
   bush: bushPieces,
@@ -362,7 +394,7 @@ export interface PropPart {
   receiveShadow: boolean;
 }
 
-const partsCache = new Map<PropKind, PropPart[]>();
+const partsCache = new Map<string, PropPart[]>();
 let flameMat: THREE.MeshBasicMaterial | null = null;
 
 /** Unlit vertex-coloured material for the tiki flame (animate scale / add a PointLight on top). */
@@ -377,15 +409,19 @@ export function flameMaterial(): THREE.MeshBasicMaterial {
 /**
  * Instanceable parts of a prop kind. Geometries and materials are cached and shared: do NOT dispose
  * them per instance. Every kind is instanceable (all part matrices are identity).
+ * M2c: `variant` (PropPlacement.variant; counts in src/shared/kits/island.ts ISLAND_VARIANTS) picks a look with the
+ * same collider; it is taken modulo the kind's count, so any number is safe. Variant 0 = the M2b look.
  */
-export function getPropParts(kind: PropKind): PropPart[] {
-  let parts = partsCache.get(kind);
+export function getPropParts(kind: PropKind, variant = 0): PropPart[] {
+  const v = islandVariant(kind, variant);
+  const cacheKey = v === 0 ? kind : `${kind}|${v}`;
+  let parts = partsCache.get(cacheKey);
   if (parts) return parts;
   const make = PIECES[kind];
   if (!make) throw new Error(`Unknown prop kind: ${kind}`);
   const root = ROOT[kind];
-  const pieces = root ? make().map((p) => ({ ...p, matrix: root.clone().multiply(p.matrix ?? new THREE.Matrix4()) })) : make();
-  const merged: Merged = buildMerged(pieces, `prop:${kind}`);
+  const pieces = root ? make(v).map((p) => ({ ...p, matrix: root.clone().multiply(p.matrix ?? new THREE.Matrix4()) })) : make(v);
+  const merged: Merged = buildMerged(pieces, v === 0 ? `prop:${kind}` : `prop:${kind}:${v}`);
   const big = kind !== 'tikiTorch' && kind !== 'driftwood';
   parts = [
     {
@@ -411,16 +447,17 @@ export function getPropParts(kind: PropKind): PropPart[] {
     const flame = buildMerged(flamePieces(), 'prop:tikiTorch:flame');
     parts.push({ name: 'flame', geometry: flame.geometry, material: flameMaterial(), matrix: new THREE.Matrix4(), castShadow: false, receiveShadow: false });
   }
-  partsCache.set(kind, parts);
+  partsCache.set(cacheKey, parts);
   return parts;
 }
 
 /** A ready-to-add prop (Group of shared meshes). Origin at ground centre; apply rotY/scale on the group. */
-export function createProp(kind: PropKind): THREE.Object3D {
+export function createProp(kind: PropKind, variant = 0): THREE.Object3D {
   const g = new THREE.Group();
   g.name = `prop:${kind}`;
   g.userData.kind = kind;
-  for (const p of getPropParts(kind)) {
+  g.userData.variant = islandVariant(kind, variant);
+  for (const p of getPropParts(kind, variant)) {
     const m = new THREE.Mesh(p.geometry, p.material);
     m.name = p.name;
     m.matrixAutoUpdate = false;

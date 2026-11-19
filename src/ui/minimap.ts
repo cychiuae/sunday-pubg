@@ -3,6 +3,9 @@
  * - Island: sea, coastline, grass, hills, POIs.
  * - M2b indoor (IndoorMapData): ceiling-dark surround, the floor rectangle with its floor zones (wood / carpet / tile),
  *   desk-size plateaus from the kit `size`, walls (solid ink, glass light cyan), POIs.
+ * - M2c (UI M2c §7.1): the map is the LAYOUT-APPLIED map of the match, so office desks follow the layout; on the island,
+ *   big collidable props (huts, big rocks) draw as small blocks. The static layer is rebuilt when the map object or
+ *   the layout seed changes (once per match) and on resize. Decoration, clutter, loot and smoke are never drawn.
  * The static layer is cached to an offscreen canvas and rebuilt only on map or size change. The dynamic layer (zone
  * circles in the map's theme colours, the M2b flight route with the moving carrier, the self arrow) redraws at
  * MINIMAP_HZ.
@@ -11,7 +14,8 @@
 import type { ZoneTheme } from '../shared/balance';
 import type { HudMinimapView, HudZoneView, MinimapRouteView } from '../shared/contracts';
 import { isIndoor, mapBounds, wallFrame } from '../shared/maps';
-import type { AnyMapData, FloorMaterial, IndoorMapData, IslandMapData } from '../shared/types';
+import { PROP_SHAPES } from '../shared/sim/colliders';
+import type { AnyMapData, FloorMaterial, IndoorMapData, IslandMapData, PropKind } from '../shared/types';
 import { h } from './dom';
 import {
   fitProjection,
@@ -39,6 +43,8 @@ const C = {
   sand: '#f7e4b5',
   grass: '#7cc84f',
   hill: '#5aa844',
+  // M2c island props (huts, big cover)
+  prop: '#c99a5b',
   target: '#fffaf0',
   self: '#ffc43d',
   poi: '#fffaf0',
@@ -66,6 +72,27 @@ const ZONE_STYLE: Record<ZoneTheme, { ring: string; outside: string }> = {
 /** Indoor props drawn as plateaus: floor props with colliders, at least this footprint (m², desks are ~86) and height. */
 const PLATEAU_MIN_AREA = 25;
 const PLATEAU_MIN_HEIGHT = 3;
+/** M2c island props drawn as blocks: main collider part footprint (m², scaled) and top height (m). Presentation only. */
+export const ISLAND_PROP_MIN_AREA = 8;
+export const ISLAND_PROP_MIN_HEIGHT = 1.2;
+
+/** M2c: an island prop's minimap block (main collider part, scaled), or null when it is too small or soft. */
+export function islandPropBlock(
+  kind: PropKind,
+  scale: number,
+): { shape: 'box'; hx: number; hz: number } | { shape: 'circle'; r: number } | null {
+  const part = PROP_SHAPES[kind]?.[0];
+  if (!part || kind === 'dock') return null;
+  const s = scale > 0 ? scale : 1;
+  if (part.top * s < ISLAND_PROP_MIN_HEIGHT) return null;
+  if (part.shape === 'box') {
+    const hx = part.hx * s;
+    const hz = part.hz * s;
+    return 4 * hx * hz >= ISLAND_PROP_MIN_AREA ? { shape: 'box', hx, hz } : null;
+  }
+  const r = part.r * s;
+  return Math.PI * r * r >= ISLAND_PROP_MIN_AREA ? { shape: 'circle', r } : null;
+}
 
 export interface MinimapOptions {
   /** HudView.zoneTheme (ring and outside colours). */
@@ -83,6 +110,11 @@ export class Minimap {
   private labelLayer: HTMLCanvasElement | null = null;
   private staticKey = '';
   private map: AnyMapData | null = null;
+  /** M2c: bumps when the map object or the layout seed changes (the applied map is a new object every match). */
+  private mapGen = 0;
+  private layoutSeed: number | null = null;
+  /** Static-layer rebuild count (tests / AC M2C-UI-27). */
+  staticBuilds = 0;
   private sizeCss = 0;
   private dpr = 1;
   private proj: MapProjection = { scale: 1, cx: 0, cy: 0 };
@@ -120,8 +152,11 @@ export class Minimap {
   update(view: HudMinimapView, zone: HudZoneView | null, nowMs: number, opts: MinimapOptions = {}): void {
     if (!this.ctx || this.sizeCss <= 0) return;
     const map = view.map as AnyMapData;
-    if (map !== this.map) {
+    const seed = view.layout?.seed ?? null;
+    if (map !== this.map || seed !== this.layoutSeed) {
       this.map = map;
+      this.layoutSeed = seed;
+      this.mapGen++;
       this.dirty = true;
       this.el.classList.toggle('is-indoor', isIndoor(map));
     }
@@ -132,7 +167,7 @@ export class Minimap {
   }
 
   private ensureStatic(map: AnyMapData): HTMLCanvasElement {
-    const key = `${map.id}|${map.kind ?? 'island'}|${this.sizeCss}|${this.dpr}`;
+    const key = `${map.id}|${map.kind ?? 'island'}|${this.mapGen}|${this.sizeCss}|${this.dpr}`;
     if (this.staticLayer && key === this.staticKey) return this.staticLayer;
     const layer = document.createElement('canvas');
     layer.width = this.canvas.width;
@@ -146,6 +181,7 @@ export class Minimap {
       this.drawPoiDots(g, map);
     }
     this.staticLayer = layer;
+    this.staticBuilds++;
     this.labelLayer = this.buildLabels(map);
     this.staticKey = key;
     return layer;
@@ -194,6 +230,24 @@ export class Minimap {
       g.beginPath();
       g.arc(px, py, Math.max(2, hill.radius * p.scale * 0.6), 0, Math.PI * 2);
       g.fill();
+    }
+    // M2c: huts and big cover from this match's layout (small sand-brown blocks with an ink edge).
+    g.lineJoin = 'round';
+    for (const prop of map.props) {
+      const b = islandPropBlock(prop.kind, prop.scale);
+      if (!b) continue;
+      const minPx = 1.5 / p.scale;
+      if (b.shape === 'box') this.box(g, prop.x, prop.z, Math.max(b.hx, minPx), Math.max(b.hz, minPx), prop.rotY);
+      else {
+        const { px, py } = projectXZ(p, prop.x, prop.z);
+        g.beginPath();
+        g.arc(px, py, Math.max(1.5, b.r * p.scale), 0, Math.PI * 2);
+      }
+      g.fillStyle = C.prop;
+      g.fill();
+      g.lineWidth = 1;
+      g.strokeStyle = C.ink;
+      g.stroke();
     }
   }
 

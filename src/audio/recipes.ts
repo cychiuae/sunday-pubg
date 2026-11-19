@@ -4,6 +4,7 @@
  * Owner: audio-designer. No audio files: everything is oscillators and filtered noise.
  */
 import { AUDIO_TUNING, type CueId } from './cues';
+import { adsSweepS, meleeRangeFade } from './soundMap';
 import { bell, click, envelope, filterNode, gainNode, lfo, loopNoise, midiHz, noise, pluck, tone, type Voice } from './synth';
 
 export type Recipe = (v: Voice) => number;
@@ -11,6 +12,8 @@ export type Recipe = (v: Voice) => number;
 /** Per-weapon pitch for mechanical sounds (switch, reload, pickup, dry fire). */
 const WEAPON_PITCH: Record<string, number> = {
   fists: 1, pistol: 1.2, smg: 1.1, shotgun: 0.8, rifle: 0.92, lmg: 0.74, dmr: 0.97, sniper: 0.86, grenade: 1.3,
+  // M2c
+  knife: 1.35, machete: 1.1, paddle: 0.7, dbshotgun: 0.78, revolver: 1.0, rpg: 0.62, smoke: 0.95,
 };
 const wp = (v: Voice): number => WEAPON_PITCH[v.variant] ?? 1;
 
@@ -183,10 +186,10 @@ function armorShatter(v: Voice, low: number): number {
 
 const AMMO_CLICK_HZ: Record<string, number> = { ammo_light: 3200, ammo_heavy: 2200, ammo_shell: 1500, ammo_sniper: 1800 };
 
-/** Armor tier 1..3 from a variant ending in the tier digit (`vest2`, `helmet_3`); 1 when absent. */
+/** Armor tier 1..4 from a variant ending in the tier digit (`vest2`, `helmet_3`, M2c `vest4`); 1 when absent. */
 function tierOf(v: Voice): number {
   const n = Number(v.variant.slice(-1));
-  return n >= 1 && n <= 3 ? n : 1;
+  return n >= 1 && n <= 4 ? n : 1;
 }
 /** Armor clinks rise in pitch with tier (armor.md). */
 const tierPitch = (v: Voice): number => 1 + 0.14 * (tierOf(v) - 1);
@@ -199,7 +202,13 @@ function vestClink(v: Voice, g: number): number {
     tone(v, { type: 'triangle', freq: 820 * p, decay: 0.08, gain: 0.3 * g }),
     tone(v, { type: 'triangle', freq: 1240 * p, at: 0.004, decay: 0.06, gain: 0.18 * g }),
     click(v, 0, 2800 * p, 0.3 * g),
+    tierFourSheen(v, 820 * p, g),
   );
+}
+
+/** M2c: tier 4 adds one bright partial so it reads as "premium" without a new sound (§6). */
+function tierFourSheen(v: Voice, base: number, g: number): number {
+  return tierOf(v) === 4 ? bell(v, 0.004, base * 2.4, 0.08 * g, 0.18, [[1, 1], [2.1, 0.3]]) : 0;
 }
 
 /** Helmet hit: a hollow coconut-shell "tonk" with a short metallic ring. */
@@ -210,6 +219,7 @@ function helmetTonk(v: Voice, g: number): number {
     tone(v, { type: 'triangle', freq: 1130 * p, decay: 0.12, gain: 0.2 * g }),
     bell(v, 0, 2350 * p, 0.12 * g, 0.35, [[1, 1], [1.48, 0.4]]),
     click(v, 0, 3400, 0.35 * g, 3, 0.015),
+    tierFourSheen(v, 430 * p, g),
   );
 }
 
@@ -316,7 +326,570 @@ function lmgShot(v: Voice, local: boolean): number {
   );
 }
 
+/**
+ * Explosion body shared by frags and (M2c) rockets. Delayed by distance / speed of sound. `size` (rocket: radius / 6,
+ * 0.8..1.5) makes it longer, not louder; rockets add a sharper front and wood/plastic debris.
+ */
+function blast(v: Voice, size: number, rocket: boolean): number {
+  const at = soundDelay(v);
+  const far = farness(v);
+  const water = v.variant === 'water';
+  let end = Math.max(
+    tone(v, { freq: 75, freqEnd: 28, glide: 0.5, at, attack: 0.004, decay: 0.9 * size, gain: water ? 0.6 : 1 }),
+    noise(v, { color: 'brown', filter: 'lowpass', freq: water ? 600 : 1400, freqEnd: 180, glide: 0.6, at, attack: 0.003, decay: 1 * size, gain: 0.9 }),
+    noise(v, { filter: 'highpass', freq: 2200, at, decay: far > 0.5 ? 0.02 : 0.08, gain: (1 - 0.8 * far) * (water ? 0.3 : 0.7) }),
+    tone(v, { type: 'sawtooth', freq: 220, freqEnd: 40, glide: 0.25, at, decay: 0.3, gain: 0.25, lowpass: 900 }),
+    noise(v, { color: 'brown', filter: 'lowpass', freq: 450, at: at + 0.35, attack: 0.08, decay: 0.9 * size, gain: (0.15 + 0.35 * far) * (rocket ? size : 1) }),
+  );
+  if (rocket) {
+    end = Math.max(end, noise(v, { filter: 'highpass', freq: 3000, at, decay: 0.03, gain: 0.6 * (1 - 0.7 * far) }));
+    if (!water && far < 0.7) end = Math.max(end, crackle(v, at + 0.2, Math.round(5 * size), 0.5, 400, 1200, 0.25));
+  }
+  if (water) {
+    end = Math.max(
+      end,
+      splash(v, at + 0.05, 0.8, 0.9),
+      noise(v, { filter: 'bandpass', freq: 2400, freqEnd: 700, glide: 1.2, q: 0.6, at: at + 0.3, attack: 0.1, decay: 1.2, gain: 0.35 }),
+    );
+  } else if (far < 0.6) {
+    end = Math.max(end, crackle(v, at + 0.15, Math.round(6 * size), 0.6, 1200, 3200, 0.2)); // sand and pebbles raining down
+  }
+  return end;
+}
+
+/** Numeric recipe parameter `i` (PlayCommand.params), or `dflt` when absent / not finite. */
+function param(v: Voice, i: number, dflt: number): number {
+  const x = v.params?.[i];
+  return x !== undefined && Number.isFinite(x) ? x : dflt;
+}
+
+// --- M2c guns (docs/audio/M2c.md §3) ------------------------------------------------------------------------------
+
+/** Double-barrel: the deepest gun, with a hollow two-bottle barrel ring and no pump afterwards. */
+function dbShot(v: Voice, local: boolean): number {
+  return Math.max(
+    tone(v, { freq: 95, freqEnd: 38, glide: 0.12, decay: 0.28, gain: 0.95 }),
+    noise(v, { color: 'brown', filter: 'lowpass', freq: 1600, freqEnd: 250, glide: 0.2, decay: 0.22, gain: 0.8 }),
+    noise(v, { filter: 'highpass', freq: 2000, decay: 0.04, gain: 0.45 }),
+    noise(v, { color: 'pink', filter: 'bandpass', freq: 380, q: 14, attack: 0.002, decay: 0.3, gain: 0.6 }),
+    noise(v, { color: 'pink', filter: 'bandpass', freq: 415, q: 14, attack: 0.002, decay: 0.3, gain: 0.6 }),
+    tone(v, { type: 'triangle', freq: 390, decay: 0.25, gain: 0.06 }),
+    local ? 0 : distantTail(v, 0.5),
+  );
+}
+
+/** Revolver: a heavy cork pop (a fifth under the pistol, longer) and the cylinder tick 120 ms later. */
+function revolverShot(v: Voice, local: boolean): number {
+  return Math.max(
+    tone(v, { freq: 700, freqEnd: 110, glide: 0.07, decay: 0.13, gain: 0.8 }),
+    tone(v, { type: 'triangle', freq: 180, freqEnd: 70, glide: 0.08, decay: 0.16, gain: 0.6 }),
+    noise(v, { filter: 'highpass', freq: 2200, decay: 0.045, gain: 0.55 }),
+    tone(v, { freq: 70, freqEnd: 38, glide: 0.1, decay: 0.16, gain: local ? 0.55 : 0.4 }),
+    click(v, 0.12, 3100, 0.25, 6, 0.008),
+    click(v, 0.145, 2700, 0.18, 6, 0.008),
+    local ? 0 : distantTail(v, 0.4),
+  );
+}
+
+function dryFireM2c(v: Voice): number {
+  switch (v.variant) {
+    case 'dbshotgun':
+      return Math.max(click(v, 0, 1800, 0.55, 8, 0.01), click(v, 0.06, 2100, 0.5, 8, 0.01));
+    case 'revolver':
+      return Math.max(click(v, 0, 2000, 0.65, 8, 0.012), tone(v, { type: 'triangle', freq: 700, decay: 0.015, gain: 0.08 }));
+    case 'rpg':
+      return Math.max(tone(v, { type: 'triangle', freq: 220, freqEnd: 180, glide: 0.04, decay: 0.05, gain: 0.45 }), click(v, 0, 900, 0.35, 3, 0.02));
+    default:
+      return 0;
+  }
+}
+
+function switchM2c(v: Voice): number {
+  switch (v.variant) {
+    case 'knife': // sheath shing
+      return Math.max(
+        noise(v, { filter: 'bandpass', freq: 3500, freqEnd: 6000, glide: 0.12, q: 6, attack: 0.02, decay: 0.13, gain: 0.45 }),
+        bell(v, 0.1, 5200, 0.06, 0.12, [[1, 1], [1.9, 0.3]]),
+      );
+    case 'machete':
+      return Math.max(
+        noise(v, { filter: 'bandpass', freq: 2000, freqEnd: 4000, glide: 0.16, q: 5, attack: 0.03, decay: 0.17, gain: 0.5 }),
+        bell(v, 0.14, 3100, 0.07, 0.18, [[1, 1], [2.7, 0.3]]),
+      );
+    case 'paddle': // a wooden clack on the palm
+      return Math.max(
+        noise(v, { color: 'pink', filter: 'bandpass', freq: 700, attack: 0.02, decay: 0.08, gain: 0.35 }),
+        tone(v, { type: 'triangle', freq: 260, at: 0.08, decay: 0.06, gain: 0.4 }),
+        click(v, 0.08, 1200, 0.5, 3, 0.02),
+      );
+    case 'dbshotgun': // hinge clack
+      return Math.max(click(v, 0, 1400, 0.55, 4, 0.02), click(v, 0.06, 2400, 0.45), tone(v, { type: 'triangle', freq: 300, at: 0.06, decay: 0.04, gain: 0.2 }));
+    case 'revolver': { // cylinder spin
+      let end = 0;
+      for (let i = 0; i < 5; i++) end = Math.max(end, click(v, i * 0.03, 2400, 0.35 - i * 0.04, 6, 0.008));
+      return end;
+    }
+    case 'rpg': // tube onto the shoulder plus the latch
+      return Math.max(
+        tone(v, { freq: 120, freqEnd: 70, glide: 0.06, decay: 0.1, gain: 0.45 }),
+        noise(v, { color: 'pink', filter: 'bandpass', freq: 900, attack: 0.02, decay: 0.1, gain: 0.3 }),
+        click(v, 0.12, 2400, 0.45),
+      );
+    case 'smoke': // pouch rustle and a can rattle; no spoon
+      return Math.max(
+        noise(v, { color: 'pink', filter: 'bandpass', freq: 1500, q: 1.2, attack: 0.02, decay: 0.08, gain: 0.3 }),
+        crackle(v, 0.04, 4, 0.12, 1400, 1800, 0.25),
+        tone(v, { type: 'triangle', freq: 600, at: 0.05, decay: 0.05, gain: 0.15 }),
+      );
+    default:
+      return 0;
+  }
+}
+
+/** Rounds this reload loads (params[0], reloadStarted.rounds), clamped to 1..max; max when absent. */
+const roundsOf = (v: Voice, max: number): number => Math.min(max, Math.max(1, Math.round(param(v, 0, max))));
+
+function reloadStartM2c(v: Voice): number {
+  switch (v.variant) {
+    case 'dbshotgun': {
+      // Break-open: latch and hinge, spent shells pop out and tinkle, shells in at 45 % and 65 %.
+      const total = Math.max(0.6, v.durationS);
+      const rounds = roundsOf(v, 2);
+      let end = Math.max(
+        click(v, 0, 2200, 0.5, 6, 0.012),
+        noise(v, { filter: 'bandpass', freq: 900, freqEnd: 600, glide: 0.12, q: 5, attack: 0.01, decay: 0.12, gain: 0.3 }),
+      );
+      const ej = total * 0.08;
+      for (let i = 0; i < rounds; i++) {
+        end = Math.max(end, tone(v, { type: 'triangle', freq: 700 - i * 60, at: ej + i * 0.04, decay: 0.025, gain: 0.3 }));
+      }
+      end = Math.max(end, crackle(v, ej + 0.25, 3, 0.1, 2500, 3500, 0.2));
+      for (let i = 0; i < rounds; i++) {
+        const at = total * (i === 0 ? 0.45 : 0.65);
+        end = Math.max(end, noise(v, { color: 'pink', filter: 'bandpass', freq: 1100, q: 2, at, attack: 0.004, decay: 0.035, gain: 0.35 }), click(v, at + 0.03, 1600, 0.4));
+      }
+      return Math.max(total, end);
+    }
+    case 'revolver': {
+      // Swing-out ratchet, ejector rod and casing rattle, then one tick per round between 40 % and 70 %.
+      const total = Math.max(0.8, v.durationS);
+      const rounds = roundsOf(v, 6);
+      let end = Math.max(
+        click(v, 0, 2400, 0.4),
+        click(v, 0.03, 2400, 0.35),
+        click(v, 0.06, 2400, 0.3),
+        noise(v, { filter: 'bandpass', freq: 2000, q: 2, at: 0.02, decay: 0.08, gain: 0.25 }),
+        tone(v, { type: 'triangle', freq: 300, at: total * 0.1, decay: 0.03, gain: 0.2 }),
+        crackle(v, total * 0.1 + 0.05, 6, 0.3, 3200, 4500, 0.25),
+      );
+      const span = total * 0.3;
+      for (let i = 0; i < rounds; i++) {
+        const at = total * 0.4 + (rounds > 1 ? (span * i) / (rounds - 1) : 0);
+        end = Math.max(end, click(v, at, 1900, 0.3, 5, 0.01));
+      }
+      return Math.max(total, end);
+    }
+    case 'rpg': {
+      // Tube down, rocket out of the pack, a long slide in, then the seat thunk at 70 %.
+      const total = Math.max(1, v.durationS);
+      return Math.max(
+        total,
+        noise(v, { color: 'pink', filter: 'bandpass', freq: 1100, attack: 0.02, decay: 0.12, gain: 0.35 }),
+        noise(v, { filter: 'bandpass', freq: 1400, q: 6, at: 0.02, decay: 0.15, gain: 0.2 }),
+        noise(v, { color: 'pink', filter: 'bandpass', freq: 2500, q: 1.5, at: total * 0.3, attack: 0.01, decay: 0.12, gain: 0.35 }),
+        noise(v, { filter: 'bandpass', freq: 600, freqEnd: 1600, glide: total * 0.25, q: 4, at: total * 0.4, attack: 0.05, decay: total * 0.25, gain: 0.3 }),
+        tone(v, { freq: 120, freqEnd: 70, glide: 0.05, at: total * 0.7, decay: 0.08, gain: 0.45 }),
+        click(v, total * 0.7, 1800, 0.45),
+      );
+    }
+    default:
+      return 0;
+  }
+}
+
+function reloadFinishM2c(v: Voice): number {
+  switch (v.variant) {
+    case 'dbshotgun': // the break-shut CLACK: loud enough that enemies within 18 m hear "loaded"
+      return Math.max(click(v, 0, 2600, 0.75, 4, 0.015), click(v, 0.01, 1400, 0.7, 4, 0.02), tone(v, { type: 'triangle', freq: 300, decay: 0.04, gain: 0.4 }));
+    case 'revolver': {
+      // Cylinder snaps shut, then a spin ratchet that speeds up.
+      let end = Math.max(click(v, 0, 2000, 0.55), tone(v, { type: 'triangle', freq: 420, decay: 0.03, gain: 0.25 }));
+      let t = 0.1;
+      for (let i = 0; i < 8; i++) {
+        end = Math.max(end, click(v, t, 2400, 0.35 * (1 - i / 10), 6, 0.006));
+        t += 0.025 - (0.013 * i) / 7;
+      }
+      return end;
+    }
+    case 'rpg':
+      return Math.max(click(v, 0, 2400, 0.5), click(v, 0.04, 2400, 0.45), tone(v, { freq: 110, freqEnd: 70, glide: 0.05, at: 0.1, decay: 0.08, gain: 0.4 }));
+    default:
+      return 0;
+  }
+}
+
+// --- M2c melee (§2) ------------------------------------------------------------------------------------------------
+
+interface SwingSpec {
+  f0: number;
+  f1: number;
+  q: number;
+  rise: number;
+  decay: number;
+  edgeHz: number;
+  edgeGain: number;
+}
+const SWING: Record<string, SwingSpec> = {
+  knife: { f0: 2500, f1: 5200, q: 2.2, rise: 0.05, decay: 0.07, edgeHz: 5000, edgeGain: 0.2 },
+  machete: { f0: 1000, f1: 3000, q: 1.6, rise: 0.09, decay: 0.12, edgeHz: 4000, edgeGain: 0.15 },
+  paddle: { f0: 250, f1: 900, q: 0.9, rise: 0.16, decay: 0.2, edgeHz: 0, edgeGain: 0 },
+};
+
+/** Swing whoosh whose peak lands at durationS (the hit frame). Variant = MeleeId. */
+function meleeSwing(v: Voice): number {
+  const s = SWING[v.variant] ?? (SWING['machete'] as SwingSpec);
+  const peak = v.durationS > 0 ? v.durationS : 0.15;
+  const start = Math.max(0, peak - s.rise);
+  const rise = peak - start;
+  // Per-weapon remote range (knife shortest): the cue's maxDistance is the paddle's.
+  const g = v.local ? 1 : meleeRangeFade(v.variant, v.distance);
+  let end = noise(v, { color: 'pink', filter: 'bandpass', freq: s.f0, freqEnd: s.f1, glide: Math.max(0.01, rise), q: s.q, at: start, attack: Math.max(0.01, rise), decay: s.decay, gain: 0.8 * g });
+  if (s.edgeGain > 0) end = Math.max(end, noise(v, { filter: 'highpass', freq: s.edgeHz, at: peak - 0.01, attack: 0.01, decay: s.decay * 0.5, gain: s.edgeGain * g }));
+  if (v.variant === 'machete') end = Math.max(end, bell(v, peak, 3100, 0.05 * g, 0.15, [[1, 1], [2.7, 0.3]]));
+  if (v.variant === 'paddle') {
+    end = Math.max(
+      end,
+      noise(v, { color: 'brown', filter: 'lowpass', freq: 300, at: start, attack: Math.max(0.01, rise), decay: s.decay, gain: 0.5 * g }),
+      noise(v, { filter: 'bandpass', freq: 700, q: 8, attack: 0.01, decay: 0.06, gain: 0.2 * g }), // the paddle pulled back
+    );
+  }
+  return end;
+}
+
+/** Cartoon "boing" under the paddle bonk: a sine with a fast pitch wobble. */
+function boing(v: Voice, at: number, gain: number): number {
+  const [g, end] = envGain(v, v.out, at, gain, 0.005, 0.05, 0.25);
+  const osc = rawOsc(v, 'sine', at, end);
+  const t0 = v.t + at;
+  osc.frequency.setValueAtTime(320 * v.pitch, t0);
+  osc.frequency.exponentialRampToValueAtTime(180 * v.pitch, t0 + 0.3);
+  osc.connect(g);
+  lfo(v, osc.frequency, 18, 25 * v.pitch, v.t + end);
+  return end;
+}
+
+/**
+ * Melee contact. Variant `<weapon>.<material>[tier]` (soundMap.meleeHitVariant), e.g. `paddle.helmet3`. Toy sounds
+ * only: pool noodles, beach balls and cushions. No gore.
+ */
+function meleeHit(v: Voice): number {
+  const dot = v.variant.indexOf('.');
+  const weapon = dot > 0 ? v.variant.slice(0, dot) : 'machete';
+  const material = (dot > 0 ? v.variant.slice(dot + 1) : 'body').replace(/\d$/, '');
+  const knife = weapon === 'knife';
+  const paddle = weapon === 'paddle';
+  const body = (): number =>
+    knife
+      ? Math.max(tone(v, { type: 'triangle', freq: 520, freqEnd: 260, glide: 0.04, decay: 0.04, gain: 0.5 }), noise(v, { color: 'pink', filter: 'bandpass', freq: 1800, decay: 0.03, gain: 0.4 }))
+      : paddle
+        ? Math.max(tone(v, { freq: 140, freqEnd: 60, glide: 0.12, decay: 0.12, gain: 0.9 }), noise(v, { color: 'pink', filter: 'bandpass', freq: 900, decay: 0.09, gain: 0.7 }))
+        : Math.max(tone(v, { freq: 180, freqEnd: 90, glide: 0.07, decay: 0.07, gain: 0.6 }), noise(v, { filter: 'bandpass', freq: 1200, q: 1.5, decay: 0.06, gain: 0.5 }));
+  switch (material) {
+    case 'head':
+      if (paddle) return Math.max(body(), noise(v, { filter: 'bandpass', freq: 500, q: 6, decay: 0.12, gain: 0.7 }), boing(v, 0.02, 0.35));
+      return Math.max(body(), tone(v, { type: 'triangle', freq: knife ? 900 : 700, decay: 0.025, gain: 0.3 }), click(v, 0, 1900, 0.3, 8, 0.02));
+    case 'vest':
+      if (knife) return Math.max(noise(v, { filter: 'bandpass', freq: 3200, q: 4, decay: 0.06, gain: 0.35 }), vestClink(v, 0.7));
+      if (paddle) return Math.max(tone(v, { freq: 120, freqEnd: 50, glide: 0.1, decay: 0.14, gain: 0.8 }), noise(v, { color: 'pink', filter: 'lowpass', freq: 600, decay: 0.1, gain: 0.5 }), vestClink(v, 0.7));
+      return Math.max(tone(v, { freq: 150, freqEnd: 80, glide: 0.06, decay: 0.08, gain: 0.5 }), vestClink(v, 1));
+    case 'helmet':
+      if (knife) return Math.max(click(v, 0, 4200, 0.4, 5, 0.01), helmetTonk(v, 0.6));
+      if (paddle) return Math.max(helmetTonk(v, 1), tone(v, { freq: 340, freqEnd: 300, glide: 0.3, decay: 0.4, gain: 0.4 }));
+      return Math.max(helmetTonk(v, 0.9), bell(v, 0, 2200, 0.15, 0.25, [[1, 1], [2.4, 0.3]]));
+    case 'wall':
+      if (knife) return Math.max(click(v, 0, 3600, 0.5, 5, 0.01), tone(v, { type: 'triangle', freq: 340, at: 0.01, decay: 0.05, gain: 0.35 }));
+      if (paddle) return Math.max(tone(v, { type: 'triangle', freq: 190, decay: 0.1, gain: 0.6 }), noise(v, { filter: 'bandpass', freq: 1100, q: 3, decay: 0.1, gain: 0.5 }));
+      return Math.max(tone(v, { type: 'triangle', freq: 260, decay: 0.06, gain: 0.5 }), click(v, 0, 2400, 0.45));
+    case 'ground':
+      return Math.max(
+        noise(v, { color: 'brown', filter: 'lowpass', freq: knife ? 600 : paddle ? 400 : 800, decay: knife ? 0.05 : paddle ? 0.12 : 0.07, gain: paddle ? 0.8 : 0.6 }),
+        paddle ? crackle(v, 0.02, 4, 0.15, 1200, 2500, 0.15) : 0,
+      );
+    case 'water':
+      return splash(v, 0, knife ? 0.4 : paddle ? 0.9 : 0.6, knife ? 0.15 : paddle ? 0.35 : 0.25);
+    case 'glass':
+      if (knife) return bell(v, 0, 4600, 0.25, 0.12, [[1, 1], [1.53, 0.4]]);
+      if (paddle) return Math.max(tone(v, { type: 'triangle', freq: 200, freqEnd: 150, glide: 0.05, decay: 0.1, gain: 0.6 }), noise(v, { color: 'brown', filter: 'lowpass', freq: 500, decay: 0.08, gain: 0.4 }));
+      return Math.max(
+        tone(v, { type: 'triangle', freq: 260, freqEnd: 190, glide: 0.04, decay: 0.06, gain: 0.55 }),
+        bell(v, 0.002, 2900, 0.2, 0.22, [[1, 1], [1.53, 0.5], [2.41, 0.3]]),
+      );
+    default:
+      return body();
+  }
+}
+
+/** Paddle knockback: a shove now, the body thud (and a sand drag) at durationS. */
+function knockback(v: Voice): number {
+  const at = v.durationS > 0 ? v.durationS : AUDIO_TUNING.knockbackThudS;
+  return Math.max(
+    noise(v, { color: 'brown', filter: 'lowpass', freq: 500, decay: 0.08, gain: 0.5 }),
+    noise(v, { color: 'pink', filter: 'bandpass', freq: 600, freqEnd: 1400, glide: 0.18, q: 1, attack: 0.02, decay: 0.18, gain: 0.35 }),
+    tone(v, { freq: 90, freqEnd: 45, glide: 0.1, at, decay: 0.15, gain: 0.7 }),
+    noise(v, { color: 'pink', filter: 'bandpass', freq: 950, freqEnd: 600, glide: 0.2, q: 0.9, at: at + 0.02, attack: 0.03, decay: 0.2, gain: 0.4 }),
+  );
+}
+
+/** A pane breaking: a sharp break, 3 or 4 inharmonic rings and a shard rain. */
+function glassShatter(v: Voice): number {
+  let end = Math.max(
+    noise(v, { filter: 'highpass', freq: 6000, decay: 0.015, gain: 0.6 }),
+    tone(v, { type: 'triangle', freq: 300, freqEnd: 200, glide: 0.05, decay: 0.05, gain: 0.3 }),
+    crackle(v, 0.03, 12, 0.5, 3000, 7000, 0.25),
+  );
+  const rings = 3 + (v.rand() < 0.5 ? 1 : 0);
+  for (let i = 0; i < rings; i++) {
+    end = Math.max(end, bell(v, 0.005 + 0.02 * i, 2800 + v.rand() * 2800, 0.12, 0.3 + v.rand() * 0.3, [[1, 1], [1.53, 0.4], [2.41, 0.25]]));
+  }
+  return end;
+}
+
+// --- M2c rockets (§4) ---------------------------------------------------------------------------------------------
+
+/** Cardboard-tube FWOOMP, a long back-blast hiss and ignition crackle. */
+function rocketLaunch(v: Voice, local: boolean): number {
+  return Math.max(
+    tone(v, { freq: 70, freqEnd: 32, glide: 0.2, attack: 0.003, decay: 0.35, gain: 1 }),
+    noise(v, { color: 'brown', filter: 'bandpass', freq: 320, q: 3, decay: 0.18, gain: 0.6 }),
+    noise(v, { filter: 'highpass', freq: 1500, freqEnd: 900, glide: 0.5, attack: 0.005, decay: 0.55, gain: 0.55 }),
+    crackle(v, 0.02, 8, 0.25, 2000, 5000, 0.25),
+    local ? 0 : distantTail(v, 0.6),
+  );
+}
+
+// --- M2c smoke (§5) -----------------------------------------------------------------------------------------------
+
+/** Hollow tin-can resonance (smoke canister). */
+function canTonk(v: Voice, at: number, g: number): number {
+  return Math.max(
+    noise(v, { color: 'pink', filter: 'bandpass', freq: 620, q: 10, at, attack: 0.002, decay: 0.08, gain: 0.9 * g }),
+    tone(v, { type: 'triangle', freq: 300, at, decay: 0.04, gain: 0.35 * g }),
+  );
+}
+
+/** Plastic cap twist (a ratchet of tiny clicks) and a hollow pop. No spoon, no bell. */
+function capTwist(v: Voice, at: number, g: number): number {
+  let end = noise(v, { filter: 'bandpass', freq: 1800, q: 3, at, attack: 0.01, decay: 0.12, gain: 0.25 * g });
+  for (let i = 0; i < 5; i++) end = Math.max(end, click(v, at + i * 0.022, 1800 + i * 50, 0.2 * g, 5, 0.006));
+  return Math.max(end, tone(v, { type: 'triangle', freq: 520, freqEnd: 380, glide: 0.03, at: at + 0.13, decay: 0.03, gain: 0.4 * g }));
+}
+
+/** Smoke throw: the cap twist, a lower whoosh than the frag's and a can rattle. */
+function smokeThrow(v: Voice): number {
+  return Math.max(
+    capTwist(v, 0, 0.6),
+    noise(v, { color: 'pink', filter: 'bandpass', freq: 300, freqEnd: 1300, glide: 0.18, q: 1.2, at: 0.12, attack: 0.06, decay: 0.14, gain: 0.55 }),
+    crackle(v, 0.2, 3, 0.1, 1400, 1600, 0.2),
+  );
+}
+
+/**
+ * Canister hiss shaped by the cloud: params [growS, holdS, fadeS, offsetS]. Grow: full hiss, billow rising. Hold: the
+ * hiss tapers to 35 % and drops in pitch (the can emptying). Fade: both to 0. A late joiner starts at offsetS.
+ */
+function smokeHiss(v: Voice): number {
+  const grow = Math.max(0, param(v, 0, AUDIO_TUNING.smokeFallbackGrowS));
+  const hold = Math.max(0, param(v, 1, Math.max(1, v.durationS)));
+  const fade = Math.max(0, param(v, 2, AUDIO_TUNING.smokeFallbackFadeS));
+  const off = Math.max(0, param(v, 3, 0));
+  const total = grow + hold + fade;
+  const len = total - off;
+  if (!(len > 0.05)) return 0.05;
+  const until = v.t + len;
+
+  // Piecewise-linear levels over the cloud's life (seconds from deploy).
+  const hissAt = (s: number): number => (s <= grow ? 1 : s <= grow + hold ? 1 - 0.65 * ((s - grow) / Math.max(1e-3, hold)) : 0.35 * Math.max(0, 1 - (s - grow - hold) / Math.max(1e-3, fade)));
+  const billowAt = (s: number): number =>
+    s <= grow ? 0.6 * (grow > 0 ? s / grow : 1) : s <= grow + hold ? 0.6 - 0.35 * ((s - grow) / Math.max(1e-3, hold)) : 0.25 * Math.max(0, 1 - (s - grow - hold) / Math.max(1e-3, fade));
+  const hzAt = (s: number): number => (s <= grow ? 3400 : s <= grow + hold ? 3400 - 1000 * ((s - grow) / Math.max(1e-3, hold)) : 2400);
+  const shape = (p: AudioParam, f: (s: number) => number, scale: number, fromZero: boolean): void => {
+    const ramp = 0.08;
+    p.setValueAtTime(fromZero ? 0 : f(off) * scale, v.t);
+    p.linearRampToValueAtTime(f(off + ramp) * scale, v.t + ramp);
+    for (const s of [grow, grow + hold, total]) {
+      if (s > off + ramp) p.linearRampToValueAtTime(f(s) * scale, v.t + (s - off));
+    }
+  };
+
+  const hissEnv = gainNode(v, 0, v.out);
+  const hiss = loopNoise(v, { buffer: v.noise.pinkLoop, filter: 'bandpass', freq: 3400, q: 0.8, gain: 1, fadeIn: 0.02, until, dest: hissEnv });
+  shape(hissEnv.gain, hissAt, 0.5, true);
+  shape(hiss.filter.frequency, hzAt, v.pitch, false);
+  lfo(v, hiss.filter.frequency, 0.3, 250, until);
+  lfo(v, hiss.filter.frequency, 0.71, 150, until);
+
+  const billowEnv = gainNode(v, 0, v.out);
+  const billow = loopNoise(v, { buffer: v.noise.brownLoop, filter: 'lowpass', freq: 280, q: 0.6, gain: 1, fadeIn: 0.02, until, dest: billowEnv });
+  shape(billowEnv.gain, billowAt, 0.8, true);
+  lfo(v, billow.gain.gain, 0.2, 0.25, until);
+  return len;
+}
+
+// --- M2c levels and scopes (§7, §7a) ------------------------------------------------------------------------------
+
+/** Kalimba run: as many rising pentatonic notes as the level (variant '1'..'4'), shimmer on 3 and 4. */
+function levelSparkle(v: Voice): number {
+  const T = AUDIO_TUNING;
+  const n = Math.min(4, Math.max(1, Math.round(Number(v.variant) || 1)));
+  const d0 = T.levelSparkleDelayS;
+  let end = 0;
+  for (let i = 0; i < n; i++) end = Math.max(end, pluck(v, d0 + i * (n === 4 ? 0.05 : T.levelNoteStepS), midiHz(T.levelNotes[i] as number), 0.5, 0.25));
+  const last = d0 + (n - 1) * T.levelNoteStepS;
+  if (n >= 3) end = Math.max(end, bell(v, last + 0.04, 5300, 0.05 * 4, 0.3, [[1, 1], [2.1, 0.3]]));
+  if (n >= 4) end = Math.max(end, crackle(v, last + 0.03, 8, 0.4, 7000, 10000, 0.08));
+  return end;
+}
+
+/** Scope pitch scale: bigger scopes are lower and heavier. */
+const SCOPE_K: Record<string, number> = { scope_red_dot: 1, scope_2x: 0.93, scope_4x: 0.87, scope_8x: 0.8 };
+const SCOPE_TINK_HZ: Record<string, number> = { scope_red_dot: 3000, scope_2x: 3300, scope_4x: 3600, scope_8x: 4000 };
+
+function scopePickup(v: Voice): number {
+  return Math.max(
+    tone(v, { type: 'triangle', freq: 900, decay: 0.025, gain: 0.4 }),
+    bell(v, 0.03, SCOPE_TINK_HZ[v.variant] ?? 3300, 0.2, 0.12, [[1, 1], [2.3, 0.3]]),
+  );
+}
+
+function scopeMount(v: Voice): number {
+  const k = SCOPE_K[v.variant] ?? 0.9;
+  return Math.max(
+    noise(v, { filter: 'bandpass', freq: 1600, freqEnd: 2600, glide: 0.1, q: 4, attack: 0.02, decay: 0.08, gain: 0.3 }),
+    click(v, 0.12, 2800 * k, 0.5, 5, 0.01),
+    click(v, 0.165, 1900 * k, 0.5, 5, 0.012),
+    tone(v, { type: 'triangle', freq: 400 * k, at: 0.165, decay: 0.03, gain: 0.2 }),
+  );
+}
+
+function scopeUnmount(v: Voice): number {
+  return Math.max(
+    click(v, 0, 1900, 0.5, 5, 0.012),
+    noise(v, { filter: 'bandpass', freq: 2600, freqEnd: 1600, glide: 0.1, q: 4, at: 0.04, attack: 0.02, decay: 0.08, gain: 0.3 }),
+  );
+}
+
+// --- M2c look detail one-shots (§8) -------------------------------------------------------------------------------
+
+const CHIME_NOTES = [91, 93, 96, 98] as const;
+
+const M2C_RECIPES = {
+  'shot.dbshotgun.local': (v) => dbShot(v, true),
+  'shot.dbshotgun.remote': (v) => dbShot(v, false),
+  'shot.revolver.local': (v) => revolverShot(v, true),
+  'shot.revolver.remote': (v) => revolverShot(v, false),
+  'melee.swing.local': meleeSwing,
+  'melee.swing.remote': meleeSwing,
+  'melee.hit': meleeHit,
+  'melee.knockback': knockback,
+  'glass.shatter': glassShatter,
+  'rocket.launch.local': (v) => rocketLaunch(v, true),
+  'rocket.launch.remote': (v) => rocketLaunch(v, false),
+  // Fast whoosh as a rocket passes close; intensity = closeness.
+  'rocket.flyby': (v) => noise(v, { filter: 'bandpass', freq: 3000, freqEnd: 800, glide: 0.25, q: 1.5, attack: 0.04, decay: 0.22, gain: 0.4 + 0.6 * v.intensity }),
+  'rocket.dud': (v) =>
+    Math.max(
+      tone(v, { type: 'triangle', freq: 220, freqEnd: 160, glide: 0.05, decay: 0.08, gain: 0.5 }),
+      click(v, 0, 1200, 0.5, 3, 0.02),
+      noise(v, { color: 'pink', filter: 'lowpass', freq: 1200, attack: 0.01, decay: 0.25, gain: 0.3 }),
+      crackle(v, 0.05, 3, 0.15, 1500, 3000, 0.15),
+    ),
+  // params[0] = size (radius / 6). Variant ground | water.
+  'explosion.rocket': (v) => blast(v, param(v, 0, 1), true),
+  'smoke.pin': (v) => capTwist(v, 0, 1),
+  // Variant = contact surface; intensity = speed. A hollow can, never the frag's metallic clink.
+  'smoke.bounce': (v) => {
+    const g = 0.35 + 0.65 * v.intensity;
+    if (v.variant === 'water') {
+      return Math.max(tone(v, { freq: 400, freqEnd: 900, glide: 0.06, decay: 0.06, gain: 0.3 * g }), noise(v, { filter: 'highpass', freq: 1500, decay: 0.08, gain: 0.2 * g }));
+    }
+    if (v.variant === 'glass') return Math.max(click(v, 0, 3000, 0.3 * g, 4, 0.01), tone(v, { type: 'triangle', freq: 500, decay: 0.04, gain: 0.2 * g }));
+    return Math.max(
+      canTonk(v, 0, g),
+      v.variant === 'terrain' ? noise(v, { color: 'brown', filter: 'lowpass', freq: 400, decay: 0.06, gain: 0.3 * g }) : 0,
+    );
+  },
+  'smoke.pop': (v) =>
+    Math.max(
+      noise(v, { color: 'brown', filter: 'lowpass', freq: 900, freqEnd: 300, glide: 0.25, attack: 0.005, decay: 0.25, gain: 0.8 }),
+      noise(v, { filter: 'bandpass', freq: 2800, q: 0.8, attack: 0.005, decay: 0.4, gain: 0.5 }),
+      canTonk(v, 0, 0.45),
+    ),
+  'smoke.hiss': smokeHiss,
+  'pickup.level': levelSparkle,
+  'pickup.scope': scopePickup,
+  'scope.mount': scopeMount,
+  'scope.unmount': scopeUnmount,
+  // Reef bird "tui-tui" (two or three rising chirps).
+  'amb.bird': (v) => {
+    const n = v.rand() < 0.4 ? 3 : 2;
+    let end = 0;
+    for (let i = 0; i < n; i++) end = Math.max(end, tone(v, { freq: 3200, freqEnd: 4400, glide: 0.06, at: i * 0.14, attack: 0.01, decay: 0.06, gain: 0.3 }));
+    return end;
+  },
+  // Golden-hour crickets: 3 to 5 quiet, irregular 4.3 kHz pulses.
+  'amb.crickets': (v) => {
+    const n = 3 + Math.floor(v.rand() * 3);
+    let end = 0;
+    for (let i = 0; i < n; i++) end = Math.max(end, tone(v, { freq: 4300, at: i * 0.06 + v.rand() * 0.01, attack: 0.003, hold: 0.012, decay: 0.006, gain: 0.25 }));
+    return end;
+  },
+  // Tiki wind chime: 2 or 3 pentatonic bells, slow decay.
+  'amb.chime': (v) => {
+    const n = 2 + (v.rand() < 0.5 ? 1 : 0);
+    let end = 0;
+    for (let i = 0; i < n; i++) {
+      const note = CHIME_NOTES[Math.floor(v.rand() * CHIME_NOTES.length)] as number;
+      end = Math.max(end, bell(v, i * (0.25 + v.rand() * 0.3), midiHz(note), 0.25, 1.6, [[1, 1], [2.76, 0.3], [5.4, 0.1]]));
+    }
+    return end;
+  },
+  // Overcast palm-frond gust.
+  'amb.palms': (v) =>
+    Math.max(
+      noise(v, { color: 'pink', filter: 'bandpass', freq: 3000, q: 0.7, attack: 0.7, hold: 0.4, decay: 1.2, gain: 0.35 }),
+      noise(v, { color: 'pink', filter: 'bandpass', freq: 2000, q: 0.9, at: 0.3, attack: 0.5, hold: 0.3, decay: 1, gain: 0.2 }),
+    ),
+  // Evening photocopier run: four paper swishes over a soft roller hum, a clunk at the end.
+  'amb.copier': (v) => {
+    let end = tone(v, { freq: 95, attack: 0.2, hold: 2, decay: 0.3, gain: 0.08 });
+    for (let i = 0; i < 4; i++) {
+      end = Math.max(end, noise(v, { filter: 'bandpass', freq: 1400, freqEnd: 2000, glide: 0.3, q: 1, at: i * 0.62, attack: 0.1, decay: 0.3, gain: 0.3 }));
+    }
+    return Math.max(end, click(v, 2.45, 600, 0.3, 3, 0.03));
+  },
+  // After-hours air handling: a damper clunk, then a long sigh of air.
+  'amb.hvacCycle': (v) =>
+    Math.max(
+      tone(v, { freq: 130, freqEnd: 90, glide: 0.05, decay: 0.08, gain: 0.5 }),
+      noise(v, { color: 'brown', filter: 'lowpass', freq: 400, at: 0.1, attack: 0.3, hold: 0.3, decay: 0.6, gain: 0.3 }),
+      noise(v, { color: 'pink', filter: 'bandpass', freq: 500, q: 0.8, at: 0.1, attack: 0.3, hold: 0.3, decay: 0.6, gain: 0.15 }),
+    ),
+  // Water-cooler glug: 3 to 5 rising bubble bloops.
+  'amb.cooler': (v) => {
+    const n = 3 + Math.floor(v.rand() * 3);
+    let t = 0;
+    let end = 0;
+    for (let i = 0; i < n; i++) {
+      const f = 180 + v.rand() * 80;
+      end = Math.max(end, tone(v, { freq: f, freqEnd: f + 240, glide: 0.05, at: t, decay: 0.06, gain: 0.3 }));
+      t += 0.07 + v.rand() * 0.05;
+    }
+    return Math.max(end, noise(v, { color: 'brown', filter: 'lowpass', freq: 300, at: t, decay: 0.15, gain: 0.2 }));
+  },
+} satisfies Partial<Record<CueId, Recipe>>;
+
 export const RECIPES: Record<CueId, Recipe> = {
+  ...M2C_RECIPES,
   // --- Weapons ---------------------------------------------------------------------------
   // Fists: a cartoon whoosh (the thwack comes from the hit confirm / remote hit).
   'shot.fists.local': (v) =>
@@ -408,11 +981,15 @@ export const RECIPES: Record<CueId, Recipe> = {
   },
 
   'weapon.dryFire': (v) => {
+    const m2c = dryFireM2c(v);
+    if (m2c > 0) return m2c;
     const p = wp(v);
     return Math.max(click(v, 0, 2600 * p, 0.6, 6, 0.01), click(v, 0.035, 1700 * p, 0.4, 6, 0.012), tone(v, { type: 'square', freq: 900 * p, decay: 0.015, gain: 0.05 }));
   },
 
   'weapon.switch': (v) => {
+    const m2c = switchM2c(v);
+    if (m2c > 0) return m2c;
     if (v.variant === 'grenade') {
       // Grenade off the belt: a pouch rustle and the spoon rattling.
       return Math.max(
@@ -439,6 +1016,8 @@ export const RECIPES: Record<CueId, Recipe> = {
 
   // Reload start: mag release + slide out. Shotgun: one "shk" per shell across the reload (stopped on cancel).
   'reload.start': (v) => {
+    const m2c = reloadStartM2c(v);
+    if (m2c > 0) return m2c;
     const p = wp(v);
     if (v.variant === 'shotgun') {
       const total = Math.max(0.6, v.durationS);
@@ -490,6 +1069,8 @@ export const RECIPES: Record<CueId, Recipe> = {
 
   // Reload finish: mag in + charge. Shotgun: a pump.
   'reload.finish': (v) => {
+    const m2c = reloadFinishM2c(v);
+    if (m2c > 0) return m2c;
     const p = wp(v);
     if (v.variant === 'shotgun') return pump(v, 0, 1);
     if (v.variant === 'lmg') {
@@ -528,14 +1109,17 @@ export const RECIPES: Record<CueId, Recipe> = {
       tone(v, { freq: 180, at: 0.08, decay: 0.04, gain: 0.15 }),
     );
     if (v.variant === 'red_dot') end = Math.max(end, tone(v, { freq: 5200, at: 0.1, decay: 0.012, gain: 0.04 }));
-    if (v.variant === 'scope_4x' || v.variant === 'scope_8x') {
+    // Lens zoom sweep, one step per magnification (M2c adds 2x: shorter and quieter).
+    const sweep = adsSweepS(v.variant);
+    if (sweep > 0) {
       const long = v.variant === 'scope_8x';
-      const sweep = long ? 0.3 : 0.2;
+      const short = v.variant === 'scope_2x';
+      const k = short ? 0.7 : 1;
       end = Math.max(
         end,
-        noise(v, { filter: 'bandpass', freq: 900, freqEnd: long ? 3200 : 2400, glide: sweep, q: 6, at: 0.05, attack: 0.08, decay: long ? 0.22 : 0.15, gain: 0.18 }),
-        tone(v, { freq: 1400, freqEnd: long ? 2600 : 2100, glide: sweep, at: 0.05, attack: 0.06, decay: 0.15, gain: 0.04 }),
-        click(v, 0.05 + sweep + 0.03, 4200, 0.18, 6, 0.008),
+        noise(v, { filter: 'bandpass', freq: 900, freqEnd: long ? 3200 : short ? 2000 : 2400, glide: sweep, q: 6, at: 0.05, attack: 0.08, decay: long ? 0.22 : short ? 0.12 : 0.15, gain: 0.18 * k }),
+        tone(v, { freq: 1400, freqEnd: long ? 2600 : short ? 1800 : 2100, glide: sweep, at: 0.05, attack: 0.06, decay: 0.15, gain: 0.04 * k }),
+        click(v, 0.05 + sweep + 0.03, 4200, 0.18 * k, 6, 0.008),
       );
     }
     return end;
@@ -545,8 +1129,9 @@ export const RECIPES: Record<CueId, Recipe> = {
       noise(v, { color: 'pink', filter: 'bandpass', freq: 2000, freqEnd: 1000, glide: 0.1, q: 0.9, attack: 0.02, decay: 0.08, gain: 0.4 }),
       click(v, 0.06, 2000, 0.15, 5, 0.01),
     );
-    if (v.variant === 'scope_4x' || v.variant === 'scope_8x') {
-      end = Math.max(end, noise(v, { filter: 'bandpass', freq: 2400, freqEnd: 1100, glide: 0.12, q: 6, attack: 0.03, decay: 0.08, gain: 0.1 }));
+    if (adsSweepS(v.variant) > 0) {
+      const k = v.variant === 'scope_2x' ? 0.7 : 1;
+      end = Math.max(end, noise(v, { filter: 'bandpass', freq: 2400, freqEnd: 1100, glide: 0.12, q: 6, attack: 0.03, decay: 0.08, gain: 0.1 * k }));
     }
     return end;
   },
@@ -772,7 +1357,9 @@ export const RECIPES: Record<CueId, Recipe> = {
     );
   },
   'pickup.grenade': (v) =>
-    Math.max(
+    v.variant === 'smoke'
+      ? canTonk(v, 0, 0.8)
+      : Math.max(
       bell(v, 0, 2800, 0.15, 0.12, [[1, 1], [2.7, 0.35]]),
       click(v, 0.06, 3300, 0.35),
       noise(v, { color: 'pink', filter: 'bandpass', freq: 1400, q: 1.2, at: 0.02, decay: 0.06, gain: 0.2 }),
@@ -839,7 +1426,9 @@ export const RECIPES: Record<CueId, Recipe> = {
       tone(v, { type: 'triangle', freq: 1800 + 700 * v.intensity, decay: 0.014, gain: 0.12 }),
     ),
   'grenade.throw': (v) =>
-    Math.max(
+    v.variant === 'smoke'
+      ? smokeThrow(v)
+      : Math.max(
       noise(v, { color: 'pink', filter: 'bandpass', freq: 400, freqEnd: 1800, glide: 0.18, q: 1.2, attack: 0.06, decay: 0.14, gain: 0.6 }),
       noise(v, { filter: 'highpass', freq: 2500, at: 0.08, decay: 0.08, gain: 0.1 }),
     ),
@@ -878,28 +1467,7 @@ export const RECIPES: Record<CueId, Recipe> = {
   },
   // Variant 'ground' | 'water'. Delayed by distance / speed of sound; the engine adds distance gain and air low-pass.
   // Far away: less crack, more rolling echo. Water: a muffled boom under a geyser of spray.
-  explosion: (v) => {
-    const at = soundDelay(v);
-    const far = farness(v);
-    const water = v.variant === 'water';
-    let end = Math.max(
-      tone(v, { freq: 75, freqEnd: 28, glide: 0.5, at, attack: 0.004, decay: 0.9, gain: water ? 0.6 : 1 }),
-      noise(v, { color: 'brown', filter: 'lowpass', freq: water ? 600 : 1400, freqEnd: 180, glide: 0.6, at, attack: 0.003, decay: 1, gain: 0.9 }),
-      noise(v, { filter: 'highpass', freq: 2200, at, decay: far > 0.5 ? 0.02 : 0.08, gain: (1 - 0.8 * far) * (water ? 0.3 : 0.7) }),
-      tone(v, { type: 'sawtooth', freq: 220, freqEnd: 40, glide: 0.25, at, decay: 0.3, gain: 0.25, lowpass: 900 }),
-      noise(v, { color: 'brown', filter: 'lowpass', freq: 450, at: at + 0.35, attack: 0.08, decay: 0.9, gain: 0.15 + 0.35 * far }),
-    );
-    if (water) {
-      end = Math.max(
-        end,
-        splash(v, at + 0.05, 0.8, 0.9),
-        noise(v, { filter: 'bandpass', freq: 2400, freqEnd: 700, glide: 1.2, q: 0.6, at: at + 0.3, attack: 0.1, decay: 1.2, gain: 0.35 }),
-      );
-    } else if (far < 0.6) {
-      end = Math.max(end, crackle(v, at + 0.15, 6, 0.6, 1200, 3200, 0.2)); // sand and pebbles raining down
-    }
-    return end;
-  },
+  explosion: (v) => blast(v, 1, false),
   // Ear ring inside the blast radius: two close sines (beating), longer and louder the closer the blast.
   'explosion.ring': (v) => {
     const i = Math.max(0.2, Math.min(1, v.intensity));

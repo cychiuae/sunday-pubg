@@ -8,9 +8,9 @@
  *   ADS blend is rebuilt from anim.ads (SpectateAdsClock).
  */
 import type { Balance } from '../shared/balance';
-import type { ViewmodelAction, ViewmodelView } from '../shared/contracts';
+import type { MeleeSwingView, ViewmodelAction, ViewmodelView } from '../shared/contracts';
 import { wrapAngle } from '../shared/math';
-import type { Appearance, ArmorTierOrNone, DropPhase, HealId, HeldId, PlayerId, PlayerState, Stance } from '../shared/types';
+import type { Appearance, ArmorTierOrNone, DropPhase, HealId, HeldId, ItemLevel, M2cSightType, PlayerId, PlayerState, Stance } from '../shared/types';
 import { actionsNowMs, heldOf, type PredictedActions } from './actionPrediction';
 
 /** Time constant of the look-rate smoothing (sway input filter, not a feel number: the feel is vmSwayLookFactor). */
@@ -21,22 +21,40 @@ export interface VmAction {
   cooking: boolean;
   action: ViewmodelAction;
   actionProgress: number;
+  /** M2c: hitFrameMs / fireIntervalMs during 'swing'. */
+  hitFraction?: number;
+}
+
+/**
+ * M2c local arms state the shared action step does not carry (m2cPrediction.ts): the item in hand (melee id, selected
+ * throwable), the predicted melee swing, the T sight switch and the throwable cycle progress.
+ */
+export interface LocalVmExtras {
+  held: HeldId;
+  swing: MeleeSwingView | null;
+  scopeSwapProgress: number | null;
+  cycleProgress: number | null;
 }
 
 const progressOf = (remaining: number, total: number): number =>
   total > 0 ? Math.min(1, Math.max(0, 1 - remaining / total)) : 0;
 
 /**
- * The local arms' action from the predicted action state. Priority: heal, reload, swap-in, cook, throw recovery,
- * punch (fists within one fire interval of the last swing), idle.
+ * The local arms' action from the predicted action state. Priority: heal, reload, T sight switch, swap-in, throwable
+ * cycle, cook, throw recovery, melee swing, punch (fists within one fire interval of the last swing), idle.
  */
-export function localVmAction(a: PredictedActions, balance: Balance): VmAction {
-  const held = heldOf(a);
+export function localVmAction(a: PredictedActions, balance: Balance, m2c: LocalVmExtras | null = null): VmAction {
+  const held = m2c?.held ?? heldOf(a);
   const cooking = a.cook !== null;
   if (a.heal) return { item: a.heal.item, cooking, action: 'heal', actionProgress: progressOf(a.heal.remainingMs, a.heal.totalMs) };
   if (a.reload) return { item: held, cooking, action: 'reload', actionProgress: progressOf(a.reload.remainingMs, a.reload.totalMs) };
+  if (m2c?.scopeSwapProgress != null) return { item: held, cooking, action: 'scopeSwap', actionProgress: m2c.scopeSwapProgress };
+  if (m2c?.cycleProgress != null) return { item: held, cooking, action: 'cycle', actionProgress: m2c.cycleProgress };
   if (a.swapRemainingMs > 0) {
     return { item: held, cooking, action: 'swapIn', actionProgress: progressOf(a.swapRemainingMs, balance.combat.swapMs) };
+  }
+  if (m2c?.swing) {
+    return { item: held, cooking, action: 'swing', actionProgress: m2c.swing.progress, hitFraction: m2c.swing.hitFraction };
   }
   const now = actionsNowMs(a);
   if (a.cook) {
@@ -54,13 +72,17 @@ export function localVmAction(a: PredictedActions, balance: Balance): VmAction {
   return { item: held, cooking, action: 'idle', actionProgress: 0 };
 }
 
-/** A spectated player's arms from their anim flags (progress 0: the snapshot has no timers for remotes). */
-export function remoteVmAction(p: Pick<PlayerState, 'weapon' | 'anim'>): VmAction {
+/**
+ * A spectated player's arms from their anim flags (progress 0: the snapshot has no timers for remotes). M2c: a melee
+ * swing from their meleeSwing event shows as 'swing' with its progress.
+ */
+export function remoteVmAction(p: Pick<PlayerState, 'weapon' | 'anim'>, swing: MeleeSwingView | null = null): VmAction {
   const a = p.anim;
   const base = { item: p.weapon, cooking: a.cooking, actionProgress: 0 };
   if (a.healing) return { ...base, action: 'heal' };
   if (a.reloading) return { ...base, action: 'reload' };
   if (a.cooking) return { ...base, action: 'cook' };
+  if (swing) return { ...base, action: 'swing', actionProgress: swing.progress, hitFraction: swing.hitFraction };
   if (a.firing && p.weapon === 'fists') return { ...base, action: 'punch' };
   return { ...base, action: 'idle' };
 }
@@ -82,6 +104,9 @@ export interface ViewmodelArgs {
   sprinting: boolean;
   lookRate: { yaw: number; pitch: number };
   motionScale: number;
+  /** M2c: held weapon level (null for fists, throwables, heals) and the effective sight (predicted scope). */
+  level?: ItemLevel | null;
+  sight?: M2cSightType;
 }
 
 export function buildViewmodel(a: ViewmodelArgs): ViewmodelView {
@@ -105,6 +130,9 @@ export function buildViewmodel(a: ViewmodelArgs): ViewmodelView {
     sprinting: a.sprinting,
     lookRate: { ...a.lookRate },
     motionScale: a.motionScale,
+    level: a.level ?? null,
+    sight: a.sight ?? 'none',
+    ...(a.act.hitFraction !== undefined ? { hitFraction: a.act.hitFraction } : {}),
   };
 }
 

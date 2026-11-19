@@ -1,7 +1,7 @@
-# Test plan (M1 "First Playable", M2a "Arsenal & Stance", M2b "Office, Drop, Rooms & First person")
+# Test plan (M1, M2a "Arsenal & Stance", M2b "Office, Drop, Rooms & First person", M2c "Fresh Every Match & Bigger Arsenal")
 
 Owner: qa-tester. Results: [M1-test-report.md](M1-test-report.md), [M2a-test-report.md](M2a-test-report.md),
-[M2b-test-report.md](M2b-test-report.md) (acceptance-criterion traceability). Bugs: [bugs/](bugs/).
+[M2b-test-report.md](M2b-test-report.md), [M2c-test-report.md](M2c-test-report.md) (acceptance-criterion traceability). Bugs: [bugs/](bugs/).
 
 ## How to run
 
@@ -18,6 +18,10 @@ Owner: qa-tester. Results: [M1-test-report.md](M1-test-report.md), [M2a-test-rep
 | M2b E2E only | `npm run e2e:local -- tests/e2e/m2b-rooms.spec.ts tests/e2e/m2b-fp.spec.ts tests/e2e/m2b-office.spec.ts` | ~8 min |
 | M2b QA Vitest | `npx vitest run tests/sim/m2b-edge.test.ts tests/server` | ~3 s |
 | Load: 8 rooms | server on a QA port (8800-8999), then `npx tsx server/tools/bots.ts --url ws://127.0.0.1:<port>/ws --rooms 8 --clients 64 --seconds 60 --map office` | 70 s |
+| M2c QA Vitest | `npx vitest run tests/sim/m2c-gaps.test.ts tests/sim/m2c-layout-qa.test.ts` | ~15 s |
+| M2c E2E | `npm run e2e:local -- tests/e2e/m2c-layout.spec.ts tests/e2e/m2c.spec.ts tests/e2e/m2c-office.spec.ts tests/e2e/m2c-seeds.spec.ts` | ~25 min |
+| Snapshot sizes | `npx tsx server/tools/measure-snapshot.ts --players 16 --seconds 60 --synthetic-grenades 16 --synthetic-rockets 16 --synthetic-smokes 12 --synthetic-panes 12` | 1 min |
+| Office nav stuck rate | `npx tsx src/shared/sim/tools/matchReport.ts --map office --layout-seeds 30 --nav-walk 120` | 1-2 min |
 | Pacing per map | `npx tsx src/shared/sim/tools/matchReport.ts --matches 30 --variant both --map office` (and `--map island01`) | 1-2 min |
 | Load (16 sockets) | `PORT=8798 npx tsx server/index.ts` and then `npx tsx server/tools/bots.ts --url ws://127.0.0.1:8798/ws --clients 15 --seconds 30` | 35 s |
 
@@ -76,6 +80,11 @@ from `window.__render` (dev only).
 - fps, audio and visual polish cannot be judged headless.
 - CDP key events do not reach the browser UI, so Escape does not release pointer lock; specs call
   `document.exitPointerLock()` to reach the pause overlay.
+- M2c: every match has a random layout. Specs that walk pin `LAYOUT_SEED` (`stack.ts` `layoutSeed`; `baseline` = seed 0,
+  the M2b props and loot). On the office, long walks follow the bots' nav graph (`support/nav.ts` -> `support/office-path.ts`
+  in a tsx child process) instead of raw W-pulse steering, which stalls on furniture. `window.__game` has the M2c state
+  since BUG-014 (layout ref and `hashMatched`, slots and levels, throwables, rockets, smokes, broken panes, `inSmoke`,
+  per-player `smokeHidden` and `swing`).
 - M2b: three WebGL pages in one run get a few fps each; `window.__game` only changes per rendered frame, so a short
   stage (office freefall 1 s, chute 1.25 s) can fall between two frames. Sample in the page (`requestAnimationFrame`)
   and check strict stage order single-page. Frames over 200 ms make the server run ticks the client did not predict,
@@ -124,3 +133,16 @@ Run on real hardware with `npm run dev`, then two tabs.
 - [ ] Office: climb every route kind (ramp, book stairs, perch tower), crawl under desks, glass rooms see-through but
   solid, ping-pong net cannot be hopped, sprinkler rain inside the circle edge, no names or logos anywhere.
 - [ ] Monitor tops next to the perches (BUG-011): after the fix, no landing on them.
+
+### M2c additions
+- [ ] Levels: every levelled weapon looks different at L1-L4 (ground, third person, viewmodel); badge numerals readable in
+  greyscale; L4 sparkle; armor tier 4 models and 4 pips.
+- [ ] Melee: knife / machete / paddle swings, recovery ring, paddle knockback, glass shatter by melee, hit markers.
+- [ ] RPG: launch, trail, whistle, explosion, dud clunk at short range, self-damage line on the death card.
+- [ ] Smoke: cloud look from inside and outside; name tags, hit markers and the spectate outline hidden through it; no
+  minimap cloud; hiss for a late joiner.
+- [ ] Scopes: 2x overlay, red dot on the viewmodel, T switch chip and stash, glint at 4x / 8x only.
+- [ ] Layouts: 3 seeds per map look sane (no floating props, no blocked doors), looks (morning / golden / overcast; day /
+  evening / after hours), results screen shows "Layout #".
+- [ ] Office glass: break by melee and rocket, walk through, pieces on the floor.
+- [ ] Audio "(ear)" checks in docs/audio/M2c.md §12.

@@ -1,0 +1,594 @@
+{
+  "_doc": "Per-match layout variety data for island01 (M2c). Spec: docs/design/levels/variety.md. Pure data, not imported yet: the tech-lead types MatchLayout, then the level generator (buildMatchLayout) reads this file. Grammar in variety.md section 3. Lengths in metres, angles in degrees. Zone-local frame: origin at the zone anchor, +Z = 'front' (seaward for coastal POIs), +X = right. Bearing b: local point (r sin b, r cos b). rot: number = degrees in the zone frame, 'any' = random, 'face' = local +Z toward the zone origin, 'away' = away from it, 'tangent' = along the ring, 'along' = along the line. scale: number or [min, max]. Pieces with 'fill': true are placed after loot (section 3.3).",
+  "format": 1,
+  "mapId": "island01",
+  "frames": {
+    "outward": "rotY = atan2(anchor.x, anchor.z): local +Z points out to sea",
+    "quarter": "rotY = k * 90 deg, k from the zone stream",
+    "any": "rotY uniform from the zone stream"
+  },
+  "look": {
+    "stream": "look",
+    "presets": [
+      { "id": "noon", "weight": 35, "baseline": true, "intent": "Today's look. High sun, crisp shadows, clear sea." },
+      { "id": "morning", "weight": 25, "intent": "Cool, soft sun low in the east, pale sky, faint sea haze far out. Calm start." },
+      { "id": "golden", "weight": 25, "intent": "Warm sun low in the west, long shadows, orange-pink sky. The 'postcard' match." },
+      { "id": "overcast", "weight": 15, "intent": "Flat blue-grey light, soft or no hard shadows, darker sea, light fog. Moody but readable." }
+    ],
+    "fairness": {
+      "minFullVisibilityMetres": 120,
+      "minSunElevationDeg": 15,
+      "noGlareOrBloom": true,
+      "zoneWallAlwaysDistinct": true
+    }
+  },
+  "fixed": [
+    { "kind": "dock", "polar": [95, 111], "rot": "outward", "scale": 1, "note": "main dock" },
+    { "kind": "dock", "polar": [104, 109], "rot": "outward", "scale": 0.75, "note": "short dock" },
+    { "kind": "hut", "polar": [95, 83], "rot": "outward", "scale": 1.1, "note": "boathouse (harbour landmark)" },
+    { "kind": "hut", "polar": [107, 86], "rot": "outward", "scale": 0.9, "note": "fish shed" },
+    { "kind": "tikiTorch", "polar": [92.9, 104.5], "scale": 1, "note": "dock torches, at the dock's landward end: 2 m from the dock, 4 m from spawn 97.5 deg" },
+    { "kind": "tikiTorch", "polar": [97.1, 104.5], "scale": 1 },
+    { "kind": "boat", "polar": [315, 99], "rot": "outwardPlus", "rotOffsetRad": 1.1, "scale": 1.8, "note": "wreck hull (landmark)" },
+    { "kind": "tikiTorch", "ring": { "anchor": "summit", "n": 4, "r": 3.5, "start": 45 }, "scale": 1, "note": "summit beacon (landmark)" },
+    { "kind": "hut", "polar": [195, 89], "rot": "outward", "scale": 1, "note": "tiki bar hut; the 'party' variant may turn it by +-30 deg in place" }
+  ],
+  "zones": [
+    {
+      "id": "summit",
+      "anchor": { "x": 0, "z": 0 },
+      "radius": 22,
+      "frame": "quarter",
+      "mirror": true,
+      "lootPick": { "epic": 4, "rare": 4, "common": 1 },
+      "loot": [
+        { "tier": "rare", "ring": { "n": 8, "r": 17.5, "start": 22.5 } },
+        { "tier": "common", "at": [6.5, 17.9] },
+        { "tier": "common", "at": [-6.5, -17.9] }
+      ],
+      "variants": [
+        {
+          "id": "beacon",
+          "weight": 1,
+          "baseline": true,
+          "intent": "Today's crown: a loose ring of low rocks and four crates around the beacon. Even cover all round, open crown.",
+          "pieces": [
+            { "kind": "rock", "ring": { "n": 8, "r": [10, 14], "start": 22.5, "jitterDeg": 8 }, "rot": "any", "scale": [0.7, 1.1] },
+            { "kind": "crate", "ring": { "n": 4, "r": [6, 8], "start": 0, "jitterDeg": 20 }, "rot": "any", "scale": 1 },
+            { "kind": "bush", "scatter": { "n": 4, "annulus": [9, 21] }, "rot": "any", "scale": [0.8, 1.2], "fill": true }
+          ],
+          "loot": [
+            { "tier": "epic", "ring": { "n": 4, "r": 5, "start": 0 } },
+            { "tier": "epic", "ring": { "n": 4, "r": 9, "start": 45 } }
+          ]
+        },
+        {
+          "id": "cairns",
+          "weight": 1,
+          "intent": "Three stone cairns on the shoulders make three pockets; the crown between them is wide open.",
+          "pieces": [
+            { "kind": "rock", "cluster": { "centres": { "ring": { "n": 3, "r": 12, "start": 0, "jitterDeg": 10 } }, "n": 3, "spacing": 4.5 }, "rot": "any", "scale": [0.6, 0.8] },
+            { "kind": "crate", "ring": { "n": 3, "r": 7, "start": 60 }, "rot": "any", "scale": 1 },
+            { "kind": "bush", "scatter": { "n": 5, "annulus": [9, 21] }, "rot": "any", "scale": [0.8, 1.2], "fill": true }
+          ],
+          "loot": [
+            { "tier": "epic", "ring": { "n": 4, "r": 5, "start": 0 } },
+            { "tier": "epic", "ring": { "n": 3, "r": 15.5, "start": 0 }, "note": "lee side of each cairn" },
+            { "tier": "epic", "ring": { "n": 3, "r": 9, "start": 60 } }
+          ]
+        },
+        {
+          "id": "supplyDrop",
+          "weight": 1,
+          "intent": "A spilled crate L on one flank and a rock rim on the other. One side is cover-rich, the other is a firing line.",
+          "pieces": [
+            { "kind": "crate", "place": [[5, 7], [8.5, 7], [12, 7], [12, 3.5], [12, 0], [12, -3.5]], "rot": "any", "scale": 1 },
+            { "kind": "rock", "ring": { "n": 6, "r": [12, 14], "arc": [180, 330], "jitterDeg": 6 }, "rot": "any", "scale": [0.8, 1.1] },
+            { "kind": "bush", "scatter": { "n": 4, "annulus": [9, 21] }, "rot": "any", "scale": [0.8, 1.2], "fill": true }
+          ],
+          "loot": [
+            { "tier": "epic", "ring": { "n": 4, "r": 5, "start": 0 } },
+            { "tier": "epic", "at": [8.5, 3.8] },
+            { "tier": "epic", "at": [5.5, 3.8] },
+            { "tier": "epic", "at": [8.8, 0.5] },
+            { "tier": "epic", "at": [15, 2] }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "grove",
+      "anchor": { "polar": [145, 58] },
+      "radius": 20,
+      "frame": "any",
+      "mirror": false,
+      "lootPick": { "epic": 3, "rare": 2, "common": 1 },
+      "loot": [
+        { "tier": "rare", "ring": { "n": 4, "r": 14, "start": 45 } },
+        { "tier": "common", "ring": { "n": 2, "r": 18, "start": 90 } }
+      ],
+      "variants": [
+        {
+          "id": "dense",
+          "weight": 1,
+          "baseline": true,
+          "intent": "Today's jungle: palms everywhere, no line longer than about 15 m.",
+          "pieces": [
+            { "kind": "crate", "scatter": { "n": 3, "disc": 8 }, "rot": "any", "scale": 1 },
+            { "kind": "palm", "scatter": { "n": [28, 32], "disc": 20 }, "rot": "any", "scale": [0.9, 1.35], "fill": true },
+            { "kind": "bush", "scatter": { "n": 12, "disc": 20 }, "rot": "any", "scale": [0.8, 1.3], "fill": true },
+            { "kind": "rock", "scatter": { "n": 2, "disc": 18 }, "rot": "any", "scale": [0.8, 1.3], "fill": true }
+          ],
+          "loot": [
+            { "tier": "epic", "place": [[0, 0], [5, 3], [-4, -5], [6, -6], [-7, 4], [2, 9]] }
+          ]
+        },
+        {
+          "id": "clearing",
+          "weight": 1,
+          "intent": "A sunny clearing (r 7) with a log ring and crates in the middle of the palms: a small arena with the epics in it.",
+          "pieces": [
+            { "kind": "driftwood", "ring": { "n": 3, "r": 5, "start": 0 }, "rot": "tangent", "scale": 1 },
+            { "kind": "crate", "ring": { "n": 3, "r": 3, "start": 60 }, "rot": "any", "scale": 1 },
+            { "kind": "palm", "scatter": { "n": [26, 30], "annulus": [8, 21] }, "rot": "any", "scale": [0.9, 1.35], "fill": true },
+            { "kind": "bush", "scatter": { "n": 12, "annulus": [6, 21] }, "rot": "any", "scale": [0.8, 1.3], "fill": true },
+            { "kind": "rock", "scatter": { "n": 2, "annulus": [8, 18] }, "rot": "any", "scale": [0.8, 1.3], "fill": true }
+          ],
+          "loot": [
+            { "tier": "epic", "at": [0, 0] },
+            { "tier": "epic", "ring": { "n": 3, "r": 3, "start": 0 } },
+            { "tier": "epic", "ring": { "n": 2, "r": 7.5, "start": 60, "stepDeg": 240 } }
+          ]
+        },
+        {
+          "id": "trail",
+          "weight": 1,
+          "intent": "A 5 m trail cuts straight through the palms: one medium sightline across the grove, flanked by dense cover.",
+          "pieces": [
+            { "kind": "crate", "place": [[3.8, -6], [-3.8, 0], [3.8, 6]], "rot": "any", "scale": 1 },
+            { "kind": "palm", "scatter": { "n": [28, 32], "disc": 21, "minus": [{ "strip": { "axis": "z", "halfWidth": 2.5 } }] }, "rot": "any", "scale": [0.9, 1.35], "fill": true },
+            { "kind": "bush", "scatter": { "n": 14, "disc": 21, "minus": [{ "strip": { "axis": "z", "halfWidth": 2.5 } }] }, "rot": "any", "scale": [0.8, 1.3], "fill": true },
+            { "kind": "rock", "scatter": { "n": 2, "disc": 18, "minus": [{ "strip": { "axis": "z", "halfWidth": 2.5 } }] }, "rot": "any", "scale": [0.8, 1.3], "fill": true }
+          ],
+          "loot": [
+            { "tier": "epic", "place": [[0, -16], [0, -12], [0, -6], [0, 0], [0, 6], [0, 12]] }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dock",
+      "anchor": { "polar": [95, 90] },
+      "radius": 18,
+      "frame": "outward",
+      "mirror": false,
+      "aprons": [
+        { "note": "main dock landward end", "rect": [-2.5, 11, 2.5, 14] },
+        { "note": "short dock landward end", "rect": [-18.2, 9.5, -14.2, 12.5] }
+      ],
+      "lootPick": { "rare": 4, "common": 1 },
+      "loot": [
+        { "tier": "rare", "place": [[-12, -2], [8, -3], [-24, 1], [16, -8]] },
+        { "tier": "common", "place": [[20, 2], [-6, -14]] }
+      ],
+      "variants": [
+        {
+          "id": "quay",
+          "weight": 1,
+          "baseline": true,
+          "intent": "Today's harbour: cargo crates scattered over the quay.",
+          "pieces": [
+            { "kind": "crate", "scatter": { "n": 10, "disc": 11, "centre": [-4.8, 1.9] }, "rot": "any", "scale": [0.9, 1.2], "fill": true },
+            { "kind": "driftwood", "scatter": { "n": 2, "disc": 6, "centre": [15.6, 8.8] }, "rot": "any", "scale": [0.8, 1.2], "fill": true }
+          ],
+          "loot": [
+            { "tier": "rare", "place": [[-4, 2], [4, 6], [-9, 8], [10, 9]] }
+          ]
+        },
+        {
+          "id": "stacks",
+          "weight": 1,
+          "intent": "Nine crates in a tidy 3 x 3 grid: two 6.5 m lanes toward the sea, aisle fights.",
+          "pieces": [
+            { "kind": "crate", "grid": { "x": [-8.5, -2, 4.5], "z": [0, 3.5, 7] }, "rot": 0, "scale": 1 },
+            { "kind": "driftwood", "scatter": { "n": 2, "disc": 6, "centre": [15.6, 8.8] }, "rot": "any", "scale": [0.8, 1.2], "fill": true }
+          ],
+          "loot": [
+            { "tier": "rare", "place": [[-5.25, 1.75], [1.25, 5.25], [-5.25, 5.25], [1.25, 1.75]] }
+          ]
+        },
+        {
+          "id": "unloading",
+          "weight": 1,
+          "intent": "A crate wall along the shore with a gap at the dock, a rowboat pulled up on the sand. Cover faces the sea.",
+          "pieces": [
+            { "kind": "crate", "place": [[-15, 8], [-11, 8], [-7, 8], [5, 8], [9, 8], [13, 8], [-14, -1]], "rot": 0, "scale": 1 },
+            { "kind": "crate", "place": [[-21, -1], [17, 3]], "rot": "any", "scale": 1 },
+            { "kind": "boat", "place": [[12, -2]], "rot": "any", "scale": 1 },
+            { "kind": "driftwood", "scatter": { "n": 2, "disc": 6, "centre": [15.6, 8.8] }, "rot": "any", "scale": [0.8, 1.2], "fill": true }
+          ],
+          "loot": [
+            { "tier": "rare", "place": [[-11, 5], [9, 5], [-15, 4.5], [13, 4.5]] }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "village",
+      "anchor": { "polar": [245, 78] },
+      "radius": 22,
+      "frame": "outward",
+      "mirror": true,
+      "lootPick": { "rare": 3, "common": 2 },
+      "variants": [
+        {
+          "id": "ring",
+          "weight": 1,
+          "baseline": true,
+          "intent": "Today's village: six huts around a torch-lit plaza. Hut-to-hut fights from every side.",
+          "pieces": [
+            { "kind": "hut", "ring": { "n": 6, "r": 13, "start": 15 }, "rot": "face", "scale": [1.0, 1.2] },
+            { "kind": "tikiTorch", "ring": { "n": 4, "r": 5, "start": 45 }, "scale": 1 },
+            { "kind": "crate", "scatter": { "n": 6, "annulus": [6, 20] }, "rot": "any", "scale": [0.9, 1.1], "fill": true },
+            { "kind": "bush", "scatter": { "n": 6, "disc": 24 }, "rot": "any", "scale": [0.8, 1.2], "fill": true },
+            { "kind": "palm", "scatter": { "n": 6, "disc": 24 }, "rot": "any", "scale": [0.9, 1.3], "fill": true }
+          ],
+          "loot": [
+            { "tier": "rare", "ring": { "n": 6, "r": 8.5, "start": 15 }, "note": "hut door fronts" },
+            { "tier": "common", "place": [[0, 2], [0, -2]] },
+            { "tier": "common", "ring": { "n": 2, "r": 18, "start": 45 } }
+          ]
+        },
+        {
+          "id": "crescent",
+          "weight": 1,
+          "intent": "Five huts in a crescent that opens toward the sea; crate pairs barricade the open side.",
+          "pieces": [
+            { "kind": "hut", "ring": { "n": 5, "r": 14, "start": 60, "stepDeg": 60 }, "rot": "face", "scale": [1.0, 1.2] },
+            { "kind": "tikiTorch", "ring": { "n": 4, "r": 5, "start": 45 }, "scale": 1 },
+            { "kind": "crate", "place": [[-3, 9], [3, 9], [-3, 12.5], [3, 12.5]], "rot": "any", "scale": 1 },
+            { "kind": "crate", "scatter": { "n": 6, "annulus": [6, 20] }, "rot": "any", "scale": [0.9, 1.1], "fill": true },
+            { "kind": "bush", "scatter": { "n": 6, "disc": 24 }, "rot": "any", "scale": [0.8, 1.2], "fill": true },
+            { "kind": "palm", "scatter": { "n": 6, "disc": 24 }, "rot": "any", "scale": [0.9, 1.3], "fill": true }
+          ],
+          "loot": [
+            { "tier": "rare", "ring": { "n": 5, "r": 9.5, "start": 60, "stepDeg": 60 } },
+            { "tier": "rare", "at": [0, 6.5] },
+            { "tier": "common", "place": [[0, 0], [0, -4]] },
+            { "tier": "common", "ring": { "n": 2, "r": 18, "start": 90 } }
+          ]
+        },
+        {
+          "id": "street",
+          "weight": 1,
+          "intent": "Two rows of three huts face each other across an 11 m street: a corridor fight with doorways on both sides.",
+          "pieces": [
+            { "kind": "hut", "place": [[-14, -8], [0, -8], [14, -8]], "rot": 0, "scale": [1.0, 1.2] },
+            { "kind": "hut", "place": [[-14, 8], [0, 8], [14, 8]], "rot": 180, "scale": [1.0, 1.2] },
+            { "kind": "tikiTorch", "place": [[-21, 0], [21, 0], [-21, 4], [21, -4]], "scale": 1 },
+            { "kind": "crate", "place": [[-7, 0], [7, 0]], "rot": "any", "scale": 1 },
+            { "kind": "crate", "scatter": { "n": 4, "annulus": [12, 21] }, "rot": "any", "scale": [0.9, 1.1], "fill": true },
+            { "kind": "bush", "scatter": { "n": 6, "disc": 24 }, "rot": "any", "scale": [0.8, 1.2], "fill": true },
+            { "kind": "palm", "scatter": { "n": 6, "disc": 24 }, "rot": "any", "scale": [0.9, 1.3], "fill": true }
+          ],
+          "loot": [
+            { "tier": "rare", "place": [[-14, -4.5], [0, -4.5], [14, -4.5], [-14, 4.5], [0, 4.5], [14, 4.5]] },
+            { "tier": "common", "place": [[0, 0], [-21, 8], [21, -8], [0, -17]] }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "wreck",
+      "anchor": { "polar": [310, 92] },
+      "radius": 16,
+      "frame": "outward",
+      "mirror": false,
+      "lootPick": { "rare": 2, "common": 2 },
+      "variants": [
+        {
+          "id": "cove",
+          "weight": 1,
+          "baseline": true,
+          "intent": "Today's cove: washed-up crates and driftwood around the hull, rocks framing it, a rowboat.",
+          "pieces": [
+            { "kind": "boat", "place": [[15, 2.8]], "rot": "any", "scale": 1 },
+            { "kind": "driftwood", "scatter": { "n": 8, "disc": 14, "centre": [0, 5] }, "rot": "any", "scale": [0.8, 1.3], "fill": true },
+            { "kind": "crate", "scatter": { "n": 8, "disc": 10, "centre": [0, -3] }, "rot": "any", "scale": [0.9, 1.2], "fill": true },
+            { "kind": "rock", "scatter": { "n": 5, "disc": 12, "centre": [0, -5] }, "rot": "any", "scale": [1.0, 1.4], "fill": true }
+          ],
+          "loot": [
+            { "tier": "rare", "place": [[-3, 0], [4, -4], [-10, -2], [8, 4]] },
+            { "tier": "common", "place": [[0, -10], [-14, -6], [12, -8], [4, 10]] }
+          ]
+        },
+        {
+          "id": "spill",
+          "weight": 1,
+          "intent": "A trail of cargo spilled from the hull inland: a broken line of crates to leapfrog along.",
+          "pieces": [
+            { "kind": "crate", "line": { "from": [-6, 0], "to": [4, -14], "n": 5, "jitter": 0.6 }, "rot": "any", "scale": [0.9, 1.2] },
+            { "kind": "crate", "scatter": { "n": 3, "disc": 10, "centre": [0, -3] }, "rot": "any", "scale": [0.9, 1.2], "fill": true },
+            { "kind": "driftwood", "scatter": { "n": 10, "disc": 14, "centre": [0, 5] }, "rot": "any", "scale": [0.8, 1.3], "fill": true },
+            { "kind": "rock", "scatter": { "n": 4, "disc": 12, "centre": [0, -5] }, "rot": "any", "scale": [1.0, 1.4], "fill": true }
+          ],
+          "loot": [
+            { "tier": "rare", "place": [[-3.5, -3], [2.5, -10], [-8, -8], [6, -6]] },
+            { "tier": "common", "place": [[-12, 2], [10, 2], [-4, -14], [0, 9]] }
+          ]
+        },
+        {
+          "id": "camp",
+          "weight": 1,
+          "intent": "A castaway camp: a small hut facing the hull, a driftwood fire ring, torches. Cosy close-range cover.",
+          "pieces": [
+            { "kind": "hut", "place": [[6, -8]], "rot": "faceHull", "scale": 0.9 },
+            { "kind": "driftwood", "ring": { "n": 4, "r": 3.6, "start": 0, "centre": [-1, -3] }, "rot": "tangent", "scale": 1 },
+            { "kind": "tikiTorch", "place": [[-6, -9], [11, -3]], "scale": 1 },
+            { "kind": "crate", "place": [[1, -12], [11, -12], [14, -8], [-4, -13]], "rot": "any", "scale": 1 },
+            { "kind": "boat", "place": [[15, 2.8]], "rot": "any", "scale": 1 },
+            { "kind": "rock", "scatter": { "n": 5, "disc": 12, "centre": [0, -5] }, "rot": "any", "scale": [1.0, 1.4], "fill": true }
+          ],
+          "loot": [
+            { "tier": "rare", "place": [[-1, -3], [6, -3.5], [-8, -8], [12, -8]] },
+            { "tier": "common", "place": [[2, -15], [-12, 0], [10, 4], [-4, 8]] }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rocks",
+      "anchor": { "polar": [35, 90] },
+      "radius": 16,
+      "frame": "outward",
+      "mirror": true,
+      "lootPick": { "rare": 1, "common": 3 },
+      "variants": [
+        {
+          "id": "field",
+          "weight": 1,
+          "baseline": true,
+          "intent": "Today's boulder field: big rocks at random, broken sightlines everywhere.",
+          "pieces": [
+            { "kind": "rock", "scatter": { "n": 14, "disc": 18 }, "rot": "any", "scale": [1.0, 2.0], "fill": true },
+            { "kind": "bush", "scatter": { "n": 4, "disc": 18 }, "rot": "any", "scale": [0.8, 1.2], "fill": true },
+            { "kind": "driftwood", "scatter": { "n": 2, "disc": 14 }, "rot": "any", "scale": [0.8, 1.2], "fill": true }
+          ],
+          "loot": [
+            { "tier": "rare", "place": [[0, 0], [-6, 5], [7, -4]] },
+            { "tier": "common", "place": [[-10, -8], [10, 8], [4, -12], [-12, 6], [0, 12], [12, -2]] }
+          ]
+        },
+        {
+          "id": "walls",
+          "weight": 1,
+          "intent": "Two broken boulder walls of four parallel to the shore with 3 m gaps, two giants behind: lane fights, peek through the gaps. (Run 2: five per wall plus three giants measured +32 % cover vs `field`; trimmed.)",
+          "pieces": [
+            { "kind": "rock", "grid": { "x": [-10.5, -3.5, 3.5, 10.5], "z": [-6, 5] }, "jitter": 0.5, "rot": "any", "scale": [1.0, 1.3] },
+            { "kind": "rock", "place": [[-7, -13], [7, -13]], "rot": "any", "scale": [1.6, 2.0] },
+            { "kind": "bush", "scatter": { "n": 4, "disc": 18 }, "rot": "any", "scale": [0.8, 1.2], "fill": true },
+            { "kind": "driftwood", "scatter": { "n": 2, "disc": 14 }, "rot": "any", "scale": [0.8, 1.2], "fill": true }
+          ],
+          "loot": [
+            { "tier": "rare", "place": [[0, -0.5], [-7, -0.5], [7, -0.5]] },
+            { "tier": "common", "place": [[0, -6], [7, 5], [-7, 5], [-14, -6], [0, 10], [0, -13]] }
+          ]
+        },
+        {
+          "id": "giants",
+          "weight": 1,
+          "intent": "Fewer, bigger boulders with small ones between: long hard cover pieces and short open runs.",
+          "pieces": [
+            { "kind": "rock", "scatter": { "n": 7, "disc": 18 }, "rot": "any", "scale": [1.6, 2.0] },
+            { "kind": "rock", "scatter": { "n": 7, "disc": 18 }, "rot": "any", "scale": [0.6, 0.9], "fill": true },
+            { "kind": "bush", "scatter": { "n": 4, "disc": 18 }, "rot": "any", "scale": [0.8, 1.2], "fill": true },
+            { "kind": "driftwood", "scatter": { "n": 2, "disc": 14 }, "rot": "any", "scale": [0.8, 1.2], "fill": true }
+          ],
+          "loot": [
+            { "tier": "rare", "place": [[0, 0], [-6, 5], [7, -4]] },
+            { "tier": "common", "place": [[-10, -8], [10, 8], [4, -12], [-12, 6], [0, 12], [12, -2]] }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tikibar",
+      "anchor": { "polar": [195, 94] },
+      "radius": 14,
+      "frame": "outward",
+      "mirror": true,
+      "lootPick": { "rare": 1, "common": 3 },
+      "loot": [
+        { "tier": "common", "place": [[-10, 4], [10, 4], [-13, -4], [6, -12], [-6, -12], [0, 6.5]] }
+      ],
+      "variants": [
+        {
+          "id": "bar",
+          "weight": 1,
+          "baseline": true,
+          "intent": "Today's beach bar: umbrellas and torches on open sand, a few crates by the bar.",
+          "pieces": [
+            { "kind": "umbrella", "scatter": { "n": 6, "rect": [-14, 3, 14, 9] }, "rot": "any", "scale": 1, "fill": true },
+            { "kind": "tikiTorch", "scatter": { "n": 6, "rect": [-13, -3, 13, 5] }, "scale": 1, "fill": true },
+            { "kind": "crate", "scatter": { "n": 3, "disc": 8, "centre": [0, -7] }, "rot": "any", "scale": 1, "fill": true },
+            { "kind": "bush", "scatter": { "n": 3, "disc": 14 }, "rot": "any", "scale": [0.8, 1.2], "fill": true }
+          ],
+          "loot": [
+            { "tier": "rare", "place": [[0, -0.5], [-8, -8], [8, -8]] }
+          ]
+        },
+        {
+          "id": "party",
+          "weight": 1,
+          "intent": "Seven umbrellas in two staggered rows and a torch-lit path; the bar hut sits at an angle. Open, colourful, exposed.",
+          "pieces": [
+            { "kind": "umbrella", "place": [[-12, 4], [-4, 4], [4, 4], [12, 4], [-8, 8.5], [0, 8.5], [8, 8.5]], "rot": "any", "scale": 1 },
+            { "kind": "tikiTorch", "place": [[-4, 0], [4, 0], [-9, 1], [9, 1], [-14, 2], [14, 2]], "scale": 1 },
+            { "kind": "crate", "scatter": { "n": 2, "disc": 8, "centre": [0, -7] }, "rot": "any", "scale": 1, "fill": true },
+            { "kind": "bush", "scatter": { "n": 3, "disc": 14 }, "rot": "any", "scale": [0.8, 1.2], "fill": true }
+          ],
+          "fixedOverride": { "tikibarHutRotDeg": [-30, 30] },
+          "loot": [
+            { "tier": "rare", "place": [[0, -0.5], [-8, -8], [8, -8]] }
+          ]
+        },
+        {
+          "id": "boarded",
+          "weight": 1,
+          "intent": "The bar is closed: a crate barricade in front of it, umbrellas folded away. A defensible spot on an open beach.",
+          "pieces": [
+            { "kind": "crate", "place": [[-6, 0], [-2, 0], [2, 0], [6, 0]], "rot": 0, "scale": 1 },
+            { "kind": "umbrella", "scatter": { "n": 3, "rect": [-14, 4, 14, 9] }, "rot": "any", "scale": 1, "fill": true },
+            { "kind": "tikiTorch", "scatter": { "n": 4, "rect": [-13, -3, 13, 5] }, "scale": 1, "fill": true },
+            { "kind": "bush", "scatter": { "n": 3, "disc": 14 }, "rot": "any", "scale": [0.8, 1.2], "fill": true }
+          ],
+          "loot": [
+            { "tier": "rare", "place": [[0, -1.5], [-8, -8], [8, -8]] }
+          ]
+        }
+      ]
+    }
+  ],
+  "lootGroups": [
+    {
+      "id": "beach",
+      "rule": "ringGaps",
+      "note": "24 gaps between player spawns, gap g = 15 + 15k deg. Phase p (0/1) from stream 'loot:beach'. Gaps with (k + p) even pick 2: one flagged guarantee 'weapon', one plain; the others pick 1. Every spawn borders exactly one 2-gap, so every spawn has a guaranteed weapon about 13-16 m away and 3 loot points within 25 m.",
+      "tier": "common",
+      "candidatesPerGap": [[0, 97], [0, 90], [-2.5, 93.5], [2.5, 93.5]],
+      "candidateFormat": "[deg offset from the gap angle, radius]",
+      "pickBig": 2,
+      "pickSmall": 1,
+      "guaranteeInBig": "weapon"
+    },
+    {
+      "id": "inland",
+      "lootPick": { "rare": 2, "common": 2 },
+      "note": "Rewards rotating through the jungle. All outside every POI disc.",
+      "candidates": [
+        { "tier": "rare", "polar": [60, 45] },
+        { "tier": "rare", "polar": [120, 70] },
+        { "tier": "rare", "polar": [200, 60] },
+        { "tier": "rare", "polar": [280, 40] },
+        { "tier": "rare", "polar": [330, 65] },
+        { "tier": "rare", "polar": [20, 60] },
+        { "tier": "common", "polar": [0, 55] },
+        { "tier": "common", "polar": [90, 50] },
+        { "tier": "common", "polar": [160, 35] },
+        { "tier": "common", "polar": [230, 45] },
+        { "tier": "common", "polar": [300, 70] },
+        { "tier": "common", "polar": [250, 30] }
+      ]
+    }
+  ],
+  "lootTotals": { "common": 51, "rare": 19, "epic": 7, "guaranteedWeapons": 12 },
+  "scatter": [
+    {
+      "id": "coastPalms",
+      "layer": "sim",
+      "order": 1,
+      "rule": "clusters",
+      "clusters": { "n": 24, "centreDeg": "gap", "centreJitterDeg": 4, "r": [93, 101], "clusterRadius": 6, "perCluster": [2, 5] },
+      "kinds": [{ "kind": "palm", "weight": 1, "scale": [0.85, 1.3] }],
+      "intent": "Shade on both sides of every spawn; spawns themselves stay open sand."
+    },
+    {
+      "id": "beachClutter",
+      "layer": "sim",
+      "order": 2,
+      "area": { "annulus": [94, 103] },
+      "minus": ["longBeach", "poiDiscs"],
+      "kinds": [
+        { "kind": "driftwood", "count": [8, 16], "scale": [0.8, 1.3] },
+        { "kind": "umbrella", "count": [5, 10], "scale": 1 },
+        { "kind": "rock", "count": [5, 10], "scale": [0.5, 0.9] }
+      ]
+    },
+    {
+      "id": "longBeach",
+      "layer": "sim",
+      "order": 3,
+      "area": { "sectorDeg": [330, 30], "annulus": [88, 105] },
+      "kinds": [{ "kind": "driftwood", "count": [0, 3], "scale": [0.8, 1.2] }],
+      "intent": "The north beach stays the longest open sightline on the map: only low driftwood (0.35 m) as hard cover."
+    },
+    {
+      "id": "jungle",
+      "layer": "sim",
+      "order": 4,
+      "area": { "annulus": [18, 88] },
+      "minus": ["poiDiscs+2", "hutAprons", "zoneCentreDiscs"],
+      "kinds": [
+        { "kind": "palm", "count": [16, 24], "scale": [0.9, 1.3] },
+        { "kind": "bush", "count": [38, 52], "scale": [0.7, 1.3] },
+        { "kind": "rock", "count": [18, 26], "scale": [0.6, 1.4] }
+      ],
+      "intent": "Cover every 10-15 m between POIs, never a wall of it."
+    }
+  ],
+  "decor": [
+    {
+      "id": "beachDecor",
+      "layer": "decor",
+      "area": { "annulus": [92, 106] },
+      "kinds": [
+        { "kind": "shellCluster", "count": [18, 26] },
+        { "kind": "starfish", "count": [8, 14] },
+        { "kind": "sandcastle", "count": [0, 3] },
+        { "kind": "beachTowel", "count": [6, 12], "near": { "kind": "umbrella", "within": 3 } }
+      ]
+    },
+    {
+      "id": "jungleDecor",
+      "layer": "decor",
+      "area": { "annulus": [12, 92] },
+      "kinds": [
+        { "kind": "fernTuft", "count": [70, 110] },
+        { "kind": "flowerTuft", "count": [25, 45] },
+        { "kind": "coconutPile", "count": [15, 30], "near": { "kind": "palm", "within": 2.5 } }
+      ]
+    },
+    {
+      "id": "shallowsDecor",
+      "layer": "decor",
+      "area": { "annulus": [107, 126] },
+      "kinds": [{ "kind": "seaweed", "count": [20, 30] }]
+    }
+  ],
+  "rules": {
+    "propGap": 2,
+    "spawnPad": 4,
+    "lootPropClearance": 0.75,
+    "lootSpacing": 2.5,
+    "lootNudgeMax": 3,
+    "lootMaxRadius": 104,
+    "guaranteedWeaponWithin": 25,
+    "spawnLootMin": { "count": 3, "within": 25 },
+    "lootFallbackUsesMaxPerSeed": 0,
+    "zoneCentreClear": 3,
+    "hutDoorApron": [3, 3],
+    "landLimit": 105,
+    "decorMaxHeight": 0.5,
+    "decorPropClearance": 0.2,
+    "decorLootSpawnClearance": 1,
+    "decorSpacing": 0.6,
+    "pieceTries": 24,
+    "scatterTriesPerItem": 40
+  },
+  "budgets": {
+    "simPlacementsMax": 400,
+    "perKindMax": { "palm": 140, "bush": 90, "rock": 75, "crate": 60, "driftwood": 32, "umbrella": 18, "tikiTorch": 20, "hut": 10, "boat": 3, "dock": 2 },
+    "decorPlacementsMax": 600,
+    "decorPerKindMax": 150,
+    "propTrianglesMax": 300000,
+    "decorTrianglesMax": 30000,
+    "propDrawCallsMax": 31
+  },
+  "fairness": {
+    "coverScoreTolerance": 0.2,
+    "coverScoreHardLimit": 0.5,
+    "sightlineMedianTolerance": 0.25,
+    "sightlineRays": 32,
+    "sightlineEyeHeight": 1.1
+  }
+}

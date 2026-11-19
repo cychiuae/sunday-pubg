@@ -22,6 +22,7 @@ import {
 } from './bots';
 import { predictGrenadeArc, throwLaunch } from './grenade';
 import { createMovementContext, prepareMap, stepMovement, toMovementInput, type MovementContext } from './movement';
+import { simulateNav } from './tools/navStuck';
 import { isReachableNode, NavBudget, nodePos, navTuning, PathCache, plateauNodes } from './nav';
 import { miniOffice, officeLikeBalance, roomsMaze } from './navTestkit';
 import type { SimPlayer } from './state';
@@ -234,87 +235,6 @@ describe('bot drops in a World (drop.md acceptance 12)', () => {
 // ---------------------------------------------------------------------------------------------------------------
 // Path following (synthetic fixtures)
 // ---------------------------------------------------------------------------------------------------------------
-
-interface NavSimResult {
-  stuckRate: number;
-  arrivals: number;
-  plateauArrivals: number;
-  botSeconds: number;
-}
-
-/**
- * Bots walk between random reachable goals (a third on plateaus) on a fixture, driven by navSteer and the real
- * movement step. Stuck = no 1 m of progress over the last 3 s while it has a goal (maps.md acceptance 20).
- */
-function simulateNav(map: IndoorMapData, b: Balance, nBots: number, seconds: number, seed: number): NavSimResult {
-  const rt = prepareMap(map, b);
-  const nav = rt.nav!;
-  const tun = navTuning(b);
-  const n: BotNavEnv = { nav, pathCache: new PathCache(tun.pathCacheSize), navBudget: new NavBudget(tun.maxPathsPerTick) };
-  const rng = createRng(seed);
-  const main: number[] = [];
-  for (let i = 0; i < nav.nodeCount; i++) if (isReachableNode(nav, i)) main.push(i);
-  const plats = plateauNodes(nav);
-  const pick = (): Vec3 =>
-    plats.length > 0 && rng.next() < 0.35 ? nodePos(nav, plats[Math.floor(rng.next() * plats.length)]!) : nodePos(nav, main[Math.floor(rng.next() * main.length)]!);
-  const status = { alive: true, healing: false, reloading: false, held: 'fists' as const, swapping: false, fireSlowed: false };
-  const bots = Array.from({ length: nBots }, () => {
-    let start = pick();
-    while (start.y > 0.5) start = pick();
-    return { move: { ...createMovementState(start) }, f: createNavFollow(), goal: pick(), hist: [] as { x: number; y: number; z: number }[], yaw: 0 };
-  });
-  let stuck = 0;
-  let samples = 0;
-  let arrivals = 0;
-  let plateauArrivals = 0;
-  const ticks = Math.round(seconds / SIM_DT);
-  const perSecond = Math.round(1 / SIM_DT);
-  for (let t = 0; t < ticks; t++) {
-    const now = t * SIM_DT * 1000;
-    for (const bot of bots) {
-      const pos = bot.move.pos;
-      if (Math.hypot(pos.x - bot.goal.x, pos.z - bot.goal.z) < 1.5 && Math.abs(pos.y - bot.goal.y) < 1) {
-        arrivals++;
-        if (bot.goal.y > 1) plateauArrivals++;
-        bot.goal = pick();
-        bot.hist = [];
-      }
-      const r = navSteer(bot.f, pos, bot.move.grounded, bot.goal, n, now, b, rng);
-      if (r.mx !== 0 || r.mz !== 0) bot.yaw = Math.atan2(-r.mx, -r.mz);
-      const inp: PlayerInput = {
-        seq: 0, dt: SIM_DT, moveForward: Math.hypot(r.mx, r.mz), moveRight: 0, yaw: bot.yaw, pitch: 0, sprint: true, fire: false,
-        jump: r.jump, reload: false, interact: false, useHeal: false, selectSlot: -1, ads: false, stanceToggle: null,
-      };
-      bot.move = stepMovement(bot.move, toMovementInput(inp, status, b), SIM_DT, rt.ctx).state as typeof bot.move;
-      if (t % perSecond === 0) {
-        bot.hist.push({ ...bot.move.pos });
-        if (bot.hist.length > 4) bot.hist.shift();
-        if (bot.hist.length === 4) {
-          samples++;
-          const a = bot.hist[0]!;
-          const c = bot.hist[3]!;
-          if (Math.hypot(c.x - a.x, c.y - a.y, c.z - a.z) < 1) stuck++;
-        }
-      }
-    }
-  }
-  return { stuckRate: samples > 0 ? stuck / samples : 0, arrivals, plateauArrivals, botSeconds: nBots * seconds };
-}
-
-function createMovementState(p: Vec3): ReturnType<typeof stepMovement>['state'] {
-  return {
-    pos: { ...p },
-    vel: { x: 0, y: 0, z: 0 },
-    grounded: true,
-    dropping: false,
-    stance: 'stand',
-    stanceFrom: 'stand',
-    stanceMs: 0,
-    adsMs: 0,
-    dropPhase: null,
-    dropMs: 0,
-  } as ReturnType<typeof stepMovement>['state'];
-}
 
 describe('per-tick search budget (REVIEW-M2b M2)', () => {
   it('16 bots with fresh goals on one tick, and every tick of a match, run at most bots.nav.maxPathsPerTick searches', () => {

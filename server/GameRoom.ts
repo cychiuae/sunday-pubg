@@ -6,8 +6,8 @@
  * Lifecycle (ADR 0006 §2):
  *   waiting --Start / all ready / public timer--> countdown (no World; vote open)
  *   countdown --host Cancel, or below the start minimum, before the lock--> waiting
- *   countdown --lockAt--> LOCK: resolveMapChoice -> balanceForMap -> prepareMap (cached) -> createWorld(matchStart)
- *             -> addPlayer(each member) -> welcome
+ *   countdown --lockAt--> LOCK: resolveMapChoice -> M2c lockLayout (seed, repeat avoidance, build, apply, balanceForMap,
+ *             prepareMap; LRU) -> createWorld(applied map, matchStart) -> addPlayer(each member) -> welcome (+ layout)
  *   World countdown -> playing -> results -> finished --> the room drops the World --> waiting
  */
 import type { RoomsBalance } from '../src/shared/balance';
@@ -22,23 +22,26 @@ import {
 import type { MapChoice, MapChoiceInput } from '../src/shared/sim/mapVote';
 import type { MapRuntime } from '../src/shared/sim/movement';
 import { MAX_QUEUED_INPUTS } from '../src/shared/constants';
-import type {
-  MapId,
-  MapVoteOption,
-  MatchPhase,
-  MemberId,
-  PlayerId,
-  PlayerInput,
-  RejectCode,
-  RoomId,
-  RoomMember,
-  RoomPhase,
-  RoomSettings,
-  RoomState,
-  RoomSummary,
-  SimEvent,
+import {
+  type LayoutPick,
+  type MapId,
+  type MapVoteOption,
+  type MatchLayoutRef,
+  type MatchPhase,
+  type MemberId,
+  type PlayerId,
+  type PlayerInput,
+  type RejectCode,
+  type RoomId,
+  type RoomMember,
+  type RoomPhase,
+  type RoomSettings,
+  type RoomState,
+  type RoomSummary,
+  type SimEvent,
 } from '../src/shared/types';
 import { CLOSE, EDGE, ROOM_TIMING, mixSeed, type Balance, type Logger, type SimMap, type SimWorld, type WorldFactory } from './common';
+import { LAYOUT_WARN_MS, baseMapLayoutRef, layoutLogLine, type LockedLayout } from './layoutLock';
 import type { Session } from './Session';
 import { mergeInputs, sanitizeInput, sanitizeRoomName } from './validate';
 
@@ -50,8 +53,13 @@ export interface MatchDeps {
   maps: readonly MapId[];
   /** Server `MAP` pin (already validated), else null. */
   pin: MapId | null;
-  /** Effective balance and cached runtime for a map id (RoomManager caches one per map id). */
-  prepared(mapId: MapId): { balance: Balance; runtime?: MapRuntime };
+  /**
+   * M2c layout lock (server/layoutLock.ts): the layout seed for this match (LAYOUT_SEED pin, else layoutSeedFor with
+   * repeat avoidance against `previous`, the picks of this room's previous match on the same map), the applied map,
+   * its effective balance and prepared runtime (LRU of 4 by mapId:seed:version), and the build timing. Throws if the
+   * generator throws.
+   */
+  lockLayout(mapId: MapId, worldSeed: number, previous: readonly LayoutPick[] | null): LockedLayout;
   resolveMapChoice(i: MapChoiceInput): MapChoice;
   botNames: readonly string[];
   /** `WorldOptions.drop` (tests pass false for the M1 spawn). Default: the sim's default (true). */
@@ -190,6 +198,12 @@ export class GameRoom {
   /** Server ms when the public auto-start timer began (null = not running). */
   private publicTimerSince: number | null = null;
   private pick: { id: MapId; via: MapChoice['via'] } | null = null;
+  /** M2c: the running match's layout (WelcomeInfo.layout). */
+  private layoutRef: MatchLayoutRef | null = null;
+  /** M2c: RoomState.map.layout (seed and look), present only for a generated layout. */
+  private roomLayout: { seed: number; look: MatchLayoutRef['look'] } | null = null;
+  /** M2c repeat avoidance: the map and picks of this room's previous match. */
+  private previousLayout: { mapId: MapId; picks: readonly LayoutPick[] } | null = null;
   private previousMap: MapId | null = null;
   private matchSerial = 0;
   private readonly rng: Rng;
@@ -485,12 +499,16 @@ export class GameRoom {
     const now = this.opts.clock();
     const serial = ++this.matchSerial;
     let world: SimWorld | null = null;
+    let locked: LockedLayout;
+    const worldSeed = mixSeed(this.seed, serial);
     try {
-      const { balance, runtime } = deps.prepared(choice.mapId);
+      const prev = this.previousLayout;
+      locked = deps.lockLayout(choice.mapId, worldSeed, prev !== null && prev.mapId === choice.mapId ? prev.picks : null);
+      const { map, balance, runtime } = locked;
       world = deps.createWorld({
-        map: deps.getMap(choice.mapId),
+        map,
         balance,
-        seed: mixSeed(this.seed, serial),
+        seed: worldSeed,
         botNames: deps.botNames,
         ...(runtime ? { runtime } : {}),
         ...(deps.worldDrop !== undefined ? { drop: deps.worldDrop } : {}),
@@ -509,6 +527,9 @@ export class GameRoom {
     this.world = world;
     this.sawResults = false;
     this.pick = { id: choice.mapId, via: choice.via };
+    this.layoutRef = locked.ref;
+    this.roomLayout = locked.generated ? { seed: locked.ref.seed, look: locked.ref.look } : null;
+    this.previousLayout = { mapId: choice.mapId, picks: locked.choice.picks };
     this.previousMap = choice.mapId;
     this.lastSnapIdx = -1;
     this.matchTickMsSum = 0;
@@ -516,6 +537,12 @@ export class GameRoom {
     this.matchMaxTickMs = 0;
     for (const m of this.members.values()) this.seatMember(m);
     this.opts.log.info(`[room ${this.id}] match ${serial} locked on ${choice.mapId} (${choice.via}), ${this.members.size} humans`);
+    // variety.md §2.3 line with the build timing (ADR 0007 §1.7: warn above 250 ms; the build blocked every room).
+    this.opts.log.info(`[room ${this.id}] ${layoutLogLine(serial, choice.mapId, locked)}`);
+    const buildMs = locked.layoutMs + locked.navMs;
+    if (!locked.cached && buildMs > LAYOUT_WARN_MS) {
+      this.opts.log.warn(`[room ${this.id}] layout build took ${buildMs.toFixed(0)} ms (> ${LAYOUT_WARN_MS} ms): every room's loop stalled`);
+    }
     this.markDirty(true);
     for (const m of this.members.values()) if (m.seat) this.sendWelcome(m);
     this.startLoop();
@@ -535,7 +562,8 @@ export class GameRoom {
       minDepth: Number.POSITIVE_INFINITY,
       windowTicks: 0,
       carry: null,
-      enc: new SnapshotDeltaEncoder(m.session.deltas),
+      // M2c: `rows1` clients also understand local patches (an older delta1 bundle gets a whole `local`).
+      enc: new SnapshotDeltaEncoder(m.session.deltas, m.session.rows),
       resyncs: 0,
       rejectedInputs: 0,
       mergedInputs: 0,
@@ -554,6 +582,7 @@ export class GameRoom {
         serverTime: this.serverNow(),
         matchId: this.matchSerial,
         roomId: this.id,
+        layout: this.layoutRef ?? baseMapLayoutRef(this.opts.deps.getMap(this.pick.id)),
       },
     });
   }
@@ -563,6 +592,8 @@ export class GameRoom {
     this.stopLoop();
     this.world = null;
     this.pick = null;
+    this.layoutRef = null;
+    this.roomLayout = null;
     this.countdownEndsAt = null;
     this.lockAt = null;
     for (const m of this.members.values()) {
@@ -771,7 +802,8 @@ export class GameRoom {
     // Quantize before diffing so the delta base holds exactly what the client decodes.
     const full = this.guard('snapshotFor', () => quantizeDeep(world.snapshotFor(id)));
     if (!full) return;
-    this.sendRaw(m, encode({ t: 'snapshot', snap: seat.enc.encode(full) }));
+    // M2c: rows for clients that advertised CAP_ROWS (ADR 0007 §9); the object format for the others.
+    this.sendRaw(m, encode({ t: 'snapshot', snap: seat.enc.encode(full) }, { rows: s.rows }));
   }
 
   private sendRaw(m: Member, data: string): void {
@@ -846,7 +878,7 @@ export class GameRoom {
       phase: this.phase,
       phaseSince: this.phaseSince,
       pinnedMap: this.opts.deps.pin,
-      map: this.pick ? { ...this.pick } : null,
+      map: this.pick ? { ...this.pick, ...(this.roomLayout ? { layout: { ...this.roomLayout } } : {}) } : null,
       countdownEndsAt: this.phase === 'countdown' ? this.countdownEndsAt : null,
       lockAt: this.phase === 'countdown' ? this.lockAt : null,
       autoStart: timerAt !== null ? { reason: 'timer', at: timerAt } : null,

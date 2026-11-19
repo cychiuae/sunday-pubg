@@ -192,7 +192,7 @@ describe('AudioDirector: hits and damage', () => {
     cmds.length = 0;
     d.playerKilled({
       killerId: 2, killerName: 'B', victimId: 1, victimName: 'A', weapon: 'rifle', cause: 'weapon', victimPos: P,
-      placement: 5, isLocalVictim: true, isLocalKiller: false,
+      placement: 5, isLocalVictim: true, isLocalKiller: false, weaponLevel: null,
     });
     expect(plays().map((p) => p.cue)).toEqual(['ui.defeat']);
     expect(cmds).toContainEqual({ kind: 'lowHealth', active: false });
@@ -205,7 +205,7 @@ describe('AudioDirector: hits and damage', () => {
     const { d, plays } = setup();
     d.playerKilled({
       killerId: 1, killerName: 'A', victimId: 3, victimName: 'C', weapon: 'smg', cause: 'weapon', victimPos: P,
-      placement: 4, isLocalVictim: false, isLocalKiller: true,
+      placement: 4, isLocalVictim: false, isLocalKiller: true, weaponLevel: null,
     });
     expect(plays()).toEqual([expect.objectContaining({ cue: 'death.remote', pos: P, variant: 'body' })]);
   });
@@ -214,7 +214,7 @@ describe('AudioDirector: hits and damage', () => {
     const { d, plays } = setup();
     d.playerKilled({
       killerId: 4, killerName: 'D', victimId: 3, victimName: 'C', weapon: 'rifle', cause: 'weapon', victimPos: P,
-      placement: 4, headshot: true, isLocalVictim: false, isLocalKiller: false,
+      placement: 4, headshot: true, isLocalVictim: false, isLocalKiller: false, weaponLevel: null,
     });
     expect(plays()).toEqual([expect.objectContaining({ cue: 'death.remote', variant: 'head' })]);
   });
@@ -318,11 +318,11 @@ describe('AudioDirector: tide, heals, movement, UI', () => {
 
   it('interact prompt ticks only when a new loot comes into range', () => {
     const { d, plays } = setup();
-    const none = { durability: null, refusal: null };
+    const none = { durability: null, refusal: null, level: null };
     d.interactPromptChanged({ lootId: 5, item: 'smg', qty: 1, ...none });
     d.interactPromptChanged({ lootId: 5, item: 'smg', qty: 1, ...none });
     d.interactPromptChanged({ lootId: null, item: null, qty: 0, ...none });
-    d.interactPromptChanged({ lootId: 5, item: 'vest_2', qty: 1, durability: 40, refusal: 'betterArmor' });
+    d.interactPromptChanged({ lootId: 5, item: 'vest_2', qty: 1, durability: 40, refusal: 'betterArmor', level: null });
     expect(plays()).toHaveLength(2);
   });
 
@@ -419,7 +419,7 @@ describe('AudioDirector: M2a arsenal', () => {
     // Death clears the remembered stance.
     d.playerKilled({
       killerId: 1, killerName: 'A', victimId: 3, victimName: 'C', weapon: 'grenade', cause: 'explosion', victimPos: P,
-      placement: 4, isLocalVictim: false, isLocalKiller: true,
+      placement: 4, isLocalVictim: false, isLocalKiller: true, weaponLevel: null,
     });
     take();
     step(3, false);
@@ -428,37 +428,37 @@ describe('AudioDirector: M2a arsenal', () => {
 
   it('grenade cook: local pin + keyed fuse tick (balance fuse), stopped on throw; remote pin is positional', () => {
     const { d, cmds, plays } = setup();
-    d.grenadeCooked({ playerId: 1, pos: P, explodesAt: 9000, isLocal: true });
+    d.grenadeCooked({ playerId: 1, pos: P, explodesAt: 9000, isLocal: true, kind: 'grenade' });
     expect(plays().map((p) => [p.cue, p.pos])).toEqual([['grenade.pin', null], ['grenade.tick', null]]);
     expect(plays()[1]?.loopKey).toBe(LOOP_KEY.cook);
     expect(plays()[1]?.durationS as number).toBeGreaterThanOrEqual(BALANCE.items.grenade.fuseMs / 1000);
     cmds.length = 0;
-    d.grenadeThrown({ id: 1, ownerId: 1, pos: P, vel: P, explodesAt: 9000, dropped: false, isLocal: true });
+    d.grenadeThrown({ id: 1, ownerId: 1, pos: P, vel: P, explodesAt: 9000, dropped: false, isLocal: true, kind: 'grenade' });
     expect(cmds).toEqual([{ kind: 'stop', loopKey: LOOP_KEY.cook }, expect.objectContaining({ cue: 'grenade.throw', pos: null })]);
     cmds.length = 0;
-    d.grenadeCooked({ playerId: 2, pos: P, explodesAt: 9000, isLocal: false });
-    d.grenadeThrown({ id: 2, ownerId: 2, pos: P, vel: P, explodesAt: 9000, dropped: true, isLocal: false });
+    d.grenadeCooked({ playerId: 2, pos: P, explodesAt: 9000, isLocal: false, kind: 'grenade' });
+    d.grenadeThrown({ id: 2, ownerId: 2, pos: P, vel: P, explodesAt: 9000, dropped: true, isLocal: false, kind: 'grenade' });
     expect(cmds).toEqual([expect.objectContaining({ cue: 'grenade.pin', pos: P })]); // a drop has no whoosh
   });
 
   it('cook tick stops on an in-hand blast and on local death', () => {
     const { d, cmds } = setup();
-    d.grenadeCooked({ playerId: 1, pos: P, explodesAt: 9000, isLocal: true });
+    d.grenadeCooked({ playerId: 1, pos: P, explodesAt: 9000, isLocal: true, kind: 'grenade' });
     cmds.length = 0;
-    d.explosion({ id: 1, ownerId: 1, pos: P, radius: 6, inHand: true, isLocalOwner: true, localDistance: 0.5 });
+    d.explosion({ id: 1, ownerId: 1, pos: P, radius: 6, inHand: true, isLocalOwner: true, localDistance: 0.5, source: 'grenade' });
     expect(cmds[0]).toEqual({ kind: 'stop', loopKey: LOOP_KEY.cook });
     cmds.length = 0;
     d.playerKilled({
       killerId: 1, killerName: 'A', victimId: 1, victimName: 'A', weapon: 'grenade', cause: 'explosion', victimPos: P,
-      placement: 5, isLocalVictim: true, isLocalKiller: true,
+      placement: 5, isLocalVictim: true, isLocalKiller: true, weaponLevel: null,
     });
     expect(cmds).toContainEqual({ kind: 'stop', loopKey: LOOP_KEY.cook });
   });
 
   it('bounces: surface variant and speed intensity', () => {
     const { d, plays } = setup();
-    d.grenadeBounced({ id: 3, pos: P, surface: 'prop', speed: 12 });
-    d.grenadeBounced({ id: 3, pos: P, surface: 'water', speed: 3 });
+    d.grenadeBounced({ id: 3, pos: P, surface: 'prop', speed: 12, kind: 'grenade' });
+    d.grenadeBounced({ id: 3, pos: P, surface: 'water', speed: 3, kind: 'grenade' });
     expect(plays().map((p) => [p.cue, p.variant, p.pos, p.intensity])).toEqual([
       ['grenade.bounce', 'prop', P, 1],
       ['grenade.bounce', 'water', P, 0.25],
@@ -468,8 +468,8 @@ describe('AudioDirector: M2a arsenal', () => {
   it('explosion: positional boom; water variant from the last contact or below sea level', () => {
     const { d, plays } = setup();
     const boom = (id: number, pos = P): void =>
-      d.explosion({ id, ownerId: 2, pos, radius: 6, inHand: false, isLocalOwner: false, localDistance: 50 });
-    d.grenadeBounced({ id: 7, pos: P, surface: 'water', speed: 5 });
+      d.explosion({ id, ownerId: 2, pos, radius: 6, inHand: false, isLocalOwner: false, localDistance: 50, source: 'grenade' });
+    d.grenadeBounced({ id: 7, pos: P, surface: 'water', speed: 5, kind: 'grenade' });
     boom(7);
     boom(8);
     boom(9, { x: 0, y: -0.4, z: 0 });
@@ -481,7 +481,7 @@ describe('AudioDirector: M2a arsenal', () => {
   it('explosion inside the radius: ear ring, sfx/ambience muffle and a deep ambience duck; near: light duck; far: none', () => {
     const { d, cmds } = setup();
     const boom = (localDistance: number | null): void =>
-      d.explosion({ id: 1, ownerId: 2, pos: P, radius: 6, inHand: false, isLocalOwner: false, localDistance });
+      d.explosion({ id: 1, ownerId: 2, pos: P, radius: 6, inHand: false, isLocalOwner: false, localDistance, source: 'grenade' });
     boom(1.5);
     const ring = cmds.find((c): c is PlayCommand => c.kind === 'play' && c.cue === 'explosion.ring');
     expect(ring?.intensity).toBeCloseTo(0.75, 6);
@@ -512,6 +512,7 @@ describe('AudioDirector: M2a arsenal', () => {
     d.itemPickedUp({ playerId: 1, item: 'grenade', qty: 2, pos: P, isLocal: true });
     expect(plays().map((p) => [p.cue, p.variant, p.pos])).toEqual([
       ['pickup.vest', 'vest_3', null],
+      ['pickup.level', '3', null], // M2c: the local level sparkle (armor level = tier)
       ['pickup.helmet', 'helmet_1', P],
       ['pickup.grenade', 'grenade', null],
     ]);
@@ -530,6 +531,8 @@ const mapEvent = (kind: 'island' | 'indoor', zoneTheme: GameEvents['mapChanged']
   map: { kind, carrier: kind === 'indoor' ? 'drone' : 'seaplane' } as unknown as GameEvents['mapChanged']['map'],
   balance,
   zoneTheme,
+  layout: null,
+  look: kind === 'indoor' ? 'day' : 'noon',
 });
 
 /** Footstep with an indoor floor material (typed wide until the C-gate adds FloorMaterial to the event). */
@@ -541,7 +544,7 @@ describe('AudioDirector: M2b maps, zone themes and per-map balance', () => {
     const cmds: AudioCommand[] = [];
     const d = new AudioDirector((c) => cmds.push(c)); // no balance injected
     d.shotFired({ shooterId: 4, weapon: 'sniper', origin: P, isLocal: false, impacts: [] });
-    d.grenadeCooked({ playerId: 1, pos: P, explodesAt: 9000, isLocal: true });
+    d.grenadeCooked({ playerId: 1, pos: P, explodesAt: 9000, isLocal: true, kind: 'grenade' });
     expect(cmds.filter((c) => c.kind === 'play').map((c) => (c as PlayCommand).cue)).toEqual(['shot.sniper.remote', 'grenade.pin']);
     expect(d.fuseMs).toBeNull();
 
@@ -553,12 +556,12 @@ describe('AudioDirector: M2b maps, zone themes and per-map balance', () => {
     };
     d.mapChanged(mapEvent('indoor', 'sprinklers', office));
     expect(cmds).toContainEqual({ kind: 'stopLoops' });
-    expect(cmds.at(-1)).toEqual({ kind: 'map', scene: 'indoor', theme: 'sprinklers' });
+    expect(cmds.at(-1)).toEqual({ kind: 'map', scene: 'indoor', theme: 'sprinklers', look: 'day' });
     expect(d.zoneTheme).toBe('sprinklers');
     expect(d.fuseMs).toBe(4100);
     cmds.length = 0;
     d.shotFired({ shooterId: 4, weapon: 'sniper', origin: P, isLocal: false, impacts: [] });
-    d.grenadeCooked({ playerId: 1, pos: P, explodesAt: 9000, isLocal: true });
+    d.grenadeCooked({ playerId: 1, pos: P, explodesAt: 9000, isLocal: true, kind: 'grenade' });
     const plays = cmds.filter((c): c is PlayCommand => c.kind === 'play');
     expect(plays[1]).toMatchObject({ cue: 'weapon.bolt', durationS: 1.7 });
     expect(plays[3]).toMatchObject({ cue: 'grenade.tick', durationS: 4.1 + AUDIO_TUNING.cookTickSafetyS });
@@ -605,7 +608,7 @@ describe('AudioDirector: M2b maps, zone themes and per-map balance', () => {
   it('the island stays on the tide', () => {
     const { d, cmds, take } = setup();
     d.mapChanged(mapEvent('island', 'tide'));
-    expect(cmds.at(-1)).toEqual({ kind: 'map', scene: 'island', theme: 'tide' });
+    expect(cmds.at(-1)).toEqual({ kind: 'map', scene: 'island', theme: 'tide', look: 'noon' });
     take();
     d.zoneChanged({ zone: zone(true) });
     expect(cmds.filter((c) => c.kind === 'play').map((c) => (c as PlayCommand).cue)).toEqual(['zone.tideRising', 'zone.tideLoop']);
@@ -683,7 +686,7 @@ describe('AudioDirector: M2b carrier drop', () => {
     d.localPlayerSpawned({ playerId: 1, pos: P });
     d.playerKilled({
       killerId: null, killerName: null, victimId: 1, victimName: 'A', weapon: null, cause: 'zone', victimPos: P,
-      placement: 5, isLocalVictim: true, isLocalKiller: false,
+      placement: 5, isLocalVictim: true, isLocalKiller: false, weaponLevel: null,
     });
     expect(d.drop.localPhase).toBe('none');
     d.matchPhaseChanged({ phase: 'results', prev: 'playing', endsAt: null });

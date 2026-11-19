@@ -380,7 +380,7 @@ describe('actionFailed toast', () => {
     expect(actionFailedKey('pickup', 'betterArmor')).toBe('hud.armor.better');
     expect(actionFailedKey('reload', 'noAmmo')).toBe('hud.ammo.empty');
     expect(actionFailedKey('fire', 'noAmmo')).toBeNull();
-    expect(actionFailedKey('swap', 'noGrenades')).toBe('hud.grenade.none');
+    expect(actionFailedKey('swap', 'noGrenades')).toBe('hud.throwable.none'); // M2c (UI M2c §2.1)
     expect(actionFailedKey('stance', 'noHeadroom')).toBe('hud.stance.noRoom');
     expect(actionFailedKey('stance', 'tooDeep')).toBe('hud.stance.tooDeep');
     const reasons = ['noHeals', 'fullHp', 'inventoryFull', 'betterArmor', 'noAmmo', 'noGrenades', 'tooDeep', 'noHeadroom'] as const;

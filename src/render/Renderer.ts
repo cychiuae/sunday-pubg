@@ -14,10 +14,10 @@
 import * as THREE from 'three';
 import type { Balance, ZoneTheme } from '../shared/balance';
 import { CONTEXT_RESTORE_TIMEOUT_MS } from '../shared/constants';
-import type { CameraCase, CameraView, FrameView, GraphicsStatus, IRenderer, ListenerPose, QualityLevel } from '../shared/contracts';
+import type { CameraCase, CameraView, FrameView, GraphicsStatus, IRenderer, ListenerPose, QualityLevel, RocketView, SmokeCloudView } from '../shared/contracts';
 import type { EventBus, GameEvents } from '../shared/events';
 import { isIndoor } from '../shared/maps';
-import type { AnyMapData, CarrierModel, PlayerId } from '../shared/types';
+import type { AnyMapData, CarrierModel, LookId, MatchLayout, PlayerId } from '../shared/types';
 import { CameraRig } from './cameraRig';
 import { CarrierLayer } from './CarrierLayer';
 import { disposeSkinCache } from './chibiSkin';
@@ -26,19 +26,26 @@ import { GrenadeLayer } from './GrenadeLayer';
 import { IndoorScene } from './IndoorScene';
 import { INDOOR_FX, resetIndoorFx } from './indoorFx';
 import { IslandScene } from './IslandScene';
+import { sceneLookFor } from './looks';
 import { LootLayer } from './LootLayer';
+import { ModelBatch } from './ModelBatch';
 import type { MapScene, MapSceneFrame } from './mapScene';
 import { NameTags } from './NameTags';
 import { dropPhaseOf, PlayerViews, type PlayerViewsFrame } from './PlayerViews';
 import { palette } from './procedural';
 import { DEFAULT_QUALITY, QUALITY_PRESETS, type QualityPreset, type QualitySettings } from './quality';
 import { SunRig } from './Sky';
+import { RocketLayer } from './RocketLayer';
+import { SmokeLayer } from './SmokeLayer';
 import { SpeedLines } from './SpeedLines';
 import { ViewmodelPass } from './ViewmodelPass';
 import { Markers } from './vfx/Markers';
 import { Vfx } from './vfx/Vfx';
 
 const FRAME_SAMPLES = 240;
+const NO_SMOKES: readonly SmokeCloudView[] = [];
+const NO_ROCKETS: readonly RocketView[] = [];
+const NO_PANES: readonly number[] = [];
 /** Camera shake at amount 1 (explosion at the eye): position jitter (m) and roll/pitch jitter (rad), decay (1/s). */
 const SHAKE_POS = 0.12;
 const SHAKE_ROT = 0.012;
@@ -91,6 +98,11 @@ export class Renderer implements IRenderer {
   private map: AnyMapData;
   private readonly sunRig: SunRig;
   private readonly loot: LootLayer;
+  /**
+   * M2c (Addendum 2): every ground item and every held item (all weapons x levels x scopes, grenades, smoke cans) in
+   * one BatchedMesh pair by material: 2 draw calls (+1 shadow) whatever the mix. Shared by LootLayer and PlayerViews.
+   */
+  private readonly items: ModelBatch;
   private readonly players: PlayerViews;
   private readonly tags: NameTags;
   private readonly vfx: Vfx;
@@ -98,10 +110,19 @@ export class Renderer implements IRenderer {
   private readonly grenades: GrenadeLayer;
   private readonly carrier: CarrierLayer;
   private readonly speedLines: SpeedLines;
+  /** M2c smoke clouds (FrameView.smokes; same on every quality preset). */
+  private readonly smoke: SmokeLayer;
+  /** M2c rockets in flight (FrameView.rockets; instances in the shared item batch, trail through the particles). */
+  private readonly rockets: RocketLayer;
   private readonly viewmodel: ViewmodelPass;
   private readonly rig: CameraRig;
   private baseFov: number;
   private zoneTheme: ZoneTheme;
+  /** M2c: this match's look preset (mapChanged.look) and layout seed (mapChanged.layout.seed); null = baseline. */
+  private lookId: LookId | null = null;
+  private layoutSeed: number | null = null;
+  /** M2c: this match's layout (decor, lit panels); null = baseline / none. */
+  private layout: MatchLayout | null = null;
   private shakeAmount = 0;
   private readonly drawSize = new THREE.Vector2();
   private readonly playersFrame: PlayerViewsFrame = {
@@ -180,13 +201,15 @@ export class Renderer implements IRenderer {
     this.sunRig = new SunRig();
     this.scene.add(this.sunRig.sun, this.sunRig.sun.target, this.sunRig.hemi);
 
-    this.loot = new LootLayer(map, this.balance);
+    this.items = new ModelBatch('items', { instances: 128, vertices: 1 << 15, receiveShadow: false });
+    this.scene.add(this.items.body, this.items.hull);
+    this.loot = new LootLayer(map, this.balance, this.items);
     this.scene.add(this.loot.group);
 
     this.players = new PlayerViews(this.balance, {
       onPoof: (x, y, z) => this.vfx.poof(x, y, z),
       onFuseSpark: (x, y, z) => this.vfx.fuseSpark(x, y, z),
-    });
+    }, this.items);
     this.scene.add(this.players.group);
     this.baseFov = this.balance.clientFeel?.cameraFovDeg ?? DEFAULT_FOV;
 
@@ -225,6 +248,7 @@ export class Renderer implements IRenderer {
       this.markers,
       { fuseSpark: (x, y, z) => this.vfx.fuseSpark(x, y, z), trailPuff: (x, y, z) => this.vfx.trailPuff(x, y, z) },
       (x, z) => this.world.visualHeight(x, z),
+      this.items,
     );
     this.scene.add(this.grenades.group);
     this.tags.setHeightFn((id, fallback) => {
@@ -239,6 +263,9 @@ export class Renderer implements IRenderer {
     this.scene.add(this.carrier.group);
     this.speedLines = new SpeedLines();
     this.scene.add(this.speedLines.mesh);
+    this.smoke = new SmokeLayer();
+    this.scene.add(this.smoke.group);
+    this.rockets = new RocketLayer(this.items, this.vfx);
 
     // M2b first-person viewmodel pass (ViewmodelPass.ts, viewmodel graphics-engineer): own scene + depth clear.
     this.viewmodel = new ViewmodelPass(this.balance);
@@ -255,7 +282,7 @@ export class Renderer implements IRenderer {
     this.applyWorld();
 
     this.unsubs.push(
-      bus.on('mapChanged', (e) => this.setMap(e.map, e.balance, e.zoneTheme)),
+      bus.on('mapChanged', (e) => this.setMap(e.map, e.balance, e.zoneTheme, e.look ?? null, e.layout?.seed ?? null, e.layout ?? null)),
       bus.on('carrierDeparted', (e) => this.carrier.setRoute(e.route)),
     );
 
@@ -273,10 +300,13 @@ export class Renderer implements IRenderer {
         zoneTheme: this.zoneTheme,
         preset: this.qualityName,
         splash: (x, y, z) => this.vfx.rainSplash(x, y, z),
+        look: sceneLookFor('indoor', this.lookId),
+        decor: this.layout?.decor ?? [],
+        lightsOn: this.layout?.lightsOn ?? null,
       });
     }
     resetIndoorFx();
-    return new IslandScene(map, this.quality);
+    return new IslandScene(map, this.quality, sceneLookFor('island', this.lookId), this.layout?.decor ?? []);
   }
 
   /** Light, fog, camera limits and the carrier model for the current world. */
@@ -290,6 +320,7 @@ export class Renderer implements IRenderer {
     this.fog.far = look.fogFar;
     (this.scene.background as THREE.Color).setHex(look.background);
     this.gl.setClearColor(look.background, 1);
+    this.gl.toneMappingExposure = look.exposure ?? 1;
     this.camera.far = w.cameraFar;
     this.camera.updateProjectionMatrix();
     this.rig.setObstacles(w.obstacles);
@@ -305,23 +336,31 @@ export class Renderer implements IRenderer {
 
   /**
    * mapChanged: dispose the old map's world and build the new one. The same id keeps the scene (ADR 0005 §5) but takes
-   * the new per-match balance.
+   * the new per-match balance. M2c: the same id is rebuilt when the look preset or the layout seed changes (per-match
+   * layouts replace the props; the island chunks and the office merge are baked at build time).
    */
-  setMap(map: AnyMapData, balance: Balance, zoneTheme: ZoneTheme): void {
+  setMap(
+    map: AnyMapData, balance: Balance, zoneTheme: ZoneTheme, look: LookId | null = null, layoutSeed: number | null = null,
+    layout: MatchLayout | null = null,
+  ): void {
     if (this.disposed) return;
     this.balance = balance;
     this.players.setBalance(balance);
     this.viewmodel.reset();
     this.viewmodel.setBalance(balance);
     this.baseFov = balance.clientFeel?.cameraFovDeg ?? DEFAULT_FOV;
-    if (map.id === this.world.mapId && zoneTheme === this.zoneTheme) {
+    if (map.id === this.world.mapId && zoneTheme === this.zoneTheme && look === this.lookId && layoutSeed === this.layoutSeed) {
       this.map = map;
       this.carrier.setRoute(null);
       return;
     }
+    this.lookId = look;
+    this.layoutSeed = layoutSeed;
+    this.layout = layout;
     this.scene.remove(this.world.group);
     this.world.dispose();
     this.vfx.clear();
+    this.rockets.clear();
     this.map = map;
     this.zoneTheme = zoneTheme;
     this.world = this.buildWorld(map);
@@ -428,7 +467,14 @@ export class Renderer implements IRenderer {
     this.markers.end();
     this.tags.update(view.players, cp);
     this.speedLines.update(firstPerson && this.subjectInFreefall(view, subject), cp, time, dt, this.balance.drop?.freefallSpeed ?? 20);
+    // M2c: rockets (rocketPosAt positions from ClientGame) and the broken office panes.
+    this.vfx.reducedMotion = view.reducedMotion;
+    this.rockets.update(view.rockets ?? NO_ROCKETS, time, view.reducedMotion);
+    this.world.setBrokenPanes?.(view.brokenPanes ?? NO_PANES);
     this.vfx.update(dt);
+    // M2c: FrameView.smokes is optional until the C-gate (absent = no clouds). The veil draws last in the world pass,
+    // so it sits before the viewmodel pass (own hands visible).
+    this.smoke.update(view.smokes ?? NO_SMOKES, view.serverTime, this.balance.items.smoke?.cloud ?? null, cp, time, view.reducedMotion);
     this.viewmodel.update(view, dt);
 
     this.gl.render(this.scene, this.camera);
@@ -479,13 +525,16 @@ export class Renderer implements IRenderer {
     this.viewmodel.dispose();
     this.vfx.dispose();
     this.markers.dispose();
-    this.grenades.dispose();
     this.tags.dispose();
     this.players.dispose();
+    this.rockets.dispose();
+    this.grenades.dispose();
     disposeSkinCache();
     this.loot.dispose();
+    this.items.dispose();
     this.carrier.dispose();
     this.speedLines.dispose();
+    this.smoke.dispose();
     this.world.dispose();
     resetIndoorFx();
     this.sunRig.sun.shadow.map?.dispose();

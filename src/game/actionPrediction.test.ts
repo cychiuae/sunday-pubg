@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { BALANCE } from '../shared/balance';
 import { SIM_DT } from '../shared/constants';
+import { selectedThrowableOf } from '../shared/sim/actions';
 import { createMovementContext, stepMovement, toMovementInput } from '../shared/sim/movement';
 import { balanceWith, input as simInput, playingWorld } from '../shared/sim/testkit';
 import type { LocalPlayerState, PlayerInput } from '../shared/types';
@@ -16,7 +17,7 @@ import {
   type PredictedActions,
 } from './actionPrediction';
 import { Predictor, type PredictStatus, type PredictStep, type StatusModel } from './prediction';
-import { makeLocal, makeMovement, NO_DROP_STEP } from './testFixtures';
+import { makeAmmo, makeLocal, makeMovement, NO_DROP_STEP } from './testFixtures';
 
 const B = BALANCE;
 const M = makeMovement();
@@ -32,7 +33,7 @@ function base(over: Partial<LocalPlayerState> = {}, hp = 40): PredictedActions {
     makeLocal(1, {
       slots: [{ weapon: 'pistol', mag: 3 }, null],
       activeSlot: 0,
-      ammo: { ammo_light: 30, ammo_heavy: 0, ammo_shell: 0, ammo_sniper: 0 },
+      ammo: makeAmmo({ ammo_light: 30, ammo_heavy: 0, ammo_shell: 0, ammo_sniper: 0 }),
       heals: { bandage: 2, medkit: 0 },
       ...over,
     }),
@@ -83,7 +84,7 @@ describe('stepActions (heal/reload/swap prediction)', () => {
     expect(stepActions(healing, inp({ selectSlot: 1 }), M, B).heal).not.toBeNull();
     const fullMag = stepActions(base({ slots: [{ weapon: 'pistol', mag: B.weapons.pistol.magSize }, null] }), inp({ useHeal: true }), M, B);
     expect(stepActions(fullMag, inp({ reload: true }), M, B).heal).not.toBeNull();
-    const noReserve = stepActions(base({ ammo: { ammo_light: 0, ammo_heavy: 0, ammo_shell: 0, ammo_sniper: 0 } }), inp({ useHeal: true }), M, B);
+    const noReserve = stepActions(base({ ammo: makeAmmo({ ammo_light: 0, ammo_heavy: 0, ammo_shell: 0, ammo_sniper: 0 }) }), inp({ useHeal: true }), M, B);
     expect(stepActions(noReserve, inp({ reload: true }), M, B).heal).not.toBeNull();
     const swapping = stepActions(base({ swapRemainingMs: 300 }), inp({ useHeal: true }), M, B);
     expect(stepActions(swapping, inp({ reload: true }), M, B).heal).not.toBeNull();
@@ -174,7 +175,7 @@ describe('stepActions (M2a grenade slot, held item, fire window)', () => {
     const after = stepN(shot, ticksFor(B.combat.fireMoveWindowMs));
     expect(after.fireSlowed).toBe(false);
     // Empty mag: auto-reload instead of a shot.
-    const empty = stepActions(base({ slots: [{ weapon: 'lmg', mag: 0 }, null], ammo: { ammo_light: 0, ammo_heavy: 30, ammo_shell: 0, ammo_sniper: 0 } }), inp({ fire: true }), M, B);
+    const empty = stepActions(base({ slots: [{ weapon: 'lmg', mag: 0 }, null], ammo: makeAmmo({ ammo_light: 0, ammo_heavy: 30, ammo_shell: 0, ammo_sniper: 0 }) }), inp({ fire: true }), M, B);
     expect(empty.lastShotWeapon).toBeNull();
     expect(empty.reload).toMatchObject({ weapon: 'lmg' });
   });
@@ -233,6 +234,8 @@ interface Scenario {
   script(t: number): Partial<PlayerInput>;
   /** Assert the heal really ran (the M1 scenario). */
   checkHeal: boolean;
+  /** M2c: called at every reconcile with the predicted actions after the acknowledged input and the server's local. */
+  check?(predicted: unknown, local: LocalPlayerState): void;
 }
 
 const HEAL_SCENARIO: Scenario = {
@@ -300,6 +303,7 @@ function runAgainstWorld<A>(
     while (toClient.length && toClient[0]!.at <= t) {
       const snap = toClient.shift()!.snap;
       const me = snap.players.find((p) => p.id === id)!;
+      scenario.check?.(predictor.actionsAfter(snap.local!.lastProcessedInputSeq), snap.local!);
       const res = predictor.reconcile(
         snap.local!.movement,
         snap.local!.lastProcessedInputSeq,
@@ -346,6 +350,58 @@ describe('heal-aware prediction against the real World', () => {
     const model = actionStatusModel(balanceWith(() => {}));
     const worst = runAgainstWorld(model, (l, hp, tick, carry) => actionsFromSnapshot(l, hp, tick, carry), scenario);
     expect(worst).toBeLessThan(1e-6);
+  });
+
+  it('M2c: a T sight switch (ADS before and after), a throwable cycle with a smoke throw and melee swings predict with no correction', () => {
+    const seen = { smokeSelected: false, scope4x: false, swing: false, scopeSwap: false, cycles: 0 };
+    let lastSel: string | null = null;
+    const scenario: Scenario = {
+      setup: (sp) => {
+        sp.inv.slots = [{ weapon: 'rifle', mag: 25, level: 2, scope: 'scope_2x' }, null];
+        sp.inv.activeSlot = 0;
+        sp.inv.ammo.ammo_heavy = 60;
+        sp.inv.grenades = 2;
+        sp.inv.smokes = 1;
+        sp.inv.selectedThrowable = 'grenade';
+        sp.inv.spareScope = 'scope_4x';
+        sp.inv.melee = { weapon: 'knife', level: 2 };
+      },
+      script: (t) => ({
+        moveForward: 1,
+        moveRight: t % 40 < 8 ? 1 : 0,
+        yaw: 0.3 + t * 0.002,
+        // ADS with the 2x, then during the T switch (blocked), then with the 4x.
+        ads: (t >= 10 && t < 30) || (t >= 42 && t < 50) || (t >= 70 && t < 90),
+        cycleScope: t === 40,
+        selectSlot: t === 100 ? 3 : t === 120 ? 3 : t === 170 ? 2 : t === 240 ? 0 : -1,
+        fire: (t >= 140 && t < 146) || (t >= 185 && t < 215),
+      }),
+      checkHeal: false,
+      check: (predicted, local) => {
+        const a = predicted as PredictedActions | null;
+        if (!a) return;
+        // The discrete M2c state the shared step predicts equals the server's at every acknowledged input.
+        expect(a.inv.activeSlot).toBe(local.activeSlot);
+        expect(selectedThrowableOf(a.inv)).toBe(local.selectedThrowable);
+        expect(a.inv.slots[0]?.scope ?? null).toBe(local.slots[0]?.scope ?? null);
+        expect(a.inv.spareScope ?? null).toBe(local.spareScope);
+        expect(a.inv.smokes ?? 0).toBe(local.smokes);
+        expect(a.scopeSwap?.remainingMs ?? 0).toBeCloseTo(local.scopeSwapRemainingMs, 6);
+        expect(a.swapRemainingMs).toBeCloseTo(local.swapRemainingMs, 6);
+        if (local.selectedThrowable === 'smoke') seen.smokeSelected = true;
+        if (lastSel !== null && local.activeSlot === 3 && lastSel !== local.selectedThrowable) seen.cycles++;
+        lastSel = local.activeSlot === 3 ? local.selectedThrowable : null;
+        if (local.slots[0]?.scope === 'scope_4x') seen.scope4x = true;
+        if (local.scopeSwapRemainingMs > 0) seen.scopeSwap = true;
+        if (a.swing) seen.swing = true;
+      },
+    };
+    const model = actionStatusModel(balanceWith(() => {}));
+    const worst = runAgainstWorld(model, (l, hp, tick, carry) => actionsFromSnapshot(l, hp, tick, carry), scenario);
+    expect(worst).toBeLessThan(1e-6);
+    // The scenario really did all three things.
+    expect(seen).toMatchObject({ smokeSelected: true, scope4x: true, swing: true, scopeSwap: true });
+    expect(seen.cycles).toBeGreaterThanOrEqual(1);
   });
 
   it('Predictor runs edges after the movement step: a heal start ends ADS (adsMs reset) like the server', () => {

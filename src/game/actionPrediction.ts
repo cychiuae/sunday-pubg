@@ -21,10 +21,12 @@ import {
   applyActionEdges,
   cloneActionState,
   fireSlowedOf,
+  heldLevelOfActions,
   heldOfActions,
+  isSwapping,
   type ActionState,
 } from '../shared/sim/actions';
-import type { HeldId, LocalPlayerState, MovementState, PlayerInput, SlotIndex, WorldSnapshot } from '../shared/types';
+import type { HeldId, ItemLevel, LocalPlayerState, MovementState, PlayerInput, ScopeId, SlotIndex, WorldSnapshot } from '../shared/types';
 import { GRENADE_SLOT } from '../shared/types';
 import type { PredictStatus, StatusModel } from './prediction';
 
@@ -37,10 +39,13 @@ export interface PredictedActions extends ActionState {
   fireSlowed: boolean;
 }
 
-/** Fields the snapshot lacks; carried from the predicted state at the acknowledged seq. */
+/**
+ * Fields the snapshot lacks; carried from the predicted state at the acknowledged seq. M2c: the melee wind-up (`swing`,
+ * the remotes only get the meleeSwing event) and a held smoke throw (`smokeHeld`).
+ */
 export type CarriedActions = Pick<
   PredictedActions,
-  'lastGunSlot' | 'nextFireAt' | 'lastShotAt' | 'lastShotWeapon' | 'triggerLatched' | 'prevFire'
+  'lastGunSlot' | 'nextFireAt' | 'lastShotAt' | 'lastShotWeapon' | 'triggerLatched' | 'prevFire' | 'swing' | 'smokeHeld' | 'scopeSwap'
 >;
 
 /** Server ms of a predicted tick (World: timeOriginMs + tick x SIM_DT x 1000). */
@@ -57,8 +62,11 @@ export const actionsNowMs = (a: Pick<PredictedActions, 'tick' | 'originMs'>): nu
 export const cookRemainingMs = (a: PredictedActions): number | null =>
   a.cook === null ? null : Math.max(0, a.cook.explodesAt - actionsNowMs(a));
 
-/** Item in hand. */
+/** Item in hand (M2c: the melee id in slot 2, the selected throwable in slot 3). */
 export const heldOf = (a: Pick<ActionState, 'inv'>): HeldId => heldOfActions(a);
+
+/** M2c: level of the item in hand (null for fists and throwables). */
+export const heldLevelOf = (a: Pick<ActionState, 'inv'>): ItemLevel | null => heldLevelOfActions(a);
 
 const clonePredicted = (a: PredictedActions): PredictedActions => cloneActionState(a);
 
@@ -90,6 +98,11 @@ export function actionsFromSnapshot(
       ammo: { ...local.ammo },
       heals: { ...local.heals },
       grenades: local.grenades,
+      // M2c (LocalM2cFields): melee slot, smoke stack, throwable selection, scope pouch.
+      melee: local.melee ? { ...local.melee } : null,
+      smokes: local.smokes,
+      selectedThrowable: local.selectedThrowable,
+      spareScope: local.spareScope,
     },
     // A reload always belongs to the active slot (switching slots cancels it).
     reload:
@@ -102,6 +115,13 @@ export function actionsFromSnapshot(
         : null,
     swapRemainingMs: local.swapRemainingMs,
     throwRecoveryMs: local.throwRecoveryMs,
+    // M2c: a running T switch always belongs to the held gun slot (a slot change cancels it).
+    scopeSwap:
+      local.scopeSwapRemainingMs > 0 && active !== null
+        ? { slot: active, remainingMs: local.scopeSwapRemainingMs, totalMs: carry?.scopeSwap?.totalMs ?? local.scopeSwapRemainingMs }
+        : null,
+    swing: carry?.swing ? { ...carry.swing } : null,
+    smokeHeld: carry?.smokeHeld ?? false,
     cook: cooking ? { explodesAt: local.cookExplodesAt as number } : null,
     lastGunSlot,
     nextFireAt: carry?.nextFireAt ?? 0,
@@ -123,9 +143,18 @@ export function statusOfActions(actions: PredictedActions): PredictStatus {
     healing: actions.heal !== null,
     reloading: actions.reload !== null,
     held: heldOf(actions),
-    swapping: actions.swapRemainingMs > 0,
+    // M2c: a throwable cycle or a T switch blocks ADS like a weapon swap (World: isSwapping).
+    swapping: isSwapping(actions),
+    // M2c: the held gun's mounted scope (toMovementInput -> adsSpec), exactly as the World passes it.
+    scope: activeScopeOf(actions),
     fireSlowed: actions.fireSlowed,
   };
+}
+
+/** M2c: the scope mounted on the held gun slot (null for a built-in sight, fists, melee and throwables). */
+export function activeScopeOf(a: Pick<ActionState, 'inv'>): ScopeId | null {
+  const slot = a.inv.activeSlot;
+  return slot === 0 || slot === 1 ? (a.inv.slots[slot]?.scope ?? null) : null;
 }
 
 /** Step 1 (before movement): the shared timers, then this tick's fire slow-down flag. */

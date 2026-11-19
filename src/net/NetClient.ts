@@ -24,6 +24,7 @@ import {
   type LobbyRequest,
 } from '../shared/protocol/messages';
 import { CAP_DELTA, SnapshotDeltaDecoder } from '../shared/protocol/delta';
+import { CAP_ROWS } from '../shared/protocol/rows';
 import type {
   ConnectionStatus,
   MapVoteOption,
@@ -239,7 +240,7 @@ export class NetClient implements INetClient {
       if (this.socket !== socket) return;
       this.opened = true;
       this.setStatus('connected');
-      this.sendMsg({ t: 'hello', name, protocolVersion: PROTOCOL_VERSION, clientToken: this.clientToken, caps: [CAP_DELTA] });
+      this.sendMsg({ t: 'hello', name, protocolVersion: PROTOCOL_VERSION, clientToken: this.clientToken, caps: [CAP_DELTA, CAP_ROWS] });
       // Requests made while connecting follow the hello in order (the server handles frames in order).
       const q = this.queued;
       this.queued = [];

@@ -66,6 +66,8 @@ export interface StackOptions {
   mapPin?: string;
   /** M2b: server MAX_ROOMS env. */
   maxRooms?: number;
+  /** M2c: server LAYOUT_SEED env (pins every match's layout; 'baseline' or a uint32). */
+  layoutSeed?: number | string;
   /** Name used for log files under test-results/stack-logs. */
   label: string;
 }
@@ -194,6 +196,8 @@ export async function startStack(opts: StackOptions): Promise<Stack> {
   if (opts.mapPin !== undefined) env.MAP = opts.mapPin;
   else delete env.MAP;
   if (opts.maxRooms !== undefined) env.MAX_ROOMS = String(opts.maxRooms);
+  if (opts.layoutSeed !== undefined) env.LAYOUT_SEED = String(opts.layoutSeed);
+  else delete env.LAYOUT_SEED;
 
   const server = spawn(process.execPath, [TSX, 'server/index.ts'], { cwd: ROOT, env, detached: true, stdio: 'pipe' });
   // Server logs "listening on :<port>"; the port is the one requested above (8800-8999).

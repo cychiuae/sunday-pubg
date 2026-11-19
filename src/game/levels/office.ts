@@ -29,6 +29,8 @@ import type {
   WallSegment,
 } from '../../shared/types';
 import { OFFICE_KIT, OFFICE_SCALE, OFFICE_WALL_HEIGHT, OFFICE_WALL_THICKNESS, type OfficeKitKind } from '../../shared/kits/office';
+import { GLASS_PANE_MAX_WIDTH } from '../../shared/maps';
+import { atan2Det, cosRad, hypot2, sinRad } from './detTrig';
 import {
   RAMP_STEP_RISE,
   type Solid,
@@ -207,8 +209,16 @@ function splitRuns(runs: readonly WallRun[]): { walls: WallSegment[]; doors: Off
     const hi = alongX ? Math.max(run.a[0], run.b[0]) : Math.max(run.a[1], run.b[1]);
     const seg = (s: number, e: number): void => {
       if (e - s < 1e-6) return;
-      const [x1, z1, x2, z2] = alongX ? [s, fixed, e, fixed] : [fixed, s, fixed, e];
-      walls.push({ x1: r3(x1), z1: r3(z1), x2: r3(x2), z2: r3(z2), thickness: WALL_T, bottom: 0, top: CEILING, material: run.mat });
+      // M2c (ADR 0007 §7): glass runs are split into equal panes no wider than GLASS_PANE_MAX_WIDTH, so breaking one
+      // opens at most a door-sized gap. Pane ids come from glassPanes(map) (walls order). Solid runs stay whole.
+      const n = run.mat === 'glass' ? Math.max(1, Math.ceil((e - s) / GLASS_PANE_MAX_WIDTH - 1e-9)) : 1;
+      const cut = (i: number): number => r3(s + ((e - s) * i) / n);
+      for (let i = 0; i < n; i++) {
+        const a = cut(i);
+        const b = cut(i + 1);
+        const [x1, z1, x2, z2] = alongX ? [a, fixed, b, fixed] : [fixed, a, fixed, b];
+        walls.push({ x1: r3(x1), z1: r3(z1), x2: r3(x2), z2: r3(z2), thickness: WALL_T, bottom: 0, top: CEILING, material: run.mat });
+      }
     };
     let s = lo;
     for (const [id, d] of [...(run.doors ?? [])].sort((p, q) => p[1] - q[1])) {
@@ -522,7 +532,9 @@ const POI_DEFS: [string, number, number, number][] = [
 function r3(v: number): number {
   return Math.round(v * 1000) / 1000 + 0;
 }
-const wrap = (a: number): number => Math.atan2(Math.sin(a), Math.cos(a)) + 0;
+// Review MF2: trig and hypot go through ./detTrig (identical bits on every engine; within about 1 ulp of Math, so
+// the mm-rounded data is today's).
+const wrap = (a: number): number => atan2Det(sinRad(a), cosRad(a)) + 0;
 
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -542,16 +554,16 @@ interface Frame {
 }
 /** A frame's local (lx, lz) in world XZ. */
 function toWorld(f: Frame, lx: number, lz: number): Vec2 {
-  const c = Math.cos(f.rotY);
-  const s = Math.sin(f.rotY);
+  const c = cosRad(f.rotY);
+  const s = sinRad(f.rotY);
   return { x: f.x + lx * c + lz * s, z: f.z - lx * s + lz * c };
 }
 /** World (x, z) in a frame's local coordinates. */
 function toFrame(f: Frame, x: number, z: number): [number, number] {
   const dx = x - f.x;
   const dz = z - f.z;
-  const c = Math.cos(f.rotY);
-  const s = Math.sin(f.rotY);
+  const c = cosRad(f.rotY);
+  const s = sinRad(f.rotY);
   return [dx * c - dz * s, dx * s + dz * c];
 }
 
@@ -563,8 +575,8 @@ interface Box2 {
 }
 /** Footprint AABB of a kit kind turned by `rel` inside a parent frame, centred at (cx, cz) of that frame. */
 function kindBox(kind: Kind, rel: number, cx: number, cz: number): Box2 {
-  const c = Math.cos(rel);
-  const s = Math.sin(rel);
+  const c = cosRad(rel);
+  const s = sinRad(rel);
   const b: Box2 = { x0: Infinity, x1: -Infinity, z0: Infinity, z1: -Infinity };
   const add = (ix: number, iz: number): void => {
     const x = cx + ix * c + iz * s;
@@ -584,9 +596,9 @@ function kindBox(kind: Kind, rel: number, cx: number, cz: number): Box2 {
   return b;
 }
 const boxGap = (a: Box2, b: Box2): number =>
-  Math.hypot(Math.max(a.x0 - b.x1, b.x0 - a.x1, 0), Math.max(a.z0 - b.z1, b.z0 - a.z1, 0));
+  hypot2(Math.max(a.x0 - b.x1, b.x0 - a.x1, 0), Math.max(a.z0 - b.z1, b.z0 - a.z1, 0));
 const boxPointDist = (b: Box2, x: number, z: number): number =>
-  Math.hypot(Math.max(b.x0 - x, x - b.x1, 0), Math.max(b.z0 - z, z - b.z1, 0));
+  hypot2(Math.max(b.x0 - x, x - b.x1, 0), Math.max(b.z0 - z, z - b.z1, 0));
 
 interface Desk extends Frame {
   key: string;
@@ -600,8 +612,8 @@ function nudge(x: number, z: number, maxR: number, ok: (x: number, z: number) =>
   for (let r = 0.25; r <= maxR + 1e-9; r += 0.25) {
     for (let a = 0; a < 16; a++) {
       const t = (a / 16) * 2 * PI;
-      const px = r3(x + r * Math.cos(t));
-      const pz = r3(z + r * Math.sin(t));
+      const px = r3(x + r * cosRad(t));
+      const pz = r3(z + r * sinRad(t));
       if (ok(px, pz)) return { x: px, z: pz };
     }
   }
@@ -619,13 +631,29 @@ const DESK_EDGE_MARGIN = 0.1;
 // ---------------------------------------------------------------------------------------------
 // Generator
 // ---------------------------------------------------------------------------------------------
+/**
+ * M2c: who owns each placement of the M2b build (parallel to OFFICE.props). 'fixed' placements are kept by every
+ * per-match layout (src/game/levels/layout/office.ts); everything else is regenerated per match:
+ * 'block:<TL|TR|BL|BR>' (desks, chairs, monitors, keyboards, laptops, tunnel cover), 'aisle' (K1-K4),
+ * 'room:<fishbowl|blue|pantry|lounge>' (the room arrangements) and 'clutter' (desk-top clutter on block desks).
+ */
+export type OfficePropTag = 'fixed' | 'aisle' | 'clutter' | `block:${'TL' | 'TR' | 'BL' | 'BR'}` | `room:${'fishbowl' | 'blue' | 'pantry' | 'lounge'}`;
+
 export function buildOffice(): IndoorMapData {
+  return buildOfficeTagged().map;
+}
+
+/** The M2b build plus one OfficePropTag per placement. */
+export function buildOfficeTagged(): { map: IndoorMapData; tags: OfficePropTag[] } {
   const rng = mulberry32(LAYOUT_SEED);
   const range = (a: number, b: number): number => a + (b - a) * rng();
   const props: IndoorPropPlacement[] = [];
+  const tags: OfficePropTag[] = [];
+  let tag: OfficePropTag = 'fixed';
   const add = (kind: Kind, x: number, z: number, rotY = 0, y = 0): IndoorPropPlacement => {
     const p: IndoorPropPlacement = { kind, x: r3(x), y: r3(y), z: r3(z), rotY: wrap(rotY), scale: 1 };
     props.push(p);
+    tags.push(tag);
     return p;
   };
   const desks = new Map<string, Desk>();
@@ -648,6 +676,7 @@ export function buildOffice(): IndoorMapData {
   // 1. Desk blocks, chairs, monitors, keyboards, laptops, under-desk cover (office.md §3).
   const monitored: Desk[] = [];
   for (const b of BLOCKS) {
+    tag = `block:${b.id}`;
     for (let k = 0; k < b.n; k++) {
       const x = colX(b.id, k);
       for (const row of ['N', 'S'] as const) {
@@ -673,6 +702,7 @@ export function buildOffice(): IndoorMapData {
       add('bookStack', x + TUNNEL_COVER.books[0] * s, b.spine + TUNNEL_COVER.books[1] * s);
     }
   }
+  tag = 'fixed';
   for (const bx of BRIDGE_X) {
     addDesk(`bridgeN.${bx}`, 'deskWood', bx, BRIDGE_N_Z, PI);
     addDesk(`bridgeS.${bx}`, 'deskWood', bx, BRIDGE_S_Z, 0);
@@ -683,8 +713,10 @@ export function buildOffice(): IndoorMapData {
   const pool = [...monitored];
   for (let i = 0; i < EXTRA_LAPTOPS && pool.length > 0; i++) {
     const d = pool.splice(Math.floor(rng() * pool.length), 1)[0]!;
+    tag = `block:${d.key.slice(0, 2) as 'TL' | 'TR' | 'BL' | 'BR'}`;
     onDesk(d, 'laptop', rng() < 0.5 ? -EXTRA_LAPTOP_X : EXTRA_LAPTOP_X, LAPTOP_AT[1]);
   }
+  tag = 'fixed';
 
   // 2. Climb routes (office.md §4).
   const routes: ClimbRoute[] = [];
@@ -740,6 +772,7 @@ export function buildOffice(): IndoorMapData {
     { c: [46, -5], smalls: 'ew', chair: [-7, 7] }, // keeps zone centre (56, 0) and spawn 24 clear
     { c: [100, 6], smalls: 'ns', chair: [8, 3] },
   ];
+  tag = 'aisle';
   for (const k of clusters) {
     const [x, z] = k.c;
     add('box', x, z);
@@ -770,20 +803,24 @@ export function buildOffice(): IndoorMapData {
   const endChairGap = DESK_HALF_W + CHAIR_R + 0.03;
 
   // Fishbowl: long table of 4 deskWood, 4 side chairs + 2 at the west end, a plant.
+  tag = 'room:fishbowl';
   roomTable('fishbowl', -71.0, 2, -59.4, wallFaceN, glassFaceS);
   for (const dz of [-ROW, ROW]) chair(-71.0 - endChairGap, -59.4 + dz, -HALF_PI);
   add('pottedPlant', -44.5, -49.5);
+  tag = 'fixed';
   // Shush Booth: two closed pods, doors to the corridor, a 4.7 m slot between them.
   const podHalf = boxPart('phoneBooth', 'pod').max[0];
   for (const x of [-35.75, -21.5]) add('phoneBooth', x, wallFaceN + podHalf, PI);
   // Lounge: pinboard, plants, boxes.
   add('pinboard', 2, wallFaceN, PI);
+  tag = 'room:lounge';
   add('pottedPlant', -14, -69.5);
   add('pottedPlant', 18.5, -69.5);
   add('box', -11, -64);
   add('boxSmall', -11 + bhx + shx, -64.5);
   add('box', 14, -66);
   add('boxSmall', 14, -66 + bhz + shz);
+  tag = 'fixed';
   // Corner Office: exec desk plateau (2 epic), exec chair, routes CO-A / CO-B (above), plants.
   const exec = addDesk('exec', 'deskWood', 39.92, -60, 0);
   onDesk(exec, 'monitor', MONITOR_AT[0], MONITOR_AT[1]);
@@ -792,9 +829,11 @@ export function buildOffice(): IndoorMapData {
   add('pottedPlant', 22.5, -69.5);
   add('pottedPlant', 49, -70);
   // Blue Room: one facing pair, 2 side chairs + 2 at the east end, a plant.
+  tag = 'room:blue';
   roomTable('blue', 67.5, 1, -59.4, wallFaceN, glassFaceS);
   for (const dz of [-ROW, ROW]) chair(67.5 + endChairGap, -59.4 + dz, HALF_PI);
   add('pottedPlant', 53.5, -69.5);
+  tag = 'fixed';
   // Yellow Room: a climbable table (routes YEL-N / YEL-S), 4 chairs, a laptop, a plant.
   const yellowN = addDesk('yellow.N', 'deskWood', 101, -45.0 - ROW, 0);
   addDesk('yellow.S', 'deskWood', 101, -45.0 + ROW, PI);
@@ -815,6 +854,7 @@ export function buildOffice(): IndoorMapData {
     const w = toWorld(counter, lx, lz);
     add(kind, w.x, w.z, counter.rotY, COUNTER_TOP);
   }
+  tag = 'room:pantry';
   addDesk('pantry', 'deskWood', -96, -30, HALF_PI);
   chair(-96, -30 - DESK_HALF_W - CHAIR_R - 0.06, PI);
   chair(-96, -30 + DESK_HALF_W + CHAIR_R + 0.06, 0);
@@ -822,6 +862,7 @@ export function buildOffice(): IndoorMapData {
   add('boxSmall', -113 + bhx + shx, -17.8);
   add('box', -112, -43);
   add('boxSmall', -112, -43 + bhz + shz);
+  tag = 'fixed';
   add('pantryCounter', -91.24, -62, HALF_PI); // loos N vanity
   add('pantryCounter', -100, 10.76, 0); // loos S vanity
   // Paper Jam Corner: filing cabinets, printer, admin desk + chair, boxes with books on top.
@@ -883,7 +924,7 @@ export function buildOffice(): IndoorMapData {
   for (const def of OFFICE_LOOT_DEFS) {
     const y = LEVEL_Y[def.level];
     const spaced = (x: number, z: number): boolean =>
-      lootSpawns.every((o) => Math.abs((o.y ?? 0) - y) > 0.5 || Math.hypot(o.x - x, o.z - z) >= LOOT_SPACING);
+      lootSpawns.every((o) => Math.abs((o.y ?? 0) - y) > 0.5 || hypot2(o.x - x, o.z - z) >= LOOT_SPACING);
     const p = nudge(def.x, def.z, OFFICE_NUDGE_MAX, (x, z) => spaced(x, z) && lootSpotIssue(solids, OFFICE_FLOOR, x, y, z) === null);
     const at = p ?? { x: def.x, z: def.z };
     lootSpawns.push(def.level === 'floor' ? { x: r3(at.x), z: r3(at.z), tier: def.tier } : { x: r3(at.x), z: r3(at.z), tier: def.tier, y: r3(y) });
@@ -916,9 +957,12 @@ export function buildOffice(): IndoorMapData {
     return false;
   };
   const kettle = desks.get('TL.S.0')!;
+  tag = 'clutter';
   for (const [kind, n] of KETTLE_ITEMS) for (let i = 0; i < n; i++) tryClutter(kettle, kind);
+  tag = 'fixed';
   tryClutter(exec, 'plushWhale');
   tryClutter(exec, 'mug');
+  tag = 'clutter';
   const eligible = BLOCKS.flatMap((b) =>
     (['N', 'S'] as const).flatMap((row) =>
       [...Array(b.n).keys()]
@@ -936,6 +980,7 @@ export function buildOffice(): IndoorMapData {
       for (const { d } of order) if (tryClutter(d, kind)) break;
     }
   }
+  tag = 'fixed';
 
   // 8. Ceiling visuals (no colliders): light panel rows over the open plan, room panels, AC cassettes.
   // Visual-only kinds have no colliders: use the drawn size for the footprint.
@@ -979,7 +1024,7 @@ export function buildOffice(): IndoorMapData {
 
   const pois: MapPoi[] = POI_DEFS.map(([id, x, z, radius]) => ({ id, nameKey: `poi.${id}`, x: r3(x), z: r3(z), radius }));
 
-  return {
+  const map: IndoorMapData = {
     kind: 'indoor',
     id: 'office',
     nameKey: 'map.office.name',
@@ -997,7 +1042,42 @@ export function buildOffice(): IndoorMapData {
     zoneCenters: ZONE_CENTERS.map((c) => ({ x: r3(c.x), z: r3(c.z) })),
     pois,
   };
+  return { map, tags };
 }
 
+const BUILT = buildOfficeTagged();
 /** Map 2 (ARCHITECTURE §15.5). */
-export const OFFICE: IndoorMapData = buildOffice();
+export const OFFICE: IndoorMapData = BUILT.map;
+/** M2c: one OfficePropTag per OFFICE.props entry (same order). */
+export const OFFICE_PROP_TAGS: readonly OfficePropTag[] = BUILT.tags;
+
+/**
+ * M2c: the M2b building blocks the per-match generator (layout/office.ts) re-uses, so both builds follow one rule set
+ * (office.md §3). Read-only data.
+ */
+export const OFFICE_LAYOUT_SPEC = {
+  blocks: BLOCKS,
+  col: COL,
+  row: ROW,
+  deskHalfW: DESK_HALF_W,
+  deskHalfD: DESK_HALF_D,
+  chairOffset: CHAIR_OFFSET,
+  chairJitter: CHAIR_JITTER,
+  chairOmit: CHAIR_OMIT,
+  chairFixedX: CHAIR_FIXED_X,
+  chairNoEastJitter: CHAIR_NO_EAST_JITTER,
+  tunnelCover: TUNNEL_COVER,
+  monitorAt: MONITOR_AT,
+  keyboardAt: KEYBOARD_AT,
+  laptopAt: LAPTOP_AT,
+  extraLaptopX: EXTRA_LAPTOP_X,
+  extraLaptops: EXTRA_LAPTOPS,
+  kettleItems: KETTLE_ITEMS,
+  clutterGap: CLUTTER_GAP,
+  clutterLootClear: CLUTTER_LOOT_CLEAR,
+  clutterRouteClear: CLUTTER_ROUTE_CLEAR,
+  deskEdgeMargin: DESK_EDGE_MARGIN,
+  rooms: ROOMS,
+  levelY: LEVEL_Y,
+  lootSpacing: LOOT_SPACING,
+} as const;

@@ -1259,4 +1259,4 @@ export interface Settings {
 ## 15. M2c "Fresh Every Match & Bigger Arsenal"
 Design spec in `docs/ui/M2c.md` (item levels and the level badge, melee slot, throwable slot cycling, RPG, smoke
 visibility, per-match layout on the minimap, look line and layout code, string keys, contract requests, acceptance
-criteria M2C-UI-01..32). It supersedes the "Loot tier" row in §4: the ground shows the item's level, not the spot tier.
+criteria M2C-UI-01..42; §16 covers scope attachments). It supersedes the "Loot tier" row in §4: the ground shows the item's level, not the spot tier.

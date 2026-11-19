@@ -2,17 +2,26 @@
  * Test-only builders and fakes for src/game unit tests. Not imported by runtime code.
  */
 import type { InterpolatedWorld, INetClient, NetHandlers, RoomJoinTarget, RoomSettingsInput, ServerHello } from '../shared/contracts';
+import { layoutHash, LAYOUT_FORMAT_VERSION, BASELINE_LAYOUT_SEED } from '../shared/layout';
+import { zeroAmmo } from '../shared/sim/inventory';
 import type {
+  AmmoId,
   ConnectionStatus,
   DropStepFields,
   IslandMapData,
+  LocalM2cFields,
   LocalPlayerState,
+  MatchLayoutRef,
   MatchState,
   MovementState,
+  PaneId,
   PlayerId,
   PlayerInput,
+  PlayerM2cFields,
   PlayerState,
+  RocketState,
   SimEvent,
+  SmokeCloudState,
   WelcomeInfo,
   WorldSnapshot,
   ZoneState,
@@ -44,49 +53,60 @@ export function makeMovement(overrides: Partial<MovementState> = {}): MovementSt
   });
 }
 
+/** M2c: PlayerM2cFields of a fists-holding player (they become required at the C-gate). */
+const M2C_PLAYER_DEFAULTS: PlayerM2cFields = { weaponLevel: null, sight: 'none' };
+/** M2c: LocalM2cFields at match start (no melee, no smoke, frag selected, empty pouch). */
+const M2C_LOCAL_DEFAULTS: LocalM2cFields = { melee: null, smokes: 0, selectedThrowable: 'grenade', spareScope: null, scopeSwapRemainingMs: 0 };
+type PlayerFixed = 'aboard' | 'dropPhase' | keyof PlayerM2cFields;
+type LocalFixed = 'aboard' | keyof LocalM2cFields;
+type SnapshotFixed = 'rockets' | 'smokes' | 'brokenPanes';
+
 export function makePlayer(id: PlayerId, overrides: Partial<PlayerState> = {}): PlayerState {
-  return Object.assign<{ aboard: boolean; dropPhase: null }, Omit<PlayerState, 'aboard' | 'dropPhase'>>({ aboard: false, dropPhase: null }, {
-    id,
-    name: `p${id}`,
-    pos: { x: 0, y: 0, z: 0 },
-    velY: 0,
-    yaw: 0,
-    pitch: 0,
-    hp: 100,
-    vestTier: 0,
-    helmetTier: 0,
-    alive: true,
-    weapon: 'fists',
-    stance: 'stand',
-    stanceFrom: 'stand',
-    stanceProgress: 1,
-    anim: {
-      moving: false,
-      sprinting: false,
-      airborne: false,
-      dropping: false,
-      inWater: false,
-      firing: false,
-      reloading: false,
-      healing: false,
-      ads: false,
-      cooking: false,
+  return Object.assign<{ aboard: boolean; dropPhase: null } & PlayerM2cFields, Omit<PlayerState, PlayerFixed>>(
+    { aboard: false, dropPhase: null, ...M2C_PLAYER_DEFAULTS },
+    {
+      id,
+      name: `p${id}`,
+      pos: { x: 0, y: 0, z: 0 },
+      velY: 0,
+      yaw: 0,
+      pitch: 0,
+      hp: 100,
+      vestTier: 0,
+      helmetTier: 0,
+      alive: true,
+      weapon: 'fists',
+      stance: 'stand',
+      stanceFrom: 'stand',
+      stanceProgress: 1,
+      anim: {
+        moving: false,
+        sprinting: false,
+        airborne: false,
+        dropping: false,
+        inWater: false,
+        firing: false,
+        reloading: false,
+        healing: false,
+        ads: false,
+        cooking: false,
+      },
+      appearance: { skin: 0, outfit: 0, hair: 0 },
+      isBot: false,
+      kills: 0,
+      ...overrides,
     },
-    appearance: { skin: 0, outfit: 0, hair: 0 },
-    isBot: false,
-    kills: 0,
-    ...overrides,
-  });
+  );
 }
 
 export function makeLocal(id: PlayerId, overrides: Partial<LocalPlayerState> = {}): LocalPlayerState {
-  return Object.assign<{ aboard: boolean }, Omit<LocalPlayerState, 'aboard'>>({ aboard: false }, {
+  return Object.assign<{ aboard: boolean } & LocalM2cFields, Omit<LocalPlayerState, LocalFixed>>({ aboard: false, ...M2C_LOCAL_DEFAULTS }, {
     id,
     lastProcessedInputSeq: 0,
     movement: makeMovement(),
     slots: [null, null],
     activeSlot: 2,
-    ammo: { ammo_light: 0, ammo_heavy: 0, ammo_shell: 0, ammo_sniper: 0 },
+    ammo: zeroAmmo(),
     heals: { bandage: 0, medkit: 0 },
     vest: null,
     helmet: null,
@@ -101,6 +121,11 @@ export function makeLocal(id: PlayerId, overrides: Partial<LocalPlayerState> = {
     swapRemainingMs: 0,
     ...overrides,
   });
+}
+
+/** A full ammo record (every AmmoId, so it widens at the C-gate) with the given counts; the rest 0. */
+export function makeAmmo(counts: Partial<Record<AmmoId, number>> = {}): Record<AmmoId, number> {
+  return { ...zeroAmmo(), ...counts };
 }
 
 export function makeMatch(overrides: Partial<MatchState> = {}): MatchState {
@@ -134,18 +159,21 @@ export function makeZone(overrides: Partial<ZoneState> = {}): ZoneState {
 }
 
 export function makeSnapshot(overrides: Partial<WorldSnapshot> = {}): WorldSnapshot {
-  return {
-    tick: 1,
-    serverTime: 0,
-    match: makeMatch(),
-    zone: null,
-    players: [],
-    lootVersion: 1,
-    loot: [],
-    grenades: [],
-    local: null,
-    ...overrides,
-  };
+  return Object.assign<{ rockets: RocketState[]; smokes: SmokeCloudState[]; brokenPanes: PaneId[] }, Omit<WorldSnapshot, SnapshotFixed>>(
+    { rockets: [], smokes: [], brokenPanes: [] },
+    {
+      tick: 1,
+      serverTime: 0,
+      match: makeMatch(),
+      zone: null,
+      players: [],
+      lootVersion: 1,
+      loot: [],
+      grenades: [],
+      local: null,
+      ...overrides,
+    },
+  );
 }
 
 export const TEST_MAP: IslandMapData = {
@@ -164,6 +192,14 @@ export const TEST_MAP: IslandMapData = {
   lootSpawns: [],
   zoneCenters: [{ x: 0, z: 0 }],
   pois: [],
+};
+
+/** M2c: WelcomeInfo.layout for TEST_MAP's baseline (seed 0, the base props and loot, noon). */
+export const TEST_LAYOUT_REF: MatchLayoutRef = {
+  seed: BASELINE_LAYOUT_SEED,
+  version: LAYOUT_FORMAT_VERSION,
+  hash: layoutHash(TEST_MAP.props, TEST_MAP.lootSpawns),
+  look: 'noon',
 };
 
 /** Scriptable INetClient: push server messages, inspect sent inputs. */
@@ -209,7 +245,12 @@ export class FakeNet implements INetClient {
   }
   pushWelcome(welcome: Partial<WelcomeInfo> & { playerId: PlayerId }): void {
     this.playerId = welcome.playerId;
-    this.handlers?.onWelcome({ mapId: TEST_MAP.id, serverTime: this.now, matchId: 1, roomId: 'r1', ...welcome });
+    this.handlers?.onWelcome(
+      Object.assign<{ layout: MatchLayoutRef }, Omit<WelcomeInfo, 'layout'>>(
+        { layout: TEST_LAYOUT_REF },
+        { mapId: TEST_MAP.id, serverTime: this.now, matchId: 1, roomId: 'r1', ...welcome },
+      ),
+    );
   }
   pushSnapshot(snap: WorldSnapshot): void {
     this.latest = snap;

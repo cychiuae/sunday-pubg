@@ -43,7 +43,9 @@ export type GameAction =
   | 'crouch'
   | 'prone'
   | 'jumpAlt'
-  | 'spectateView';
+  | 'spectateView'
+  /** M2c (scopes.md "T"): switch sight on the held gun. */
+  | 'cycleScope';
 
 /** Keyed by KeyboardEvent.code (layout independent: KeyW is W on QWERTY, Z on AZERTY). */
 export const DEFAULT_KEY_BINDINGS: Readonly<Record<string, GameAction>> = {
@@ -75,6 +77,8 @@ export const DEFAULT_KEY_BINDINGS: Readonly<Record<string, GameAction>> = {
   // M2b: F = jump/deploy while aboard or dropping only (drop.md); V = spectate view toggle (camera.md).
   KeyF: 'jumpAlt',
   KeyV: 'spectateView',
+  // M2c: T = switch sight (scopes.md; UI M2c §16.4).
+  KeyT: 'cycleScope',
 };
 
 /** Mouse button index for fire (MouseEvent.button). */
@@ -121,6 +125,8 @@ export class InputState {
   private healLatch = false;
   private slotLatch: SlotIndex | -1 = -1;
   private stanceLatch: StanceRequest | null = null;
+  /** M2c: T pressed (or the sight chip clicked) since the last sample. */
+  private scopeLatch = false;
   private wheelLatch: 1 | -1 | 0 = 0;
   private firePressedLatch = false;
   private fireReleasedLatch = false;
@@ -210,6 +216,11 @@ export class InputState {
     else if (this.pitch < this.pitchMin) this.pitch = a >= 1 ? this.pitchMin : this.pitch + (this.pitchMin - this.pitch) * a;
   }
 
+  /** M2c: latch the T edge from a UI click (IClientGame.cycleScope), exactly like the key. */
+  latchCycleScope(): void {
+    this.scopeLatch = true;
+  }
+
   /** M2b: true once per V press. */
   consumeViewToggle(): boolean {
     const v = this.viewToggleLatch;
@@ -264,6 +275,9 @@ export class InputState {
         break;
       case 'spectateView':
         this.viewToggleLatch = true;
+        break;
+      case 'cycleScope':
+        this.scopeLatch = true;
         break;
       default: {
         const slot = SLOT_FOR_ACTION[action];
@@ -344,6 +358,7 @@ export class InputState {
     this.healLatch = false;
     this.slotLatch = -1;
     this.stanceLatch = null;
+    this.scopeLatch = false;
     this.wheelLatch = 0;
     this.firePressedLatch = false;
     this.fireReleasedLatch = false;
@@ -399,6 +414,8 @@ export class InputState {
       useHeal: this.healLatch,
       selectSlot,
       stanceToggle: this.stanceLatch,
+      // M2c: optional edge (absent = false), so M2b-shaped inputs stay unchanged.
+      ...(this.scopeLatch ? { cycleScope: true } : {}),
     };
 
     this.clearEdges();
@@ -411,7 +428,8 @@ export class InputState {
 
 /**
  * Next/previous selectable slot for the mouse wheel, cycling 0 -> 1 -> 2 -> 3 -> 0: weapon slots that hold a gun,
- * fists (always), and the grenade slot only while carrying grenades (combat.md "Inventory state").
+ * fists or the melee weapon (always), and the throwable slot only while carrying a frag or a smoke (grenades.md
+ * "Throwable slot": the wheel skips slot 3 when both stacks are 0).
  */
 export function cycleSlot(
   current: SlotIndex,

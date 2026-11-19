@@ -409,7 +409,7 @@ describe('World: combat (combat.md acceptance)', () => {
     loot.push({ id: 900, item: 'rifle', qty: 1, mag: 20, pos: { x: 0.5, y: 2, z: 0 }, tier: 'epic', durability: null });
     const ev = run(d.w, 1, { [d.s]: () => ({ interact: true }) });
     expect(ofType(ev, 'pickup')[0]).toMatchObject({ item: 'rifle', qty: 1, lootId: 900 });
-    expect(d.sp.inv.slots[1]).toEqual({ weapon: 'rifle', mag: 20 });
+    expect(d.sp.inv.slots[1]).toEqual({ weapon: 'rifle', mag: 20, level: 1, scope: null });
     const dropped = d.w.debugLoot().find((l) => l.item === 'smg')!;
     expect(dropped.mag).toBe(7);
     expect(Math.hypot(dropped.pos.x, dropped.pos.z)).toBeLessThan(0.5);

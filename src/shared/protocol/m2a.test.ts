@@ -31,6 +31,7 @@ import {
   ANIM_BITS,
   quantizeDeep,
 } from './messages';
+import { grenadeToRow } from './rows';
 import { makeGrenade, makeInput, makeLocal, makeMatch, makePlayer, makeSnapshot } from './testing';
 
 const v3 = { x: 1.5, y: 2, z: -3 };
@@ -111,7 +112,7 @@ describe('M2a PlayerState fields', () => {
   });
 
   it.each([
-    ['vestTier 4', { vestTier: 4 }],
+    ['vestTier 5', { vestTier: 5 }], // M2c: tier 4 is valid
     ['vestTier -1', { vestTier: -1 }],
     ['vestTier 1.5', { vestTier: 1.5 }],
     ['helmetTier "2"', { helmetTier: '2' }],
@@ -138,7 +139,7 @@ describe('M2a LocalPlayerState fields', () => {
   const local = makeLocal(1, {
     activeSlot: 3,
     movement: { ...makeLocal(1).movement, stance: 'crouch', stanceFrom: 'stand', stanceMs: 120.5, adsMs: 80 },
-    ammo: { ammo_light: 1, ammo_heavy: 2, ammo_shell: 3, ammo_sniper: 4 },
+    ammo: { ammo_light: 1, ammo_heavy: 2, ammo_shell: 3, ammo_sniper: 4, ...{ ammo_rocket: 0 } },
     vest: { tier: 2, durability: 31.25 },
     helmet: { tier: 3, durability: 0.5 },
     grenades: 2,
@@ -157,7 +158,7 @@ describe('M2a LocalPlayerState fields', () => {
 
   it.each([
     ['vest tier 0', { vest: { tier: 0, durability: 5 } }],
-    ['vest tier 4', { vest: { tier: 4, durability: 5 } }],
+    ['vest tier 5', { vest: { tier: 5, durability: 5 } }], // M2c: tier 4 is valid
     ['vest durability 0', { vest: { tier: 1, durability: 0 } }],
     ['helmet durability negative', { helmet: { tier: 1, durability: -1 } }],
     ['helmet as a number', { helmet: 2 }],
@@ -273,13 +274,13 @@ describe('M2a events', () => {
     { type: 'weaponSwitch', playerId: 1, weapon: 'grenade', slot: 3 },
     { type: 'stanceChange', playerId: 1, from: 'stand', to: 'prone', forced: false, durationMs: 600 },
     { type: 'stanceChange', playerId: 1, from: 'prone', to: 'stand', forced: true, durationMs: 500 },
-    { type: 'grenadeCook', playerId: 1, pos: v3, explodesAt: 4500.5 },
-    { type: 'grenadeThrown', id: 7, ownerId: 1, pos: v3, vel: { x: 10, y: 5, z: -2 }, explodesAt: 4500.5, dropped: false },
-    { type: 'grenadeThrown', id: 8, ownerId: 1, pos: v3, vel: { x: 0, y: 0, z: 0 }, explodesAt: 4600, dropped: true },
-    { type: 'grenadeBounce', id: 7, pos: v3, surface: 'water', speed: 3.25 },
-    { type: 'grenadeBounce', id: 7, pos: v3, surface: 'edge', speed: 1 },
-    { type: 'explosion', id: 7, ownerId: 1, pos: v3, radius: 7.5, inHand: false },
-    { type: 'explosion', id: 9, ownerId: 1, pos: v3, radius: 7.5, inHand: true },
+    { type: 'grenadeCook', playerId: 1, pos: v3, explodesAt: 4500.5, kind: 'grenade' },
+    { type: 'grenadeThrown', id: 7, ownerId: 1, pos: v3, vel: { x: 10, y: 5, z: -2 }, explodesAt: 4500.5, dropped: false, kind: 'grenade' },
+    { type: 'grenadeThrown', id: 8, ownerId: 1, pos: v3, vel: { x: 0, y: 0, z: 0 }, explodesAt: 4600, dropped: true, kind: 'grenade' },
+    { type: 'grenadeBounce', id: 7, pos: v3, surface: 'water', speed: 3.25, kind: 'grenade' },
+    { type: 'grenadeBounce', id: 7, pos: v3, surface: 'edge', speed: 1, kind: 'grenade' },
+    { type: 'explosion', id: 7, ownerId: 1, pos: v3, radius: 7.5, inHand: false, source: 'grenade' },
+    { type: 'explosion', id: 9, ownerId: 1, pos: v3, radius: 7.5, inHand: true, source: 'grenade' },
     { type: 'actionFailed', playerId: 1, action: 'swap', reason: 'noGrenades' },
     { type: 'actionFailed', playerId: 1, action: 'stance', reason: 'noHeadroom' },
     { type: 'actionFailed', playerId: 1, action: 'stance', reason: 'tooDeep' },
@@ -307,9 +308,9 @@ describe('M2a events', () => {
     ['weaponSwitch slot 4', { type: 'weaponSwitch', playerId: 1, weapon: 'grenade', slot: 4 }],
     ['stanceChange to "sit"', { ...stance, to: 'sit' }],
     ['stanceChange forced missing', { ...stance, forced: undefined }],
-    ['grenadeCook without explodesAt', { type: 'grenadeCook', playerId: 1, pos: v3 }],
+    ['grenadeCook without explodesAt', { type: 'grenadeCook', playerId: 1, pos: v3, kind: 'grenade' }],
     ['grenadeThrown without dropped', { ...(events[14] as object), dropped: undefined }],
-    ['grenadeBounce surface "player"', { type: 'grenadeBounce', id: 7, pos: v3, surface: 'player', speed: 1 }],
+    ['grenadeBounce surface "player"', { type: 'grenadeBounce', id: 7, pos: v3, surface: 'player', speed: 1, kind: 'grenade' }],
     ['explosion radius -1', { ...(events[18] as object), radius: -1 }],
     ['explosion without inHand', { ...(events[18] as object), inHand: undefined }],
     ['actionFailed unknown reason', { type: 'actionFailed', playerId: 1, action: 'stance', reason: 'sleepy' }],
@@ -465,7 +466,7 @@ describe('M2a snapshot budget', () => {
           },
           slots: [{ weapon: 'sniper', mag: 5 }, { weapon: 'lmg', mag: 100 }],
           activeSlot: 3,
-          ammo: { ammo_light: 120, ammo_heavy: 240, ammo_shell: 32, ammo_sniper: 20 },
+          ammo: { ammo_light: 120, ammo_heavy: 240, ammo_shell: 32, ammo_sniper: 20, ...{ ammo_rocket: 2 } },
           heals: { bandage: 5, medkit: 2 },
           vest: { tier: 3, durability: 81.234 },
           helmet: { tier: 2, durability: 37.891 },
@@ -483,8 +484,11 @@ describe('M2a snapshot budget', () => {
     const bytes = encodeQuantized({ t: 'snapshot', snap: { ...noLoot, lootVersion: snap.lootVersion } }).length;
     if (process.env.SNAP_SIZES) console.info(`worst-case full snapshot without loot: ${bytes} B`);
     expect(bytes).toBeLessThan(BUDGET);
-    // The grenade list itself is small: about 120-150 B each after quantisation (ADR 0004 §8).
-    expect(JSON.stringify(snap.grenades).length / 10).toBeLessThan(160);
+    // The grenade list itself is small: about 120-150 B each after quantisation (ADR 0004 §8), + 17 B for the M2c
+    // `kind` in the object format. On the wire (rows) it is about half of that (m2c.test.ts).
+    expect(JSON.stringify(snap.grenades).length / 10).toBeLessThan(180);
+    // REVIEW-M2c N7: the wire form (rows) is the bound that matters; keep it tight.
+    expect(JSON.stringify(snap.grenades.map(grenadeToRow)).length / 10).toBeLessThan(90);
   });
 
   it('the same scene as a delta (everyone mid-transition) is far smaller', () => {

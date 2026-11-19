@@ -19,9 +19,11 @@ import * as THREE from 'three';
 import type { Appearance } from '../../shared/types';
 import { buildMerged, xf, type Merged, type Piece, type V3 } from './builder';
 import { OUTFITS, outfitSleeve, SKIN_TONES } from './chibi';
+import type { ItemLevel, ScopeId } from '../../shared/types';
 import { createGrenadeModel } from './grenade';
 import { getLootItemGeometry } from './loot';
 import { outlineMaterial, palette, vertexColorToon } from './materials';
+import { createSmokeModel } from './smokeCan';
 import { createWeaponModel, getWeaponSight } from './weapons';
 
 /**
@@ -41,10 +43,16 @@ export const VIEWMODEL_NEAR = 0.01;
 
 export type ViewmodelItemId =
   | 'fists' | 'pistol' | 'smg' | 'shotgun' | 'rifle' | 'lmg' | 'dmr' | 'sniper'
-  | 'grenade' | 'grenade_cooking' | 'bandage' | 'medkit';
+  | 'grenade' | 'grenade_cooking' | 'bandage' | 'medkit'
+  // M2c (docs/art/M2c.md §7)
+  | 'revolver' | 'dbshotgun' | 'rpg' | 'knife' | 'machete' | 'paddle' | 'smoke' | 'smoke_cooking';
 export const VIEWMODEL_ITEM_IDS: readonly ViewmodelItemId[] = [
   'fists', 'pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper', 'grenade', 'grenade_cooking', 'bandage', 'medkit',
+  'revolver', 'dbshotgun', 'rpg', 'knife', 'machete', 'paddle', 'smoke', 'smoke_cooking',
 ];
+/** M2c melee items (no ADS; swing arcs in MELEE_SWING_KEYS). */
+export type ViewmodelMeleeId = 'knife' | 'machete' | 'paddle';
+export const VIEWMODEL_MELEE_IDS: readonly ViewmodelMeleeId[] = ['knife', 'machete', 'paddle'];
 
 /** Position (m) + Euler XYZ rotation (rad). */
 export interface VmXf { pos: V3; rot: V3 }
@@ -73,15 +81,26 @@ const GRIP_R = (pos: V3, tilt = 0.55): VmXf => xfm(pos, [tilt, 0.18, -H]);
 /** Left (support) hand palm-up under a fore-end, forearm down-back-left. */
 const SUPPORT_L = (pos: V3, tilt = 0.6): VmXf => xfm(pos, [tilt, -0.4, PI]);
 
-/** ADS socket for a gun: the sight anchor lands on the camera origin (eye) with no rotation. */
-function adsFor(id: string): VmXf {
-  const s = getWeaponSight(id);
+/** ADS socket for a gun: the sight anchor lands on the camera origin (eye) with no rotation. With a scope: its eye. */
+function adsFor(id: string, scope: ScopeId | null = null): VmXf {
+  const s = getWeaponSight(id, { scope });
   const e = s ? s.eye : [0, 0, 0];
   return xfm([-e[0], -e[1], -e[2]]);
 }
 
 function gun(id: string, hip: V3, hipRot: V3, handR: VmXf, handL: VmXf): ViewmodelPose {
   return { hip: cxf(hip, hipRot), ads: adsFor(id), handR, handL, curlR: -1.25, curlL: -0.95, itemScale: 1 };
+}
+/** Melee hold: no ADS (ads = hip). */
+function melee(hip: V3, hipRot: V3, handR: VmXf, handL: VmXf | null, curlR: number, curlL: number): ViewmodelPose {
+  const h = cxf(hip, hipRot);
+  return { hip: h, ads: h, handR, handL, curlR, curlL, itemScale: 1 };
+}
+
+/** Level and scope of the held item (M2c): picks the per-level model and the mounted scope. */
+export interface ViewmodelItemOptions {
+  level?: ItemLevel | null;
+  scope?: ScopeId | null;
 }
 
 /**
@@ -135,7 +154,117 @@ export const VIEWMODEL_POSES: Readonly<Record<ViewmodelItemId, ViewmodelPose>> =
     handL: xfm([-0.27, -0.03, 0.02], [0.2, -0.25, H]),
     curlR: -0.7, curlL: -0.7, itemScale: 0.65,
   },
+  // ---- M2c guns (art M2c.md §7.1) ----
+  revolver: gun('revolver', [0.12, -0.13, -0.46], [0.02, 0.07, 0], GRIP_R([0.004, -0.035, 0.025], 0.35), xfm([-0.035, -0.07, 0.0], [0.45, -0.35, H])),
+  dbshotgun: gun('dbshotgun', [0.18, -0.2, -0.47], [0.03, 0.16, -0.06], GRIP_R([0.004, -0.045, 0.04]), SUPPORT_L([0, -0.0, -0.22])),
+  // tube along the view on the right; its rear end passes behind the camera (the near plane clips it)
+  rpg: gun('rpg', [0.2, -0.14, -0.3], [0.02, 0.1, -0.03], GRIP_R([0.004, -0.05, 0.0], 0.3), xfm([-0.004, -0.045, -0.25], [0.4, -0.18, H])),
+  // ---- M2c melee: no ADS (ads = hip). The left hand is lowered for the knife and machete (one-handed). ----
+  knife: melee([0.17, -0.16, -0.38], [0.35, 0.15, -0.25], GRIP_R([0, -0.01, 0.03], 0.1), null, -1.5, -1.6),
+  machete: melee([0.2, -0.2, -0.42], [0.55, 0.1, -0.35], GRIP_R([0, -0.01, 0.04], 0.1), null, -1.5, -1.6),
+  paddle: melee([0.1, -0.26, -0.5], [0.45, 0.55, 0.85], GRIP_R([0, -0.01, 0.1], 0.1), xfm([0, -0.01, -0.38], [0.3, -0.2, H]), -1.4, -1.3),
+  // ---- M2c smoke can: the frag's poses (the left hand pinches the cream ring) ----
+  smoke: {
+    hip: cxf([0.16, -0.12, -0.46], [0, 0.3, 0]),
+    ads: cxf([0.22, -0.01, -0.42], [-0.3, 0.3, 0.2]),
+    handR: xfm([0, -0.06, 0.01], [0.5, 0.2, PI]),
+    handL: xfm([-0.085, 0.05, 0.02], [0.2, -0.4, H]),
+    curlR: -0.9, curlL: -0.7, itemScale: 1,
+  },
+  smoke_cooking: {
+    hip: cxf([0.16, -0.11, -0.45], [0, 0.3, 0]),
+    ads: cxf([0.22, -0.01, -0.42], [-0.3, 0.3, 0.2]),
+    handR: xfm([0, -0.06, 0.01], [0.5, 0.2, PI]),
+    handL: null,
+    curlR: -1.0, curlL: -0.4, itemScale: 1,
+  },
 };
+
+/**
+ * The reference pose for an item with a mounted scope: same hip pose and hands; for guns the ADS socket is the mounted
+ * sight's eye (eye = rail + SCOPE_GEOMETRY[scope].eye), so ADS lines up for every gun/scope pair.
+ */
+export function viewmodelPoseFor(id: ViewmodelItemId, opts: ViewmodelItemOptions = {}): ViewmodelPose {
+  const base = VIEWMODEL_POSES[id];
+  if (!opts.scope || !getWeaponSight(id)) return base;
+  return { ...base, ads: adsFor(id, opts.scope) };
+}
+
+// -------------------------------------------------------------------------------------------------
+// M2c melee swing arcs (art M2c.md §7.2). Socket keyframes in CAMERA space, authored at 50 deg (cxf).
+// t = 0..1 of the swing (weapons.<id>.fireIntervalMs); h = hitFrameMs / fireIntervalMs. The blade crosses the screen
+// centre exactly at t = h (the sim's single hit test). Rotation sign: +Y yaw turns the blade to the LEFT, +X pitches it
+// UP. Backhand swings (every second swing) mirror x and yaw (knife).
+// -------------------------------------------------------------------------------------------------
+export interface MeleeSwingKeys {
+  /** Socket at the end of the wind-up (t = 0.7 h). */
+  windup: VmXf;
+  /** Socket at the hit frame (t = h): the blade crosses the view centre. */
+  centre: VmXf;
+  /** Socket at the end of the strike (t = h + follow). */
+  follow: VmXf;
+  /** Strike follow-through after the hit frame, as a fraction of the swing. */
+  followT: number;
+  /** View kick at the hit frame (camera rotation x, y). */
+  kick: readonly [number, number];
+  /** Swing-trail arc width (m) for the VFX. */
+  trailWidth: number;
+  /** Alternate forehand / backhand on consecutive swings. */
+  alternate: boolean;
+}
+
+export const MELEE_SWING_KEYS: Readonly<Record<ViewmodelMeleeId, MeleeSwingKeys>> = {
+  knife: {
+    windup: cxf([0.26, -0.12, -0.34], [0.3, -0.55, -0.2]),
+    centre: cxf([0.06, -0.14, -0.46], [0.25, 0.05, -0.1]),
+    follow: cxf([-0.14, -0.15, -0.5], [0.2, 0.75, 0]),
+    followT: 0.12, kick: [0.004, 0], trailWidth: 0.2, alternate: true,
+  },
+  machete: {
+    windup: cxf([0.28, 0.03, -0.3], [1.3, -0.2, 0.4]),
+    centre: cxf([0.08, -0.12, -0.45], [0.2, 0.15, -0.1]),
+    follow: cxf([-0.1, -0.3, -0.5], [-0.6, 0.35, -0.5]),
+    followT: 0.12, kick: [0.012, 0], trailWidth: 0.3, alternate: false,
+  },
+  paddle: {
+    windup: cxf([0.36, -0.1, -0.24], [0.2, -0.95, 0.3]),
+    centre: cxf([0.02, -0.14, -0.5], [0.15, 0.0, 0.1]),
+    follow: cxf([-0.32, -0.16, -0.56], [0.15, 0.95, -0.2]),
+    followT: 0.14, kick: [0, -0.02], trailWidth: 0.5, alternate: false,
+  },
+};
+
+/** Hit-frame fraction from balance (hitFrameMs / fireIntervalMs), clamped to a sane range. */
+export function meleeHitFraction(w: { hitFrameMs?: number; fireIntervalMs: number }): number {
+  const h = (w.hitFrameMs ?? w.fireIntervalMs * 0.35) / Math.max(1, w.fireIntervalMs);
+  return Math.min(0.8, Math.max(0.1, h));
+}
+
+const lerp = (a: number, b: number, k: number) => a + (b - a) * k;
+const ease = (k: number) => k * k * (3 - 2 * k);
+const lerpXf = (a: VmXf, b: VmXf, k: number): VmXf => ({
+  pos: [lerp(a.pos[0], b.pos[0], k), lerp(a.pos[1], b.pos[1], k), lerp(a.pos[2], b.pos[2], k)],
+  rot: [lerp(a.rot[0], b.rot[0], k), lerp(a.rot[1], b.rot[1], k), lerp(a.rot[2], b.rot[2], k)],
+});
+const mirror = (x: VmXf): VmXf => ({ pos: [-x.pos[0] + 0.12, x.pos[1], x.pos[2]], rot: [x.rot[0], -x.rot[1], -x.rot[2]] });
+
+/**
+ * Absolute item-socket transform (camera space) of a melee swing at t (0..1) with hit fraction h. Keys: hold (0) ->
+ * wind-up (0.7 h, ease-in-out) -> centre (h, fast linear strike) -> follow (h + followT) -> hold (1, ease-out).
+ * `backhand` mirrors the arc (only used when the item alternates). The engineer layers recoil-like kicks on top.
+ */
+export function meleeSwingPose(id: ViewmodelMeleeId, t: number, h: number, backhand = false): VmXf {
+  const k = MELEE_SWING_KEYS[id];
+  const hold = VIEWMODEL_POSES[id].hip;
+  const m = backhand && k.alternate;
+  const W = m ? mirror(k.windup) : k.windup, C = m ? mirror(k.centre) : k.centre, F = m ? mirror(k.follow) : k.follow;
+  const tt = Math.min(1, Math.max(0, t));
+  const tw = 0.7 * h, tf = Math.min(0.95, h + k.followT);
+  if (tt <= tw) return lerpXf(hold, W, ease(tw > 0 ? tt / tw : 1));
+  if (tt <= h) return lerpXf(W, C, (tt - tw) / Math.max(1e-6, h - tw));
+  if (tt <= tf) return lerpXf(C, F, (tt - h) / Math.max(1e-6, tf - h));
+  return lerpXf(F, hold, ease((tt - tf) / Math.max(1e-6, 1 - tf)));
+}
 
 // -------------------------------------------------------------------------------------------------
 // Arms
@@ -207,8 +336,10 @@ export interface ViewmodelRig {
   fingersL: THREE.Group;
   /** Currently held item id (null = none). */
   item: ViewmodelItemId | null;
-  /** Swap the held item model (cached per id inside the rig). */
-  setItem(id: ViewmodelItemId | null): void;
+  /** Level / scope of the current item (M2c). */
+  itemOpts: ViewmodelItemOptions;
+  /** Swap the held item model (cached per id + level + scope inside the rig). */
+  setItem(id: ViewmodelItemId | null, opts?: ViewmodelItemOptions): void;
   /** Recolour the arms (skin, sleeve, cuff). */
   setAppearance(ap: Pick<Appearance, 'skin' | 'outfit'>): void;
 }
@@ -225,10 +356,11 @@ function meshFor(m: Merged, name: string): THREE.Mesh {
   return mesh;
 }
 
-/** Held item model for the viewmodel (thin outlines, no shadows), or null for fists. */
-export function createViewmodelItem(id: ViewmodelItemId): THREE.Object3D | null {
+/** Held item model for the viewmodel (thin outlines, no shadows), or null for fists. M2c: level and scope. */
+export function createViewmodelItem(id: ViewmodelItemId, opts: ViewmodelItemOptions = {}): THREE.Object3D | null {
   let obj: THREE.Object3D | null = null;
   if (id === 'grenade' || id === 'grenade_cooking') obj = createGrenadeModel({ pin: id === 'grenade' });
+  else if (id === 'smoke' || id === 'smoke_cooking') obj = createSmokeModel({ pin: id === 'smoke' });
   else if (id === 'bandage' || id === 'medkit') {
     const g = getLootItemGeometry(id);
     if (g) {
@@ -239,7 +371,7 @@ export function createViewmodelItem(id: ViewmodelItemId): THREE.Object3D | null 
       holder.add(mesh);
       obj = holder;
     }
-  } else if (id !== 'fists') obj = createWeaponModel(id);
+  } else if (id !== 'fists') obj = createWeaponModel(id, { level: opts.level ?? null, scope: opts.scope ?? null });
   if (obj) {
     obj.name = `vmItem:${id}`;
     applyViewmodelOutlines(obj);
@@ -266,16 +398,18 @@ export function createViewmodel(appearance: Pick<Appearance, 'skin' | 'outfit'>)
   };
   const R = mkHand(1);
   const L = mkHand(-1);
-  const items = new Map<ViewmodelItemId, THREE.Object3D | null>();
+  const items = new Map<string, THREE.Object3D | null>();
 
   const rig: ViewmodelRig = {
-    root, itemSocket, handR: R.hand, handL: L.hand, fingersR: R.fingers, fingersL: L.fingers, item: null,
-    setItem(id) {
+    root, itemSocket, handR: R.hand, handL: L.hand, fingersR: R.fingers, fingersL: L.fingers, item: null, itemOpts: {},
+    setItem(id, opts = {}) {
       for (const c of [...itemSocket.children]) itemSocket.remove(c);
       rig.item = id;
+      rig.itemOpts = { level: opts.level ?? null, scope: opts.scope ?? null };
       if (!id) return;
-      let obj = items.get(id);
-      if (obj === undefined) items.set(id, (obj = createViewmodelItem(id)));
+      const key = `${id}|${opts.level ?? '-'}|${opts.scope ?? '-'}`;
+      let obj = items.get(key);
+      if (obj === undefined) items.set(key, (obj = createViewmodelItem(id, opts)));
       if (obj) itemSocket.add(obj);
     },
     setAppearance(ap) {
@@ -306,9 +440,10 @@ const _scaleOut = new THREE.Vector3();
  * Put the rig in the reference pose for `id`, blended hip -> ADS by `ads` (0..1). Sets the item, item socket,
  * hand bones (from the item-space targets) and finger curl. Animation offsets go on top (STYLE.md §21).
  */
-export function applyViewmodelPose(rig: ViewmodelRig, id: ViewmodelItemId, ads = 0): void {
-  const p = VIEWMODEL_POSES[id];
-  if (rig.item !== id) rig.setItem(id);
+export function applyViewmodelPose(rig: ViewmodelRig, id: ViewmodelItemId, ads = 0, opts?: ViewmodelItemOptions): void {
+  const o = opts ?? (rig.item === id ? rig.itemOpts : {});
+  const p = viewmodelPoseFor(id, o);
+  if (rig.item !== id || (opts && ((opts.level ?? null) !== (rig.itemOpts.level ?? null) || (opts.scope ?? null) !== (rig.itemOpts.scope ?? null)))) rig.setItem(id, o);
   const k = Math.min(1, Math.max(0, ads));
   const s = rig.itemSocket;
   s.position.set(

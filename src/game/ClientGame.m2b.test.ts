@@ -13,7 +13,7 @@ import type { DropRoute, IslandMapData, LocalPlayerState, MapData, MatchState, P
 import { ClientGame } from './ClientGame';
 import type { DevGameState } from './devHook';
 import { fovBaseOf } from './fov';
-import { FakeInput, FakeNet, makeLocal, makeMatch, makeMovement, makePlayer, makeSnapshot, TEST_MAP } from './testFixtures';
+import { FakeInput, FakeNet, makeAmmo, makeLocal, makeMatch, makeMovement, makePlayer, makeSnapshot, TEST_MAP } from './testFixtures';
 import { resolveClientTuning } from './tuning';
 
 const DT = 1 / BALANCE.net.simHz;
@@ -367,7 +367,7 @@ describe('ClientGame M2b: first person', () => {
     s.game.update(0);
     return s;
   }
-  const RIFLE = { slots: [{ weapon: 'rifle' as const, mag: 10 }, null] as LocalPlayerState['slots'], activeSlot: 0 as const, ammo: { ammo_light: 0, ammo_heavy: 60, ammo_shell: 0, ammo_sniper: 0 } };
+  const RIFLE = { slots: [{ weapon: 'rifle' as const, mag: 10 }, null] as LocalPlayerState['slots'], activeSlot: 0 as const, ammo: makeAmmo({ ammo_light: 0, ammo_heavy: 60, ammo_shell: 0, ammo_sniper: 0 }) };
 
   it('Settings FOV (Hor+) sets the FP FOV; FrameView.reducedMotion follows the setting', () => {
     const { game } = onFoot();
@@ -484,5 +484,33 @@ describe('ClientGame M2b: the real office level', () => {
     expect(hud.zoneTheme).toBe(changed[0]!.zoneTheme);
     expect(frame.camera.view).toBe('title');
     expect(frame.camera.target.y).toBe(0);
+  });
+});
+
+describe('ClientGame M2c gate prep (ADR 0007 §8, M2b-equivalent values)', () => {
+  it('mapChanged carries layout null and the baseline look; the frame has no rockets or smokes and the snapshot panes', () => {
+    const { game, net, of } = setup();
+    net.pushWelcome({ playerId: 1, mapId: 'test' });
+    net.pushSnapshot(groundSnap());
+    let { frame } = game.update(0);
+    expect(of('mapChanged')[0]).toMatchObject({ mapId: 'test', layout: null, look: 'noon' });
+    expect(frame.look).toBe('noon');
+    expect(frame.rockets).toEqual([]);
+    expect(frame.smokes).toEqual([]);
+    expect(frame.brokenPanes).toEqual([]);
+    net.pushSnapshot({ ...groundSnap(), tick: 2, serverTime: 50, brokenPanes: [3, 5] });
+    ({ frame } = game.update(0));
+    expect(frame.brokenPanes).toEqual([3, 5]);
+  });
+
+  it('a frag grenade event is drawn as a frag', () => {
+    const { game, net } = setup();
+    net.pushWelcome({ playerId: 1, mapId: 'test' });
+    net.pushSnapshot(groundSnap());
+    net.pushEvents([
+      { type: 'grenadeThrown', id: 4, ownerId: 2, pos: { x: 5, y: 5, z: 0 }, vel: { x: 0, y: 0, z: 0 }, explodesAt: 3_000, dropped: false, kind: 'grenade' },
+    ]);
+    const { frame } = game.update(0);
+    expect(frame.grenades.map((g) => g.kind)).toEqual(['grenade']);
   });
 });

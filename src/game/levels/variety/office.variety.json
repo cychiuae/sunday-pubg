@@ -1,0 +1,533 @@
+{
+  "_doc": "Per-match layout variety data for the office (M2c). Spec: docs/design/levels/variety.md. Pure data, not imported yet: the tech-lead types MatchLayout, then the level generator (buildMatchLayout) reads this file. Grammar in variety.md section 3. World frame (office.md conventions): metres, north = -Z, east = +X; rot in degrees, Three.js rotation.y (kit fronts face local -Z). Desk keys are office.ts keys: '<block>.<row>.<column>' (block TL/TR/BL/BR, row N/S, column k from the west end). Walls, rooms, doors, glass, the 20 climb routes (17 stair/ramp routes + CO-B + 2 perches) and DELIBERATE_GAPS never change.",
+  "format": 1,
+  "mapId": "office",
+  "look": {
+    "stream": "look",
+    "presets": [
+      { "id": "day", "weight": 50, "baseline": true, "intent": "Today's look: cool white panels, every light on, bright and even." },
+      { "id": "evening", "weight": 30, "intent": "Warm late-day tone, ambient a little lower, monitors glowing. Same lights on." },
+      { "id": "afterHours", "weight": 20, "intent": "Most panels off, pools of light along the corridors and decks, monitors and exit pictograms glow. Tense, still readable." }
+    ],
+    "afterHours": {
+      "litFraction": [0.35, 0.5],
+      "unit": "lightPanel placements (ceiling props), chosen from stream 'look'",
+      "everyAreaHasALitPanel": ["N corridor", "S corridor", "W corridor", "E corridor", "main aisle", "vertical aisle", "every enterable room", "every alcove"],
+      "maxDistanceToLitPanel": 20
+    },
+    "fairness": {
+      "simEffect": "none (bots and the sim ignore the look)",
+      "outlinesAlwaysOn": true,
+      "noPitchBlackFloor": true
+    }
+  },
+  "fixedNote": "Everything in the M2b OFFICE that no zone, scatter or loot group below owns is fixed: walls and doorFrames (D1-D16, the closed front door), every climb-route piece (bookStairs, whiteboardRamps, CO-B tower, perch towers), the bridge desks and their under-bridge boxSmalls, the Corner Office exec desk with its monitor, keyboard and chair, the Yellow table with its chairs and laptop, phone booths, pinboard, ping pong and foosball tables, the Den, Gym, Paper Jam and Welcome Mat pieces, the pantry counter with its bottles and mugs, both vanities, the fire extinguishers and the ceiling (light panels, AC cassettes).",
+  "deskBlocks": {
+    "geometry": "office.md section 3: column pitch 12.64, row offset 3.395 from the spine, desks flush. Chairs at desk-local (jitter, -6.4), rot = desk rot + 180, with the M2b omissions and fixed-x rules (CHAIR_OMIT, CHAIR_FIXED_X, CHAIR_NO_EAST_JITTER).",
+    "constraints": {
+      "maxPodsPerMatch": 2,
+      "order": ["TL", "TR", "BL", "BR"],
+      "distinctPodX": [["TL", "BL"], ["TR", "BR"]],
+      "distinctPodXRule": "If both blocks of a pair open a column at the same x, the later block (BL, BR) takes its other allowed column.",
+      "podsOverCapRule": "A block that rolls 'pods' after the cap is reached re-rolls between 'rows' and 'gaps' (same stream)."
+    },
+    "blocks": [
+      {
+        "id": "TL",
+        "anchors": ["TL.S.0", "TL.N.0", "TL.N.4", "TL.S.4"],
+        "anchorWhy": "TL-A ramp lands on S0 (Kettle Corner), TL-C on N0, TL-B on N4; bridge N joins S4.",
+        "variants": [
+          { "id": "rows", "weight": 2, "baseline": true },
+          { "id": "gaps", "weight": 2, "removeDesks": { "row": ["N", "S"], "columns": { "N": [1, 2, 3], "S": [1, 2, 3] }, "count": [1, 2] } },
+          { "id": "pods", "weight": 1, "removeColumn": [1, 3], "atrium": "atriumCover" }
+        ]
+      },
+      {
+        "id": "TR",
+        "anchors": ["TR.S.0", "TR.S.4", "TR.N.4", "TR.N.3"],
+        "anchorWhy": "TR-A lands on S0 (and bridge N joins it), TR-B on S4, TR-C and the NE perch on N4; the perch route starts on N3.",
+        "variants": [
+          { "id": "rows", "weight": 2, "baseline": true },
+          { "id": "gaps", "weight": 2, "removeDesks": { "row": ["N", "S"], "columns": { "N": [1, 2], "S": [1, 2, 3] }, "count": [1, 2] } },
+          { "id": "pods", "weight": 1, "removeColumn": [1, 2], "atrium": "atriumCover" }
+        ]
+      },
+      {
+        "id": "BL",
+        "anchors": ["BL.S.0", "BL.N.0", "BL.N.1", "BL.N.4"],
+        "anchorWhy": "BL-A and BL-C land on S0, the SW perch stands on N0 and its route starts on N1, BL-B lands on N4 (bridge S joins it).",
+        "variants": [
+          { "id": "rows", "weight": 2, "baseline": true },
+          { "id": "gaps", "weight": 2, "removeDesks": { "row": ["N", "S"], "columns": { "N": [2, 3], "S": [1, 2, 3] }, "count": [1, 2] } },
+          { "id": "pods", "weight": 1, "removeColumn": [2, 3], "atrium": "atriumCover" }
+        ]
+      },
+      {
+        "id": "BR",
+        "anchors": ["BR.N.0", "BR.N.5", "BR.S.5"],
+        "anchorWhy": "BR-A lands on N0 (bridge S joins it), BR-B on N5, BR-C on S5.",
+        "variants": [
+          { "id": "rows", "weight": 2, "baseline": true },
+          { "id": "gaps", "weight": 2, "removeDesks": { "row": ["N", "S"], "columns": { "N": [1, 2, 3, 4], "S": [1, 2, 3, 4] }, "count": [1, 2] } },
+          { "id": "pods", "weight": 1, "removeColumn": [2, 3], "atrium": "atriumCover" }
+        ]
+      }
+    ],
+    "gapsRules": [
+      "All removed desks of a block are in ONE row, so the other row keeps the deck in one piece (every route still reaches the whole deck).",
+      "A removed desk takes its chair, monitor, keyboard, laptop and desk-top clutter with it. The tunnel under it stays (half covered), with its low cover.",
+      "The hole is a 12.64 x 6.79 skylight: floor players see up, deck players see down. Nothing tall goes in it."
+    ],
+    "podsRules": [
+      "Both desks of one middle column go, with their chairs, dressing and the tunnel's boxSmall and bookStack. The block becomes two pods with a 12.64 x 13.58 atrium between them.",
+      "Each pod keeps at least one climb route (the allowed columns guarantee it).",
+      "The atrium gets 'atriumCover' so it is not a clean north-south lane; it stays 3 m clear of the zone centre at the block's k2 tunnel."
+    ],
+    "atriumCover": {
+      "frame": "origin = (column x, block spine), s = +1 or -1 from the block stream",
+      "pieces": [
+        { "kind": "box", "at": ["2.2s", "-5.0s"], "rot": 0 },
+        { "kind": "boxSmall", "at": ["-1.535s", "-4.5s"], "rot": 0, "note": "flush against the box" }
+      ]
+    },
+    "dressing": {
+      "stream": "dress:<block>",
+      "variants": [
+        { "id": "plan", "weight": 1, "baseline": true, "patterns": { "TL": ["xx111", "Kx111"], "TR": ["1111P", "11111"], "BL": ["P1111", "11222"], "BR": ["221111", "211111"] } },
+        { "id": "shuffled", "weight": 1, "rule": "Permute the '1' / '2' / 'x' codes among the block's desks that are not K or P (same counts per block)." }
+      ],
+      "deskClutter": {
+        "note": "As M2b (office.md 3.3): 1-3 items per block desk, clear of loot (1 m) and route landings (1.5 m). Counts per match stay in these ranges so every deck keeps full-height cover.",
+        "counts": { "box": [3, 5], "boxSmall": [5, 7], "plushSeal": [4, 6], "plushCrab": [4, 6], "plushWhale": [4, 6], "bookStack": [10, 14], "waterBottle": [12, 16], "mug": [16, 20] },
+        "minFullCoverPerBlock": 3,
+        "fullCoverKinds": ["box", "plushSeal", "plushCrab", "plushWhale", "laptop"]
+      },
+      "tunnelCover": {
+        "note": "Per tunnel: one boxSmall and one bookStack at (x_k +- 2, spine +- 2.5), diagonal. The diagonal (s) and which corner gets which kind come from the block stream. The tunnel centre stays free for loot."
+      }
+    }
+  },
+  "aisleClusters": {
+    "stream": "arr:aisle",
+    "slots": [
+      { "id": "K1", "centre": [-52, 4], "smalls": "ew", "chair": [7, -7] },
+      { "id": "K2", "centre": [2, -5], "smalls": "ew", "chair": [0, 7.5] },
+      { "id": "K3", "centre": [46, -5], "smalls": "ew", "chair": [-7, 7] },
+      { "id": "K4", "centre": [100, 6], "smalls": "ns", "chair": [8, 3] }
+    ],
+    "jitter": { "x": 6, "z": 3, "tries": 48, "fallback": "slot centre with the baseline shape" },
+    "shapes": [
+      {
+        "id": "boxPair",
+        "weight": 2,
+        "baseline": true,
+        "intent": "Today's cluster: one tall box, two low boxes flush, a stray chair.",
+        "pieces": {
+          "ew": [{ "kind": "box", "at": [0, 0] }, { "kind": "boxSmall", "at": [-3.735, 0.8] }, { "kind": "boxSmall", "at": [3.735, -0.8] }],
+          "ns": [{ "kind": "box", "at": [0, 0] }, { "kind": "boxSmall", "at": [-0.6, -2.79] }, { "kind": "boxSmall", "at": [0.6, 2.79] }],
+          "chair": "at the slot's chair offset, rot any"
+        }
+      },
+      {
+        "id": "wall",
+        "weight": 1,
+        "intent": "Three tall boxes flush in a 13.5 m row: one long hard cover piece that cuts the aisle sightline.",
+        "pieces": {
+          "ew": [{ "kind": "box", "at": [-4.5, 0] }, { "kind": "box", "at": [0, 0] }, { "kind": "box", "at": [4.5, 0] }],
+          "ns": [{ "kind": "box", "at": [0, -3.6] }, { "kind": "box", "at": [0, 0] }, { "kind": "box", "at": [0, 3.6] }]
+        }
+      },
+      {
+        "id": "loose",
+        "weight": 1,
+        "intent": "One tall box and three stray chairs: prone cover spread out, softer than a wall.",
+        "pieces": {
+          "any": [
+            { "kind": "box", "at": [0, 0] },
+            { "kind": "chair", "at": [-7, -5], "rot": "any" },
+            { "kind": "chair", "at": [6, -6], "rot": "any" },
+            { "kind": "chair", "at": [1, 7], "rot": "any" }
+          ]
+        }
+      }
+    ],
+    "exclusions": "route start discs and approach boxes (TL-A, BL-B, TR-A, BR-A, TR-B, BR-B), spawn discs 2.5 m (spawns 9, 19, 21-24), zone-centre discs 3 m ((7.84, 0), (-40, 0), (56, 0)), chair bands of the blocks (2 m gap rule)"
+  },
+  "rooms": [
+    {
+      "id": "fishbowl",
+      "rect": [-88, -72, -41, -46],
+      "doors": ["D2", "D3"],
+      "lootPick": { "rare": 2 },
+      "loot": [{ "tier": "rare", "place": [[-45, -68], [-84, -68], [-84, -50]] }],
+      "variants": [
+        {
+          "id": "boardroom",
+          "weight": 1,
+          "baseline": true,
+          "intent": "Today's long table (2 facing pairs) with chairs on both sides and two at the west end.",
+          "pieces": [
+            { "kind": "deskWood", "place": [[-71.0, -62.795], [-58.36, -62.795]], "rot": 0 },
+            { "kind": "deskWood", "place": [[-71.0, -56.005], [-58.36, -56.005]], "rot": 180 },
+            { "kind": "chair", "place": [[-71.0, -68.55], [-58.36, -68.55]], "rot": 180 },
+            { "kind": "chair", "place": [[-71.0, -49.9], [-58.36, -49.9]], "rot": 0 },
+            { "kind": "chair", "place": [[-80.3, -62.795], [-80.3, -56.005]], "rot": -90 },
+            { "kind": "pottedPlant", "place": [[-44.5, -49.5]], "rot": 0 }
+          ],
+          "loot": [{ "tier": "rare", "place": [[-71.0, -59.4], [-58.36, -59.4]], "note": "under the table" }]
+        },
+        {
+          "id": "split",
+          "weight": 1,
+          "intent": "Two separate tables with a 9.9 m walkway between them; chairs on the north side only, so both doors stay open.",
+          "pieces": [
+            { "kind": "deskWood", "place": [[-78.5, -62.795], [-56.0, -62.795]], "rot": 0 },
+            { "kind": "deskWood", "place": [[-78.5, -56.005], [-56.0, -56.005]], "rot": 180 },
+            { "kind": "chair", "place": [[-78.5, -68.55], [-56.0, -68.55]], "rot": 180 }
+          ],
+          "loot": [{ "tier": "rare", "place": [[-78.5, -59.4], [-56.0, -59.4], [-67.25, -59.4]] }]
+        },
+        {
+          "id": "rotated",
+          "weight": 1,
+          "intent": "One table turned north-south in the middle, chairs at its east and west sides, a box pile in the north-west corner. More open floor, one central tunnel.",
+          "pieces": [
+            { "kind": "deskWood", "place": [[-67.895, -59.2]], "rot": 90 },
+            { "kind": "deskWood", "place": [[-61.105, -59.2]], "rot": -90 },
+            { "kind": "chair", "place": [[-74.295, -59.2]], "rot": -90 },
+            { "kind": "chair", "place": [[-54.705, -59.2]], "rot": 90 },
+            { "kind": "box", "place": [[-82, -66]], "rot": 0 },
+            { "kind": "boxSmall", "place": [[-78.265, -66.5]], "rot": 0 },
+            { "kind": "pottedPlant", "place": [[-44.5, -49.5]], "rot": 0 }
+          ],
+          "loot": [{ "tier": "rare", "place": [[-64.5, -59.2], [-82, -60]] }]
+        }
+      ]
+    },
+    {
+      "id": "blue",
+      "rect": [51, -72, 84.13, -46],
+      "doors": ["D5", "D7"],
+      "lootPick": { "rare": 2 },
+      "loot": [{ "tier": "rare", "place": [[80, -68], [56, -68]] }],
+      "variants": [
+        {
+          "id": "pair",
+          "weight": 1,
+          "baseline": true,
+          "intent": "Today's single facing pair with chairs on the long sides and two at the east end.",
+          "pieces": [
+            { "kind": "deskWood", "place": [[67.5, -62.795]], "rot": 0 },
+            { "kind": "deskWood", "place": [[67.5, -56.005]], "rot": 180 },
+            { "kind": "chair", "place": [[67.5, -68.55]], "rot": 180 },
+            { "kind": "chair", "place": [[67.5, -49.9]], "rot": 0 },
+            { "kind": "chair", "place": [[76.8, -62.795], [76.8, -56.005]], "rot": 90 },
+            { "kind": "pottedPlant", "place": [[53.5, -69.5]], "rot": 0 }
+          ],
+          "loot": [{ "tier": "rare", "place": [[67.5, -59.4]] }]
+        },
+        {
+          "id": "rotated",
+          "weight": 1,
+          "intent": "The table turned north-south and pushed east, one chair on its west side: a long tunnel facing door D5.",
+          "pieces": [
+            { "kind": "deskWood", "place": [[67.605, -59.2]], "rot": 90 },
+            { "kind": "deskWood", "place": [[74.395, -59.2]], "rot": -90 },
+            { "kind": "chair", "place": [[61.205, -59.2]], "rot": -90 },
+            { "kind": "pottedPlant", "place": [[53.5, -69.5]], "rot": 0 }
+          ],
+          "loot": [{ "tier": "rare", "place": [[71, -59.2]] }]
+        },
+        {
+          "id": "lounge",
+          "weight": 1,
+          "intent": "No table: three loose chairs and a box pile against the north wall. An open room you clear with a grenade.",
+          "pieces": [
+            { "kind": "chair", "place": [[63, -58], [71, -55], [66, -66]], "rot": "any" },
+            { "kind": "box", "place": [[78, -69.7]], "rot": 0 },
+            { "kind": "boxSmall", "place": [[74.265, -70.51]], "rot": 0 },
+            { "kind": "pottedPlant", "place": [[53.5, -69.5]], "rot": 0 }
+          ],
+          "loot": [{ "tier": "rare", "place": [[68, -51]] }]
+        }
+      ]
+    },
+    {
+      "id": "pantry",
+      "rect": [-117, -46, -88, -14],
+      "doors": ["D10", "D11"],
+      "note": "The counter with its bottles and mugs and both loo vanities are fixed. Spawn 20 (-104, -36) stays 2.5 m clear in every variant.",
+      "variants": [
+        {
+          "id": "table",
+          "weight": 1,
+          "baseline": true,
+          "intent": "Today's table across the room with a chair at each end, two box piles. 1 m north of M2b's spot: M2b's south chair sits 0.3 m inside door D1's apron (test run 4).",
+          "pieces": [
+            { "kind": "deskWood", "place": [[-96, -29]], "rot": 90 },
+            { "kind": "chair", "place": [[-96, -38.33]], "rot": 180 },
+            { "kind": "chair", "place": [[-96, -19.67]], "rot": 0 },
+            { "kind": "box", "place": [[-113, -17], [-112, -43]], "rot": 0 },
+            { "kind": "boxSmall", "place": [[-109.265, -17.8], [-112, -40.21]], "rot": 0 }
+          ],
+          "loot": [{ "tier": "rare", "place": [[-96, -29]], "note": "under the table" }]
+        },
+        {
+          "id": "rotated",
+          "weight": 1,
+          "intent": "The table turned east-west in the north half, one chair: the doorway side of the room opens up.",
+          "pieces": [
+            { "kind": "deskWood", "place": [[-101, -24]], "rot": 0 },
+            { "kind": "chair", "place": [[-101, -30.4]], "rot": 180 },
+            { "kind": "box", "place": [[-112, -43]], "rot": 0 },
+            { "kind": "boxSmall", "place": [[-112, -40.21]], "rot": 0 }
+          ],
+          "loot": [{ "tier": "rare", "place": [[-101, -24]] }]
+        },
+        {
+          "id": "cleared",
+          "weight": 1,
+          "intent": "No table: two box piles and a stray chair. Fewer hiding spots in a one-room trap.",
+          "pieces": [
+            { "kind": "box", "place": [[-100, -24], [-112, -43]], "rot": 0 },
+            { "kind": "boxSmall", "place": [[-96.265, -23.5], [-112, -40.21]], "rot": 0 },
+            { "kind": "chair", "place": [[-98, -32]], "rot": "any" }
+          ],
+          "loot": [{ "tier": "rare", "place": [[-100, -30]] }]
+        }
+      ]
+    },
+    {
+      "id": "lounge",
+      "rect": [-16.7, -72, 20.48, -46],
+      "doors": [],
+      "note": "Open alcove at the north end of the vertical aisle. The pinboard is fixed. Spawn 5 (6, -62) stays 2.5 m clear; TL-B's start (-6.3, -43.8) keeps its 2 m disc and approach box.",
+      "variants": [
+        {
+          "id": "open",
+          "weight": 1,
+          "baseline": true,
+          "intent": "Today's lounge: two plants and two box piles, mostly open.",
+          "pieces": [
+            { "kind": "pottedPlant", "place": [[-14, -69.5], [18.5, -69.5]], "rot": 0 },
+            { "kind": "box", "place": [[-11, -64], [14, -66]], "rot": 0 },
+            { "kind": "boxSmall", "place": [[-7.265, -64.5], [14, -63.21]], "rot": 0 }
+          ]
+        },
+        {
+          "id": "pod",
+          "weight": 1,
+          "intent": "A back-to-back desk pod (unreachable top, east-west tunnel) in the middle of the lounge, a chair on each side. Cover at the vertical aisle's north end.",
+          "pieces": [
+            { "kind": "deskWood", "place": [[-8.395, -56]], "rot": 90 },
+            { "kind": "deskWood", "place": [[-1.605, -56]], "rot": -90 },
+            { "kind": "chair", "place": [[-14.795, -56]], "rot": -90 },
+            { "kind": "chair", "place": [[4.795, -56]], "rot": 90 },
+            { "kind": "pottedPlant", "place": [[-14, -69.5], [18.5, -69.5]], "rot": 0 }
+          ]
+        },
+        {
+          "id": "storage",
+          "weight": 1,
+          "intent": "Three box piles along the back wall: more crouch cover, still open in front.",
+          "pieces": [
+            { "kind": "pottedPlant", "place": [[-14, -69.5], [18.5, -69.5]], "rot": 0 },
+            { "kind": "box", "place": [[-11, -64], [1, -69.7], [14, -66]], "rot": 0 },
+            { "kind": "boxSmall", "place": [[-7.265, -64.5], [1, -66.91], [14, -63.21]], "rot": 0 }
+          ]
+        }
+      ]
+    }
+  ],
+  "lootGroups": {
+    "_format": "[x, z] = floor; [x, z, level] with level 'desk' (6.66), 'pong' (6.84), 'perch' (10.44); {desk, at} = desk-local point on that desk's top (dropped when the desk is removed); {tunnel} = (column x, spine) on the floor (dropped when the column is removed). Room loot lives in the rooms above.",
+    "epic": [
+      { "id": "ep.exec", "pick": 2, "candidates": [[36.5, -60, "desk"], [43.5, -60, "desk"], [35.2, -62.6, "desk"], [44.6, -62.6, "desk"]] },
+      { "id": "ep.pongW", "pick": 1, "candidates": [[51.5, 59.2, "pong"], [53.0, 55.0, "pong"]] },
+      { "id": "ep.pongE", "pick": 1, "candidates": [[64.5, 59.2, "pong"], [63.0, 63.4, "pong"]] },
+      { "id": "ep.perchNE", "pick": 1, "candidates": [[80.42, -26.605, "perch"], [78.34, -26.605, "perch"]] },
+      { "id": "ep.perchSW", "pick": 1, "candidates": [[-64.72, 19.815, "perch"], [-64.4, 20.4, "perch"]], "note": "both on cell p2 (p1 would sit 29.7 m from spawn 16; rule: 30 m). (-64.4, 20.4): 30.7 m from spawn 16, 31.5 m from spawn 19, 31.8 m from spawn 21; 0.32 m support inset kept (BUG-015, layout.md AC 3)" },
+      { "id": "ep.bridgeN", "pick": 1, "candidates": [[6.84, -19.815, "desk"], [9.84, -21.0, "desk"]] },
+      { "id": "ep.bridgeS", "pick": 1, "candidates": [[8.84, 19.815, "desk"], [7.34, 19.2, "desk"]] }
+    ],
+    "rare": [
+      {
+        "id": "rr.deck",
+        "pick": 4,
+        "candidates": [
+          { "desk": "TL.N.2", "at": [0, -1.4] }, { "desk": "TL.S.3", "at": [0, -1.4] }, { "desk": "TL.N.3", "at": [0, -1.4] },
+          { "desk": "TR.S.2", "at": [0, -1.4] }, { "desk": "TR.N.1", "at": [0, -1.4] }, { "desk": "TR.N.2", "at": [0, -1.4] },
+          { "desk": "BL.N.3", "at": [0, -1.4] }, { "desk": "BL.S.2", "at": [0, -1.4] }, { "desk": "BL.N.2", "at": [0, -1.4] },
+          { "desk": "BR.S.3", "at": [0, -1.4] }, { "desk": "BR.N.2", "at": [0, -1.4] }, { "desk": "BR.S.1", "at": [0, -1.4] }
+        ]
+      },
+      { "id": "rr.raised", "pick": 2, "candidates": [[-58.5, -19.5, "desk"], [101, -46, "desk"], [104.5, -43.6, "desk"]], "note": "Kettle Corner and the Yellow table" },
+      { "id": "rr.north", "pick": 1, "candidates": [[-28.6, -67], [-10, -68], [16, -56]], "note": "Shush slot and lounge" },
+      { "id": "rr.yellow", "pick": 1, "candidates": [[112, -25], [90, -24], [113, -52]] },
+      { "id": "rr.pantry", "pick": 2, "candidates": [[-110, -24], [-100, -60], [-96, -6]], "plusRoom": "pantry", "note": "plus the active pantry variant's under-table spot" },
+      { "id": "rr.paper", "pick": 1, "candidates": [[-106, 40], [-110, 30], [-96, 32]] },
+      { "id": "rr.gym", "pick": 2, "candidates": [[-30, 55], [0, 66], [-50, 58], [-14, 56]] },
+      { "id": "rr.den", "pick": 1, "candidates": [[58, 59.2], [80, 52], [110, 62]] },
+      { "id": "rr.corner", "pick": 1, "candidates": [[39.92, -60], [25, -68]] },
+      { "id": "rr.welcome", "pick": 1, "candidates": [[-110, 66], [-96, 64]] }
+    ],
+    "rareFromRooms": { "fishbowl": 2, "blue": 2 },
+    "guaranteedWeapons": {
+      "_note": "Common tier, flagged guarantee 'weapon'. One pick per region. Every fallback spawn has one within 35 m of floor path (octile distance on the 1 m nav grid, through doors).",
+      "regions": [
+        { "id": "gw.nw", "spawns": [1, 20], "candidates": [[-80, -40], [-78, -30], [-82, -34]] },
+        { "id": "gw.n1", "spawns": [2, 3], "candidates": [[-52, -41], [-44, -41], [-58, -40]] },
+        { "id": "gw.n2", "spawns": [4, 5], "candidates": [[-6, -50], [2, -48], [-12, -44]] },
+        { "id": "gw.n3", "spawns": [6], "candidates": [[42, -41], [34, -41], [50, -40]] },
+        { "id": "gw.blue", "spawns": [7], "candidates": [[57, -50], [78, -52], [60, -68]] },
+        { "id": "gw.yellow", "spawns": [8], "candidates": [[96, -66], [112, -66], [106, -68]] },
+        { "id": "gw.e1", "spawns": [9, 10], "candidates": [[108, 10], [112, 6], [106, 16]] },
+        { "id": "gw.se", "spawns": [11, 12], "candidates": [[77, 40], [77, 43], [70, 42]] },
+        { "id": "gw.s1", "spawns": [13], "candidates": [[38, 41], [28, 41], [44, 42]] },
+        { "id": "gw.s2", "spawns": [15, 16], "candidates": [[-28, 41], [-28, 38], [-24, 42]] },
+        { "id": "gw.gym", "spawns": [14], "candidates": [[-14, 56], [-26, 58], [-8, 64]] },
+        { "id": "gw.welcome", "spawns": [17], "candidates": [[-96, 62], [-86, 62], [-112, 62]] },
+        { "id": "gw.paper", "spawns": [18], "candidates": [[-98, 34], [-106, 36], [-104, 28]] },
+        { "id": "gw.aw", "spawns": [19], "candidates": [[-76, 4], [-72, -4], [-80, -2]] },
+        { "id": "gw.am", "spawns": [21, 22], "candidates": [[-30, -2], [-28, 4], [-34, 6]] },
+        { "id": "gw.mid", "spawns": [23, 24], "candidates": [[46, 4], [40, 5], [52, 5]] }
+      ]
+    },
+    "common": [
+      {
+        "id": "cc.tunnel",
+        "pick": 9,
+        "candidates": [
+          { "tunnel": "TL.0" }, { "tunnel": "TL.1" }, { "tunnel": "TL.2" }, { "tunnel": "TL.3" }, { "tunnel": "TL.4" },
+          { "tunnel": "TR.0" }, { "tunnel": "TR.1" }, { "tunnel": "TR.2" }, { "tunnel": "TR.3" }, { "tunnel": "TR.4" },
+          { "tunnel": "BL.0" }, { "tunnel": "BL.1" }, { "tunnel": "BL.2" }, { "tunnel": "BL.3" }, { "tunnel": "BL.4" },
+          { "tunnel": "BR.0" }, { "tunnel": "BR.1" }, { "tunnel": "BR.2" }, { "tunnel": "BR.3" }, { "tunnel": "BR.4" }, { "tunnel": "BR.5" },
+          [1.52, -19.815], [14.16, -19.815], [1.52, 19.815], [14.16, 19.815]
+        ]
+      },
+      {
+        "id": "cc.decktop",
+        "pick": 3,
+        "candidates": [
+          { "desk": "TL.S.4", "at": [0, -1.4] }, { "desk": "TL.N.1", "at": [0, -1.4] }, { "desk": "TL.S.2", "at": [0, -1.4] },
+          { "desk": "TR.N.0", "at": [0, -1.4] }, { "desk": "TR.S.3", "at": [0, -1.4] }, { "desk": "TR.S.1", "at": [0, -1.4] },
+          { "desk": "BL.S.1", "at": [0, -1.4] }, { "desk": "BL.S.3", "at": [0, -1.4] },
+          { "desk": "BR.N.5", "at": [4, -1.5] }, { "desk": "BR.N.3", "at": [0, -1.4] }
+        ]
+      },
+      { "id": "cc.ncorr", "pick": 3, "candidates": [[-62, -40], [-70, -42], [-20, -44], [-2, -40], [12, -42], [26, -40], [56, -42], [66, -40], [79, -42]] },
+      { "id": "cc.aisle", "pick": 3, "candidates": [[-60, 4], [-50, -6], [-10, -5], [7.84, 0], [18, -4], [30, 6], [70, 6], [88, -4], [110, -8]] },
+      { "id": "cc.scorr", "pick": 3, "candidates": [[-56, 40], [-50, 42], [-8, 42], [2, 40], [20, 42], [48, 40], [60, 42], [92, 43], [-70, 40]] },
+      { "id": "cc.wcorr", "pick": 1, "candidates": [[-76, 14], [-80, 30], [-74, -14]] },
+      { "id": "cc.ecorr", "pick": 1, "candidates": [[106, 36], [112, 32], [100, 30]] },
+      {
+        "id": "cc.rooms",
+        "pick": 9,
+        "candidates": [
+          [-112, -50], [-92, 8], [-108, -42], [-102, -20], [-97, 18], [-80, 56], [-70, 64], [-6, -55], [25, -50],
+          [48, -52], [90, -30], [-45, 52], [-56, 62], [-84, -52], [-46, -58], [62, -52], [112, 54], [40, 66]
+        ]
+      },
+      { "id": "cc.ext", "pick": 2, "candidates": [[-85, -18], [-85, 43], [14.5, 42.8], [-33.4, -42]], "note": "next to the fixed fire extinguishers" }
+    ]
+  },
+  "lootTotals": { "common": 50, "rare": 20, "epic": 8, "guaranteedWeapons": 16 },
+  "scatter": [
+    {
+      "id": "wallBands",
+      "layer": "sim",
+      "intent": "Office clutter hugging the corridor walls: something to duck behind every 15 m or so, never in the corridor's walking lane.",
+      "bands": [
+        { "id": "N", "wall": "z", "face": -45.55, "from": -88, "to": -41, "inward": 1 },
+        { "id": "N2", "wall": "z", "face": -45.55, "from": 20.48, "to": 84.13, "inward": 1 },
+        { "id": "S", "wall": "z", "face": 45.55, "from": -60, "to": 117, "inward": -1 },
+        { "id": "W", "wall": "x", "face": -87.55, "from": -46, "to": 14, "inward": 1 },
+        { "id": "E", "wall": "x", "face": 116.55, "from": -16.42, "to": 46, "inward": -1 }
+      ],
+      "metresPerItem": [12, 20],
+      "maxDepth": 3.6,
+      "flushGap": 0.05,
+      "kinds": [
+        { "kind": "pottedPlant", "weight": 3 },
+        { "kind": "boxPair", "weight": 3, "pieces": ["box", "boxSmall"], "note": "box long side along the wall, boxSmall flush beside it" },
+        { "kind": "paperStack", "weight": 2, "pieces": ["bookStack"], "count": [1, 2], "note": "1 or 2 stacks side by side on the floor, never stacked (one stack is 0.945 m, a harmless hop)" },
+        { "kind": "waterCooler", "weight": 2, "note": "kit kind 'waterCooler' (cabinet collider to 8.1 m, bottle to 9.9 m); placed flush by its collider" }
+      ]
+    },
+    {
+      "id": "roomCorners",
+      "layer": "sim",
+      "intent": "A little lived-in clutter in room corners; never in a doorway or on a route.",
+      "fillChance": 0.5,
+      "cornerInset": "flush to both wall faces (0.05 m)",
+      "themes": {
+        "fishbowl": ["pottedPlant", "boxPair"],
+        "blue": ["pottedPlant", "boxPair"],
+        "yellow": ["pottedPlant", "boxPair", "waterCooler"],
+        "corner": ["pottedPlant"],
+        "pantry": ["boxPair", "waterCooler", "paperStack"],
+        "paperJam": ["boxPair", "paperStack"],
+        "welcome": ["pottedPlant", "boxPair"],
+        "gym": ["boxPair"],
+        "den": ["boxPair", "pottedPlant"]
+      },
+      "never": ["loosN", "loosS", "lounge (owned by its zone)", "shush (the pods fill it)"]
+    }
+  ],
+  "decor": [
+    {
+      "id": "floorPapers",
+      "layer": "decor",
+      "kinds": [{ "kind": "paperSheets", "count": [40, 70] }],
+      "areas": ["corridors", "under-desk tunnels", "rooms"],
+      "requires": "visual-only kit kind 'paperSheets' (graphics-designer): flat, blank or abstract scribbles, no text, no logos"
+    },
+    {
+      "id": "deskPapers",
+      "layer": "decor",
+      "kinds": [{ "kind": "paperSheets", "count": [30, 60], "surface": "deskTop" }],
+      "areas": ["block desk tops not under a monitor or keyboard"]
+    }
+  ],
+  "lanes": {
+    "_note": "No variable collider part with bottom < 1.3 m inside these rectangles [minX, minZ, maxX, maxZ]. Fixed pieces (routes, M2b props) are exempt. Lane E starts at z 16.42 (the E corridor proper): north of that is the main aisle's east end, where cluster K4 stands (test run 3).",
+    "N": [-87.55, -41.5, 84.13, -36.5],
+    "S": [-88, 36.5, 117, 41.5],
+    "W": [-83.5, -46, -72, 46],
+    "E": [100, 16.42, 112, 46]
+  },
+  "rules": {
+    "propGap": 2,
+    "flushGap": 0.05,
+    "doorApron": { "width": 8.0, "depth": 3.5, "bothSides": true },
+    "routeStartClear": 2.0,
+    "routeApproach": { "width": 3, "length": 4 },
+    "routeEndClear": 1.5,
+    "routeWaypointClear": 0.6,
+    "spawnClear": 2.5,
+    "zoneCentreClear": 3,
+    "lootPropClearance": 0.75,
+    "lootSpacingSameLevel": 2.0,
+    "lootNudgeMax": 3,
+    "guaranteedWeaponPathMax": 35,
+    "spawnLootMin": { "count": 2, "within": 30 },
+    "epicMinDistanceFromOpenPlanSpawns": 30,
+    "lootFallbackUsesMaxPerSeed": 1,
+    "plateauGapForbidden": [3, 6],
+    "maxVariablePropTop": 12,
+    "wideAgentRadius": { "doorsAndCorridors": 1.5, "mainAisle": 2.0 },
+    "pieceTries": 24
+  },
+  "budgets": {
+    "nonCeilingPlacementsMax": 680,
+    "kitTrianglesMax": 125000,
+    "drawCallsMax": 150,
+    "decorPlacementsMax": 160,
+    "navBuildMsTarget": 250
+  },
+  "fairness": {
+    "deckFullCoverMin": 3,
+    "coverScoreTolerance": 0.2,
+    "coverScoreHardLimit": 0.35
+  }
+}

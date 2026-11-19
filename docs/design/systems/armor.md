@@ -1,4 +1,4 @@
-# System: Armor (vests and helmets, tiers 1-3) (M2a)
+# System: Armor (vests and helmets, tiers 1-3 in M2a; tier 4 in M2c)
 
 Numbers: `balance.json` `items.vest_1..3`, `items.helmet_1..3` (`{ slot, tier, durability, absorbFraction }`), `armor.dropOnDeath`,
 `bots.ai.lootScoreVest / lootScoreHelmet / lootScoreArmorPerTier`. Server-authoritative.
@@ -19,8 +19,25 @@ DMR and sniper), and tiers give a reason to keep looting after you have "a vest"
 | helmet_1 | head hits | 1 | 30 | 30% | 130 |
 | helmet_2 | head hits | 2 | 45 | 40% | 145 |
 | helmet_3 | head hits | 3 | 75 | 50% | 175 |
+| vest_4 (M2c) | body hits, grenades, rockets | 4 | 100 | 55% | 200 |
+| helmet_4 (M2c) | head hits | 4 | 100 | 55% | 200 |
 
 Each player wears at most one vest and one helmet. Armor is worn on pickup, never carried in the inventory.
+
+### Level 4 and the shared level scale (M2c)
+- Armor tiers are **levels** (`levels.md`): tier N = level N, drawn with the same colour, numeral/pips and name as weapon levels. Tier 4
+  is new: `vest_4` and `helmet_4` (live since balance v5), epic loot only, about 0.1 of each per match (one of them in about 1 match
+  in 5; `loot.md`).
+- Invariant check: 100 < 100 x 0.55 / 0.45 = 122.2. A fresh tier-4 piece adds exactly 100 effective HP.
+- What tier 4 buys:
+  - **helmet_4 survives one headshot from any sniper**: L1 160 - min(100, 88) = 72 HP loss; L4 192 - min(100, 105.6) = 92. (A helmet_3
+    stops one headshot only from an L1-L2 sniper: L3 179.2 - 75 = 104.2 kills.)
+  - **vest_4 survives an L4 rocket direct hit** (172.5 - 100 = 72.5 loss) and any frag (120 - 66 = 54 loss).
+  - Body TTK at L1 vs vest_4 (threshold 200): rifle 11 shots 1.50 s, SMG 15 shots 1.12 s, pistol 10 shots 2.25 s, revolver 6 shots 2.25 s,
+    DMR 5 shots 1.60 s, sniper 3 shots 2.80 s, pump 3 shots 1.80 s, double barrel 2 shells 0.25 s at point blank. Every mag still covers the
+    worst case (revolver 6 = 6 exactly, pistol 12 >= 10, rifle 25 >= 11).
+- Tier 4 is visibly distinct on the chibi (shape and the L4 colour), so a fight against one is a choice.
+- Rockets: the impact and the blast are body damage through the vest (`rpg.md`); helmets never absorb rocket damage.
 
 ### Damage application (per damage event)
 ```
@@ -80,7 +97,8 @@ tier-1 drop rates if early fights feel too long.
 - Grenade damage on a player with a helmet only: the helmet is ignored and the full amount hits HP.
 
 ## What the UI must show
-- Two equipment icons next to the HP bar: vest and helmet, each with the tier numeral (1/2/3, tier colour white / blue / gold) and a
+- Two equipment icons next to the HP bar: vest and helmet, each with the tier numeral (1-4; M2c: the shared level colours of `levels.md`
+  replace the M2a white / blue / gold) and a
   durability bar `ceil(durability) / items.<id>.durability`. Empty slot = dim outline.
 - Pickup prompt names the tier and durability for armor: "[E] Vest (Lv 2) 31/55". Refusal prompt "Better armor equipped".
 - Hit markers: a distinct marker variant when your hit was absorbed by a vest vs a helmet; an armor-break flash on the target.
@@ -119,3 +137,12 @@ They pick up and wear better armor the same way humans do.
 11. `balance.test`: every vest_N and helmet_N satisfies `durability < 100 x f / (1 - f)` and `tier` matches the id suffix.
 12. Placement tie-break: two players die on the same tick; the one with the higher hp + vest + helmet durability at the start of the tick
     places better.
+
+M2c (tier 4):
+13. vest_4 at 100, body hit 50: a = min(100, 27.5) = 27.5, hp 77.5, vest 72.5.
+14. Sniper L1 headshot on a fresh helmet_4: hp 28, helmet 12. Sniper L4 headshot on a fresh helmet_4: hp 8, helmet destroyed.
+15. Wearing vest_3 at 10, pick up vest_4: wearing vest_4 at 100, a vest_3 pickup at 10 at the feet. Wearing vest_4 at 5, pick up a fresh
+    vest_3: refused `betterArmor`.
+16. Rifle L1 body hits (19, <= 30 m) on a fresh vest_4: after 10 hits hp = 100 - (190 - 100) = 10; the 11th kills.
+17. Snapshot `vestTier` / `helmetTier` accept 0-4; the HUD and the world model show tier 4 with its numeral.
+18. vest_4 and helmet_4 never come from common or rare tables (10,000 rolls each).

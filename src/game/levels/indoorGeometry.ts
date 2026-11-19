@@ -9,6 +9,7 @@
  */
 import type { IndoorMapData, IndoorPropPlacement, KitCollider, PropKit, Rect, Vec2, WallSegment } from '../../shared/types';
 import { wallFrame } from '../../shared/maps';
+import { cosRad, hypot2, sinRad } from './detTrig';
 
 /**
  * ADR 0005 §3 stair rule for kit ramps: the sim compiles a ramp to steps of rise <= 0.8 x movement.stepHeight
@@ -48,8 +49,9 @@ export interface Solid {
 /** A placed kit collider part. */
 export function placedSolid(p: IndoorPropPlacement, c: KitCollider, prop: number): Solid {
   const s = p.scale;
-  const cos = Math.cos(p.rotY);
-  const sin = Math.sin(p.rotY);
+  // Review MF2: deterministic trig (./detTrig), so the office generator decides the same way on every engine.
+  const cos = cosRad(p.rotY);
+  const sin = sinRad(p.rotY);
   const label = `${p.kind}.${c.name}`;
   if (c.type === 'cylinder') {
     const lx = c.x * s;
@@ -80,10 +82,21 @@ export function placedSolid(p: IndoorPropPlacement, c: KitCollider, prop: number
 
 /** A wall segment as a box prism (through the shared wallFrame, like the sim and the renderer). */
 export function wallSolid(w: WallSegment, index: number): Solid {
+  const dx = w.x2 - w.x1;
+  const dz = w.z2 - w.z1;
+  const label = `wall.${w.material}`;
+  // Axis-aligned walls (every office wall) without trig: local +X runs from (x1, z1) to (x2, z2), as in wallFrame.
+  if (dz === 0 || dx === 0) {
+    const alongX = dz === 0;
+    return {
+      shape: 'box', cx: (w.x1 + w.x2) / 2, cz: (w.z1 + w.z2) / 2, hx: Math.abs(alongX ? dx : dz) / 2, hz: w.thickness / 2, r: 0,
+      cos: alongX ? (dx >= 0 ? 1 : -1) : 0, sin: alongX ? 0 : dz > 0 ? -1 : 1, y0: w.bottom, y1: w.top, label, prop: -1 - index,
+    };
+  }
   const f = wallFrame(w);
   return {
     shape: 'box', cx: f.cx, cz: f.cz, hx: f.halfLength, hz: f.halfThickness, r: 0,
-    cos: Math.cos(f.rotY), sin: Math.sin(f.rotY), y0: w.bottom, y1: w.top, label: `wall.${w.material}`, prop: -1 - index,
+    cos: cosRad(f.rotY), sin: sinRad(f.rotY), y0: w.bottom, y1: w.top, label, prop: -1 - index,
   };
 }
 
@@ -112,14 +125,14 @@ export function toLocal(s: Solid, x: number, z: number): [number, number] {
 
 /** 2D distance from (x, z) to the solid's footprint (0 inside). */
 export function footprintDist(s: Solid, x: number, z: number): number {
-  if (s.shape === 'cyl') return Math.max(Math.hypot(x - s.cx, z - s.cz) - s.r, 0);
+  if (s.shape === 'cyl') return Math.max(hypot2(x - s.cx, z - s.cz) - s.r, 0);
   const [lx, lz] = toLocal(s, x, z);
-  return Math.hypot(Math.max(Math.abs(lx) - s.hx, 0), Math.max(Math.abs(lz) - s.hz, 0));
+  return hypot2(Math.max(Math.abs(lx) - s.hx, 0), Math.max(Math.abs(lz) - s.hz, 0));
 }
 
 /** Is (x, z) inside the footprint, at least `inset` from its edge? */
 export function footprintContains(s: Solid, x: number, z: number, inset = 0): boolean {
-  if (s.shape === 'cyl') return Math.hypot(x - s.cx, z - s.cz) <= s.r - inset;
+  if (s.shape === 'cyl') return hypot2(x - s.cx, z - s.cz) <= s.r - inset;
   const [lx, lz] = toLocal(s, x, z);
   return Math.abs(lx) <= s.hx - inset && Math.abs(lz) <= s.hz - inset;
 }
@@ -279,7 +292,7 @@ export function nearCell(g: LayerGrid, mask: Uint8Array, x: number, z: number, w
       if (i < 0 || i >= g.nx) continue;
       const idx = j * g.nx + i;
       if (!mask[idx]) continue;
-      const d = Math.hypot(g.x0 + (i + 0.5) * g.cell - x, g.z0 + (j + 0.5) * g.cell - z);
+      const d = hypot2(g.x0 + (i + 0.5) * g.cell - x, g.z0 + (j + 0.5) * g.cell - z);
       if (d <= within && d < bestD) {
         bestD = d;
         best = idx;

@@ -4,10 +4,17 @@
  *
  *   npx tsx src/shared/sim/tools/matchReport.ts [--matches N] [--seed S] [--override '<json>'] [--players P]
  *                                               [--variant idle|looter|both] [--end-when-no-humans] [--json]
- *                                               [--map island01|office]
+ *                                               [--map island01|office] [--layout-seed S | --layout-seeds N]
+ *                                               [--m2c-pending]
  *
  * --override deep-merges a JSON object into balance.json (e.g. '{"bots":{"reactionMs":600}}'); arrays are replaced.
  * --map picks the level (default island01); the match uses balanceForMap(base + override, map) like the server.
+ * M2c: --layout-seed S plays every match on the layout of seed S (0 = baseline; hex 0x... accepted); --layout-seeds N
+ * cycles match m through layoutSeedFor(seed + (m mod N)), like the server's per-match pick. Without either, the base
+ * map. The layout is built with buildMatchLayout(base, seed, { decor: false }) and applyLayout, as the server does.
+ * --nav-walk SECONDS (MF1, LV14; indoor maps): instead of matches, the nav-walk stuck rate (navStuck.ts) on every layout
+ *   seed of --layout-seed / --layout-seeds; --players = bots (default 12). Matches also print an in-match bot stuck line.
+ * --m2c-pending previews balance merge step 2 (balance.json _m2cPending: the M2c loot tables and bots.eagernessCurve).
  * M2b: every match starts with the carrier drop. The idle human rides to the auto-eject; the looter jumps at a seeded
  * time in the jump window. "landing s" is the median time from the match start to landing over all participants.
  * By default the match keeps running after the human dies (match.endWhenNoHumansAlive = false) so match length
@@ -26,6 +33,10 @@ import { isIndoor } from '../../maps';
 import type { AnyMapData, HeldId, PlayerInput, SimEvent } from '../../types';
 import { isArmorId } from '../../types';
 import { MAPS } from '../../../game/levels/index';
+import { applyLayout, buildMatchLayout } from '../../../game/levels/layout/index';
+import { layoutSeedFor, parseLayoutSeed } from '../../layout';
+import balanceJson from '../../../../docs/design/balance.json';
+import { navStuckForLayoutSeeds } from './navStuck';
 
 /** Level by id (MAPS is AnyMapData; getMap is island-typed until the C-gate). */
 function mapById(id: string): AnyMapData {
@@ -48,10 +59,17 @@ interface Args {
   endWhenNoHumans: boolean;
   json: boolean;
   map: string;
+  /** M2c: a pinned layout seed, or null. */
+  layoutSeed: number | null;
+  /** M2c: cycle through this many per-match layout seeds (0 = off). */
+  layoutSeeds: number;
+  m2cPending: boolean;
+  /** MF1: run the nav walk (navStuck.ts) for this many seconds per layout seed instead of matches; 0 = off. */
+  navWalk: number;
 }
 
 function parseArgs(argv: string[]): Args {
-  const a: Args = { matches: 10, seed: 1, override: {}, players: null, variants: ['idle', 'looter'], endWhenNoHumans: false, json: false, map: 'island01' };
+  const a: Args = { matches: 10, seed: 1, override: {}, players: null, variants: ['idle', 'looter'], endWhenNoHumans: false, json: false, map: 'island01', layoutSeed: null, layoutSeeds: 0, m2cPending: false, navWalk: 0 };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     const v = argv[i + 1];
@@ -84,6 +102,24 @@ function parseArgs(argv: string[]): Args {
         break;
       case '--map':
         a.map = v ?? 'island01';
+        i++;
+        break;
+      case '--layout-seed': {
+        const p = parseLayoutSeed(v);
+        if (p === null) throw new Error(`invalid --layout-seed ${v}`);
+        a.layoutSeed = p;
+        i++;
+        break;
+      }
+      case '--layout-seeds':
+        a.layoutSeeds = Math.max(1, Math.floor(Number(v)));
+        i++;
+        break;
+      case '--m2c-pending':
+        a.m2cPending = true;
+        break;
+      case '--nav-walk':
+        a.navWalk = Math.max(1, Number(v));
         i++;
         break;
       default:
@@ -132,6 +168,16 @@ export interface MatchResult {
   stanceChanges: number;
   /** M2b: seconds from the match start to landing, per participant that landed. */
   landingS: number[];
+  /** M2c: layout seed of the match (null = base map). */
+  layoutSeed: number | null;
+  /** M2c: kills per weapon level ('L1'..'L4'; frags, fists, zone and fall excluded). */
+  killsByLevel: Record<string, number>;
+  /** M2c: rockets fired / duds, smoke clouds, glass panes broken, melee swings, scope mounts (auto + T). */
+  m2c: { rockets: number; duds: number; smokes: number; glass: number; swings: number; scopeMounts: number };
+  /** M2c: weapon pickups by level. */
+  pickupsByLevel: Record<string, number>;
+  /** MF1: in-match bot stuck samples (1 s samples while moving to a goal, out of combat) and the worst bot's rate. */
+  stuck: { samples: number; stuck: number; worstBot: number };
 }
 
 /** Scripted looter human: chooses inputs from the same public information a player sees. */
@@ -248,6 +294,7 @@ export function playMatch(
   players: number | null,
   endWhenNoHumans: boolean,
   map: AnyMapData = mapById('island01'),
+  layoutSeed: number | null = null,
 ): MatchResult {
   const b = JSON.parse(JSON.stringify(b0)) as Balance;
   if (players !== null) b.match.targetPlayers = players;
@@ -272,6 +319,13 @@ export function playMatch(
   const grenades = { spawned: 0, pickups: 0, cooks: 0, thrown: 0, dropped: 0, explosions: 0, kills: 0 };
   const armorPickups: Record<string, number> = {};
   let stanceChanges = 0;
+  const killsByLevel: Record<string, number> = {};
+  const pickupsByLevel: Record<string, number> = {};
+  const m2c = { rockets: 0, duds: 0, smokes: 0, glass: 0, swings: 0, scopeMounts: 0 };
+  const perSecond = Math.round(1 / SIM_DT);
+  const stuckHist = new Map<number, ({ x: number; y: number; z: number } | null)[]>();
+  const stuckGoal = new Map<number, { x: number; z: number }>();
+  const stuckSamples = { samples: 0, stuck: 0, perBot: {} as Record<number, { samples: number; stuck: number }> };
   let lootCounted = false;
   const landingS: number[] = [];
   const falling = new Set<number>();
@@ -296,6 +350,38 @@ export function playMatch(
         }
       }
     }
+    // MF1: in-match bot stuck samples (navStuck.ts definition: < 1 m of 3D progress over 3 s), counted only while the bot
+    // wants to move toward a goal and is not fighting, holding, healing or running a throw / rocket / smoke plan.
+    if (w.getMatch().phase === 'playing' && w.tick % perSecond === 0) {
+      for (const p of botsOf(w)) {
+        if (!p.alive || p.aboard || p.move.dropping || !p.brain) continue;
+        const br = p.brain;
+        const active = br.wantedMove && !br.targetVisible && w.timeMs >= br.holdUntil && !br.throwPlan && !br.rpgPlan && !br.smokePlan && !p.heal;
+        // Like navStuck.ts (history cleared on arrival): a new goal starts a new window, so walking out and back for a
+        // new goal (a route that starts behind the bot) is not "stuck".
+        const g = br.goal;
+        const lastGoal = stuckGoal.get(p.id);
+        if (g && (!lastGoal || Math.hypot(g.x - lastGoal.x, g.z - lastGoal.z) > 1)) {
+          stuckGoal.set(p.id, { x: g.x, z: g.z });
+          stuckHist.set(p.id, []);
+        }
+        const h = stuckHist.get(p.id) ?? [];
+        h.push(active ? { ...p.move.pos } : null);
+        if (h.length > 4) h.shift();
+        stuckHist.set(p.id, h);
+        if (h.length === 4 && h.every((x) => x !== null)) {
+          const a = h[0]!;
+          const c = h[3]!;
+          const stuck = Math.hypot(c.x - a.x, c.y - a.y, c.z - a.z) < 1;
+          stuckSamples.samples++;
+          if (stuck) stuckSamples.stuck++;
+          const pb = stuckSamples.perBot[p.id] ?? { samples: 0, stuck: 0 };
+          pb.samples++;
+          if (stuck) pb.stuck++;
+          stuckSamples.perBot[p.id] = pb;
+        }
+      }
+    }
     if (!lootCounted && w.getMatch().phase === 'playing') {
       lootCounted = true;
       grenades.spawned = w.debugLoot().filter((l) => l.item === 'grenade').length;
@@ -309,17 +395,27 @@ export function playMatch(
         else grenades.thrown++;
       } else if (e.type === 'explosion') grenades.explosions++;
       else if (e.type === 'stanceChange') stanceChanges++;
+      else if (e.type === 'rocketFired') m2c.rockets++;
+      else if (e.type === 'rocketDud') m2c.duds++;
+      else if (e.type === 'smokeDeployed') m2c.smokes++;
+      else if (e.type === 'glassBroken') m2c.glass++;
+      else if (e.type === 'meleeSwing') m2c.swings++;
+      else if (e.type === 'scopeChanged' && e.to !== null) m2c.scopeMounts++;
+      if (e.type === 'pickup' && e.level !== undefined) pickupsByLevel[`L${e.level}`] = (pickupsByLevel[`L${e.level}`] ?? 0) + 1;
       if (e.type === 'kill' && e.weapon === 'grenade') grenades.kills++;
       if (e.type === 'spawn' && startAt < 0) startAt = w.timeMs;
       else if (e.type === 'kill') {
         const t = (w.timeMs - startAt) / 1000;
         if (firstKill === null) firstKill = t;
         deathsByCause[e.cause] = (deathsByCause[e.cause] ?? 0) + 1;
-        if ((e.cause === 'weapon' || e.cause === 'explosion') && e.weapon) killsByWeapon[e.weapon] = (killsByWeapon[e.weapon] ?? 0) + 1;
+        if ((e.cause === 'weapon' || e.cause === 'explosion' || e.cause === 'melee' || e.cause === 'rocket') && e.weapon) {
+          killsByWeapon[e.weapon] = (killsByWeapon[e.weapon] ?? 0) + 1;
+        }
+        if (e.weaponLevel != null) killsByLevel[`L${e.weaponLevel}`] = (killsByLevel[`L${e.weaponLevel}`] ?? 0) + 1;
         if (e.victimId === human) {
           humanDeath = t;
           humanPlacement = e.placement;
-          humanCause = e.cause === 'weapon' || e.cause === 'explosion' ? `weapon:${e.weapon as HeldId}` : e.cause;
+          humanCause = e.weapon ? `weapon:${e.weapon as HeldId}` : e.cause;
         }
       } else if (e.type === 'pickup' && e.playerId === human && looter) looter.pickups++;
       else if (e.type === 'matchEnded') {
@@ -359,7 +455,26 @@ export function playMatch(
     armorPickups,
     stanceChanges,
     landingS,
+    layoutSeed,
+    killsByLevel,
+    m2c,
+    pickupsByLevel,
+    stuck: {
+      samples: stuckSamples.samples,
+      stuck: stuckSamples.stuck,
+      worstBot: Math.max(0, ...Object.values(stuckSamples.perBot).map((x) => (x.samples >= 30 ? x.stuck / x.samples : 0))),
+    },
   };
+}
+
+/** Bot participants of a debug World (ids after the human's). */
+function botsOf(w: DebugWorld): import('../state').SimPlayer[] {
+  const out: import('../state').SimPlayer[] = [];
+  for (let id = 1; id < 64; id++) {
+    const p = w.debugPlayer(id);
+    if (p && p.isBot) out.push(p);
+  }
+  return out;
 }
 
 const median = (xs: number[]): number => {
@@ -434,19 +549,98 @@ export function summarize(results: MatchResult[], variant: Variant): string {
     `armor pickups:                  ${recStr(sumRec(rs.map((r) => r.armorPickups)))}   stance changes/match ${(rs.reduce((a, r) => a + r.stanceChanges, 0) / rs.length).toFixed(1)}`,
     `alive at final phase start:     median ${finalAlive.length ? median(finalAlive).toFixed(1) : '-'} when reached (reached in ${finalAlive.length}/${rs.length})`,
     `alive at phase start (median):  ${alivePerPhase.join(' ')}`,
+    `kills by weapon level:          ${shareStr(sumRec(rs.map((r) => r.killsByLevel)))}`,
+    `weapon pickups by level:        ${recStr(sumRec(rs.map((r) => r.pickupsByLevel)))}`,
+    `M2c per match:                  ${(['rockets', 'duds', 'smokes', 'glass', 'swings', 'scopeMounts'] as const)
+      .map((k) => `${k} ${(rs.reduce((a, r) => a + r.m2c[k], 0) / rs.length).toFixed(2)}`)
+      .join(', ')}`,
+    `bot stuck (in match):           ${stuckStr(rs)}`,
+    `layouts:                        ${[...new Set(rs.map((r) => (r.layoutSeed === null ? 'base' : `0x${r.layoutSeed.toString(16)}`)))].slice(0, 8).join(' ')}`,
   ];
   return lines.join('\n');
 }
 
+/** MF1: pooled in-match stuck rate, the worst match and the worst single bot (>= 30 samples). */
+function stuckStr(rs: MatchResult[]): string {
+  const s = rs.reduce((a, r) => a + r.stuck.stuck, 0);
+  const n = rs.reduce((a, r) => a + r.stuck.samples, 0);
+  const pct = (x: number): string => `${(100 * x).toFixed(2)}%`;
+  const worstMatch = Math.max(0, ...rs.map((r) => (r.stuck.samples > 0 ? r.stuck.stuck / r.stuck.samples : 0)));
+  const worstBot = Math.max(0, ...rs.map((r) => r.stuck.worstBot));
+  return `${pct(n > 0 ? s / n : 0)} of ${n} bot-seconds; worst match ${pct(worstMatch)}, worst bot ${pct(worstBot)}`;
+}
+
+/** M2c: the layout-applied map of a seed (cached per seed: building and preparing a layout is the server's lock work). */
+const layoutCache = new Map<number, AnyMapData>();
+export function layoutMap(base: AnyMapData, seed: number): AnyMapData {
+  let m = layoutCache.get(seed);
+  if (!m) {
+    m = applyLayout(base, buildMatchLayout(base, seed, { decor: false }));
+    layoutCache.set(seed, m);
+  }
+  return m;
+}
+
+/** balance.json _m2cPending without its notes (merge step 2 preview). */
+function pendingOverride(): Record<string, unknown> {
+  const strip = (v: unknown): unknown => {
+    if (!isObj(v)) return v;
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v)) if (!k.startsWith('_')) out[k] = strip(x);
+    return out;
+  };
+  return strip((balanceJson as Record<string, unknown>)['_m2cPending'] ?? {}) as Record<string, unknown>;
+}
+
+/**
+ * MF1 / LV14: the nav-walk stuck rate (navStuck.ts, the M2b office definition) per layout seed. Seeds: --layout-seed,
+ * else layoutSeedFor(seed .. seed + N - 1) for --layout-seeds N (default 1 = the base map with seed 0). --players sets
+ * the bot count (default 12). Gate (variety.md LV14): pooled < 2 %, every seed <= 5 %.
+ */
+function navWalkReport(args: Args, base: AnyMapData, balance: Balance): void {
+  if (!isIndoor(base)) throw new Error('--nav-walk needs an indoor map (the island has no nav graph)');
+  const seeds =
+    args.layoutSeed !== null
+      ? [args.layoutSeed]
+      : args.layoutSeeds > 0
+        ? Array.from({ length: args.layoutSeeds }, (_, i) => layoutSeedFor(args.seed + i, 0))
+        : [0];
+  const t0 = Date.now();
+  const r = navStuckForLayoutSeeds(base, balance, seeds, args.players ?? 12, args.navWalk, args.seed);
+  if (args.json) {
+    console.log(JSON.stringify(r.perSeed.map((x) => ({ layoutSeed: x.layoutSeed, stuckRate: x.stuckRate, samples: x.samples, arrivals: x.arrivals }))));
+    return;
+  }
+  const pct = (x: number): string => `${(100 * x).toFixed(2)}%`;
+  const sorted = [...r.perSeed].sort((a, c) => c.stuckRate - a.stuckRate);
+  const over5 = r.perSeed.filter((x) => x.stuckRate > 0.05).length;
+  console.log(`nav walk ${base.id}: ${seeds.length} layout seeds, ${args.players ?? 12} bots x ${args.navWalk} s, walk seed ${args.seed}`);
+  console.log(`pooled stuck rate ${pct(r.pooledRate)}  (gate < 2%); seeds > 5%: ${over5}; worst ${pct(r.worst.stuckRate)} at 0x${r.worst.layoutSeed.toString(16)}`);
+  console.log(`median seed ${pct(sorted[sorted.length >> 1]!.stuckRate)}; worst 10: ${sorted.slice(0, 10).map((x) => `0x${x.layoutSeed.toString(16)} ${pct(x.stuckRate)}`).join(', ')}`);
+  console.log(`arrivals per seed (median): ${median(r.perSeed.map((x) => x.arrivals)).toFixed(0)}; plateau arrivals (median): ${median(r.perSeed.map((x) => x.plateauArrivals)).toFixed(0)}`);
+  console.log(`(${((Date.now() - t0) / 1000).toFixed(1)} s wall)`);
+}
+
 function main(): void {
   const args = parseArgs(process.argv.slice(2));
-  const map = mapById(args.map);
-  const balance = balanceForMap(balanceWithOverride(args.override), map.id);
+  const base = mapById(args.map);
+  const override = args.m2cPending ? pendingOverride() : {};
+  deepMerge(override, args.override);
+  const balance = balanceForMap(balanceWithOverride(override), base.id);
+  if (args.navWalk > 0) {
+    navWalkReport(args, base, balance);
+    return;
+  }
   const results: MatchResult[] = [];
   const t0 = Date.now();
   for (const variant of args.variants) {
-    for (let m = 0; m < args.matches; m++) results.push(playMatch(balance, args.seed + m, variant, args.players, args.endWhenNoHumans, map));
+    for (let m = 0; m < args.matches; m++) {
+      const ls = args.layoutSeed ?? (args.layoutSeeds > 0 ? layoutSeedFor(args.seed + (m % args.layoutSeeds), 0) : null);
+      const map = ls === null ? base : layoutMap(base, ls);
+      results.push(playMatch(balance, args.seed + m, variant, args.players, args.endWhenNoHumans, map, ls));
+    }
   }
+  const map = base;
   if (args.json) {
     console.log(JSON.stringify(results));
     return;

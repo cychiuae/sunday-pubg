@@ -7,8 +7,8 @@ feed, item descriptions and loading lines. Every line that can show on either ma
 ## 1. Where the new gear comes from
 The crates were packed for the cruise line's "Castaway Challenge" weekend. M2c adds three more sources, all from the
 same ship:
-- **The galley and the beach kiosk** give the melee tools: a knife for opening oysters, a machete for opening coconuts,
-  and a spare canoe paddle from the excursion desk.
+- **The galley and the lifeboats** give the melee tools: a knife for shucking oysters, a machete for opening coconuts,
+  and the paddle the castaways rowed ashore with.
 - **The dinner show's armoury** gives the Double Scoop Shotgun and the Sand Dollar Revolver.
 - **The farewell gala's fireworks** give the Sunburst Launcher and its rockets. These were meant for the grand finale,
   which explains the kill feed. The Candyfloss Smoke Bomb came from the same gala's dessert cart and stage-fog kit.
@@ -17,9 +17,9 @@ same ship:
 ## 2. Item names
 | id | Name | Type (mid-fight label) | Why |
 |---|---|---|---|
-| knife | Oyster Knife | Knife | A real beach tool. Says "short and quick" straight away. |
+| knife | Shucking Knife | Knife | An oyster-shucking knife: a real beach tool that says "short and quick" straight away. |
 | machete | Coconut Machete | Machete | What every castaway actually uses one for. |
-| paddle | Outrigger Paddle | Paddle | The beach oar from the brief. "Outrigger" adds holiday flavour and still reads as "big and long". |
+| paddle | Lifeboat Paddle | Paddle | The beach oar from the brief. It is the paddle the castaways rowed ashore with (WORLD premise). |
 | dbshotgun | Double Scoop Shotgun | Double Barrel | Two barrels, two scoops of ice cream. Type is "Double Barrel" so the slot label never looks the same as the Scatter Clam's "Shotgun". |
 | revolver | Sand Dollar Revolver | Revolver | A sand dollar is round with a flower pattern, like a revolver's cylinder seen end-on. |
 | rpg | Sunburst Launcher | Rocket launcher | A sunburst is a firework shape and also just sunny. "Launcher" plus the type keeps it clear. |
@@ -28,13 +28,16 @@ same ship:
 | vest_4 | Surfboard Vest | Vest | Big, flat, absurd and clearly the best. |
 | helmet_4 | Ship's Bell Helmet | Helmet | Brass bell from the wreck. "Rings loudly" in the description is a hook for audio (a bell "ding" on helmet hits is optional). |
 
+**Every weapon name starts with a consonant sound.** The feed and the death card say "with a {weapon}", so an
+"Oyster Knife" would read "with a Oyster Knife". That is why the first drafts (Oyster Knife, Outrigger Paddle) became
+Shucking Knife and Lifeboat Paddle. `index.test.ts` enforces this rule.
+
 Descriptions follow the house rule: plain type first, one joke at most, then the ammo it uses. Melee descriptions end
 with "Takes your fists' place." so the slot rule is taught by the item itself.
 
 Edited existing descriptions (values only, keys unchanged):
 - `item.vest_3.desc` and `item.helmet_3.desc` now say "even more" because Lv.4 is now "the most".
-- `item.ammo_heavy.desc` lists the Sand Dollar Revolver. **If the game-designer cuts the revolver, revert this line**
-  to "Heavy ammo for the Longshore Rifle, Driftwood DMR and Breakwater LMG." and delete the `item.revolver.*` keys.
+- `item.ammo_heavy.desc` lists the Sand Dollar Revolver (the game-designer kept the revolver).
 - `item.ammo_shell.desc` lists the Double Scoop Shotgun.
 
 ## 3. Item levels: Breezy, Warm, Hot, Scorcher
@@ -63,7 +66,7 @@ Edited existing descriptions (values only, keys unchanged):
 Shown on the lobby/loading line through `lobby.look.<map>` ("Forecast: Mango Hour", "Lighting: Overtime"). Each
 preset also has an optional one-line flavour (`.line`) for a loading card.
 
-| Map | Preset id (proposed) | Name | Line |
+| Map | Preset id | Name | Line |
 |---|---|---|---|
 | island01 | morning | Early Dip | Dew on the palms. Nobody's awake yet. |
 | island01 | noon | Full Sun | Sun straight overhead. Shade is a luxury. |
@@ -73,9 +76,8 @@ preset also has an optional one-line flavour (`.line`) for a loading card.
 | office | evening | Overtime | Sunset through the blinds. Someone left the kettle on. |
 | office | afterHours | Lamps Only | Most lights are off. The desk lamps know your secrets. |
 
-"Mango Hour" ties golden hour to Mangomoon Isle. I avoided common film and song titles for times of day. The keys
-use the preset ids above. If the level-designer or graphics-designer picks different ids, tell me and I will rename the
-keys before any code reads them.
+"Mango Hour" ties golden hour to Mangomoon Isle. I avoided common film and song titles for times of day. The preset ids
+above are confirmed.
 
 The layout itself also gets a loading line: `lobby.layout.<map>` ("Someone moved the desks again."). `lobby.layout.pinned`
 shows the pinned seed when `LAYOUT_SEED` is set, so QA and the user can read it off the screen.
@@ -128,7 +130,39 @@ Suggested routing for `killFeedPrefix` (ui-ux-designer / game-developer):
 - Controls card: `menu.controls.throwable.*`, `menu.controls.throwableCycle.*`, `menu.controls.melee.*`. The old
   `menu.controls.grenade.*` keys stay because code still reads them.
 
-## 8. Unchanged on purpose
+### Keys added after docs/ui/M2c.md (§11, §16)
+`hud.pickup.swapFrom`, `hud.level.{up,down,same}` (arrow glyph and word, never colour alone), `hud.slot.sr`,
+`hud.throwable.sr`, `hud.smoke.throw`, `death.with`, `layout.seed`. `menu.controls.grenade.*`, `hud.grenade.none`,
+`hud.smoke.none` and `hud.melee.swing` are no longer shown by the UI, but they stay in the file.
+
+## 8. Scopes (Addendum 1, rules in docs/design/systems/scopes.md)
+| id | Name | Type | Why |
+|---|---|---|---|
+| scope_red_dot | Cherry Red Dot | Red dot | The dot sits on your sights like a cocktail cherry on top. |
+| scope_2x | Sea Glass 2x Scope | 2x scope | A smooth, frosted beach find. Mild zoom, mild name. |
+| scope_4x | Spyglass 4x Scope | 4x scope | From the pirate dinner show, like the DMR and sniper. |
+| scope_8x | Stargazer 8x Scope | 8x scope | From the cruise ship's stargazing deck. The biggest lens. |
+
+The zoom number is in every scope name, because the HUD chip shows `2×` / `4×` / `8×` and the name must match it.
+Scopes have no level. The player-facing word for the one-slot spare stash is **pouch**, never "stash" (it matches the
+grenade and smoke pouches).
+
+- Prompts: `hud.scope.mountsOn` ("→ {weapon}"), `hud.scope.toPouch`, `hud.scope.dropsOld` ("({scope} drops)", for the
+  case where a displaced scope falls to the ground), `hud.scope.fits`.
+- Toasts: `hud.scope.mounted`, `hud.scope.stashed`, `hud.scope.now` ("Sight: {sight}"), `hud.scope.mounting`.
+- Refusals: `actionFailed` reasons map to keys by the existing `hud.<area>.<state>` pattern.
+  - `scopeCantFit` gives `hud.scope.cantFit`.
+  - `scopeNoneFits` gives `hud.scope.noneFits`.
+  - `scopePouchFull` gives `hud.scope.pouchFull` ("Scope pouch full!").
+  - `hud.scope.stashFull` has the same text and is the UI's blocked pickup chip.
+- Tooltip and aria: `hud.scope.builtIn`, `hud.scope.mountedOn`, `hud.scope.inPouch`, `hud.scope.cycle`, `hud.scope.sr`,
+  `hud.scope.srBuiltIn`, `hud.scope.stash` ("Scope pouch").
+- Sight names for `hud.scope.now`: `sight.<SightType>`, which covers `iron`, `red_dot`, `scope_2x`, `scope_4x` and
+  `scope_8x`. With these, cycling back to a built-in red dot or 4x can name it too.
+- `hint.scope` ("Press T to swap in your spare scope.") shows the first time the player holds a gun and the pouch holds
+  a scope that fits it. `menu.controls.scope.*` = "T" / "Switch sight".
+
+## 9. Unchanged on purpose
 - `menu.connection.lost` ("Lost at sea. Connection dropped.") is unchanged on the office map, pending the user's
   answer.
 - No real names, companies or logos anywhere. The office presets are about lighting only.

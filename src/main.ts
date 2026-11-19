@@ -6,6 +6,7 @@ import { AudioEngine } from './audio/AudioEngine';
 import { t } from './content/strings';
 import { ClientGame } from './game/ClientGame';
 import { DEFAULT_MAP_ID, getMap } from './game/levels';
+import { applyLayout, buildMatchLayout } from './game/levels/layout';
 import { NetClient } from './net/NetClient';
 import { Renderer } from './render/Renderer';
 import { BALANCE } from './shared/balance';
@@ -50,6 +51,11 @@ const game: IClientGame = new ClientGame(
     getMap,
     initialMap,
     serverUrl,
+    // M2c (ADR 0007 §1.5): the client builds each match's layout from welcome.layout.seed (decor on).
+    buildLayout: (base, seed) => {
+      const layout = buildMatchLayout(base, seed, { decor: true });
+      return { layout, map: applyLayout(base, layout) };
+    },
   },
   // ADR 0006 §6 (Q5): a room with name null shows "{name}'s room", rendered on the client.
   { defaultRoomName: (name) => t('room.create.nameDefault', { name }) },
@@ -85,6 +91,7 @@ const ui: IUi = new Ui(mustGet('ui-root'), bus, {
   onSetReady: (ready) => game.setReady(ready),
   onVote: (option) => game.vote(option),
   onKick: (memberId) => game.kick(memberId),
+  onCycleScope: () => game.cycleScope?.(), // M2c (scopes.md): sight-chip click = T
 });
 applySettings(ui.getSettings());
 
@@ -121,6 +128,8 @@ function frame(now: number): void {
     const listener = renderer.getListenerPose(); // 3. audio follows the camera
     audio.setListener(listener.pos, listener.yaw);
     audio.setGrenades?.(view.grenades, view.serverTime); // ADR 0004 A2: fuse tick of nearby grenades
+    audio.setRockets?.(view.rockets ?? [], view.serverTime); // M2c (ADR 0007 §8): rocket whistles and fly-bys
+    audio.setSmokes?.(view.smokes ?? [], view.serverTime); // M2c: smoke hiss loops (late joiners too)
     audio.update(dt);
     ui.update(hud); // 4. DOM last
   } catch (err) {

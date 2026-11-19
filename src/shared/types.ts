@@ -16,7 +16,19 @@
 // ---------------------------------------------------------------------------------------------
 export type Vec2 = { x: number; z: number };
 export type PropKind = 'palm' | 'rock' | 'bush' | 'crate' | 'hut' | 'dock' | 'umbrella' | 'boat' | 'tikiTorch' | 'driftwood';
-export interface PropPlacement { kind: PropKind; x: number; z: number; rotY: number; scale: number }
+export interface PropPlacement {
+  kind: PropKind;
+  x: number;
+  z: number;
+  rotY: number;
+  scale: number;
+  /**
+   * M2c (ADR 0007 §1.2; art M2c.md §9): render-only geometry or colourway variant with the SAME collider (umbrella
+   * colours, crate dressings, rock facets). Seed-derived by the layout generator from a client-layer stream; never
+   * read by the sim and not part of the layout hash. Absent = 0.
+   */
+  variant?: number;
+}
 export type LootTier = 'common' | 'rare' | 'epic';
 
 /** M2b: which geometry model a map uses. 'island' = M1 heightfield + sea; 'indoor' = flat floor, walls, prop kit. */
@@ -28,7 +40,19 @@ export const MAP_KINDS: readonly MapKind[] = ['island', 'indoor'];
  * sim places the item on the highest walkable top at or below y + stepHeight (groundHeightAt with feetY = y). Absent =
  * the ground (terrain or floor).
  */
-export interface LootSpawn { x: number; z: number; tier: LootTier; y?: number }
+export interface LootSpawn {
+  x: number;
+  z: number;
+  tier: LootTier;
+  y?: number;
+  /** M2c (ADR 0007 §1): the layout loot group this activated point came from ('beach.g07', 'gw.nw'). Logs and tests. */
+  group?: string;
+  /**
+   * M2c (layout.md rule 2, loot.md "Guaranteed weapons"): 'weapon' = always spawns (spawnChance 1) one gun from
+   * `loot.guaranteedWeapon` at a level from its `levels` table, plus the normal extra ammo. Counts as a common point.
+   */
+  guarantee?: 'weapon';
+}
 export interface MapPoi { id: string; nameKey: string; x: number; z: number; radius: number }
 
 /** Fields every map kind has. */
@@ -98,7 +122,16 @@ export interface FloorZone extends Rect { material: FloorMaterial }
  * entry's origin (floor centre, surface centre, wall back face or ceiling top; see PropKitEntry.origin), `y` is that
  * origin's height (0 on the floor, the desk-top height for 'surface' props on a desk). Uniform `scale` (1 = as authored).
  */
-export interface IndoorPropPlacement { kind: string; x: number; y: number; z: number; rotY: number; scale: number }
+export interface IndoorPropPlacement {
+  kind: string;
+  x: number;
+  y: number;
+  z: number;
+  rotY: number;
+  scale: number;
+  /** M2c: render-only variant with the same collider (see PropPlacement.variant). */
+  variant?: number;
+}
 
 /** M2b: [x, y, z] in metres (kit data is authored as tuples, like src/render/procedural/office.ts). */
 export type KitV3 = readonly [number, number, number];
@@ -179,26 +212,26 @@ export type PlayerId = number;
 export type LootId = number;
 
 /** M2a (ADR 0004): adds 'lmg' | 'dmr' | 'sniper'. Every WeaponId has a `balance.weapons.<id>` entry. */
-export type WeaponId = 'fists' | 'pistol' | 'smg' | 'shotgun' | 'rifle' | 'lmg' | 'dmr' | 'sniper';
+export type WeaponId = 'fists' | 'pistol' | 'smg' | 'shotgun' | 'rifle' | 'lmg' | 'dmr' | 'sniper' | 'knife' | 'machete' | 'paddle' | 'dbshotgun' | 'revolver' | 'rpg';
 /** Weapons that occupy a slot and can lie on the ground (everything except fists). */
-export type GunId = Exclude<WeaponId, 'fists'>;
+export type GunId = Exclude<WeaponId, 'fists' | 'knife' | 'machete' | 'paddle'>;
 /** M2a: adds 'ammo_sniper' (sniper only). */
-export type AmmoId = 'ammo_light' | 'ammo_heavy' | 'ammo_shell' | 'ammo_sniper';
+export type AmmoId = 'ammo_light' | 'ammo_heavy' | 'ammo_shell' | 'ammo_sniper' | 'ammo_rocket';
 export type HealId = 'bandage' | 'medkit';
 /** M2a: armor is two worn pieces, each tier 1-3 (systems/armor.md). The M1 id 'vest' is gone. */
-export type VestId = 'vest_1' | 'vest_2' | 'vest_3';
-export type HelmetId = 'helmet_1' | 'helmet_2' | 'helmet_3';
+export type VestId = 'vest_1' | 'vest_2' | 'vest_3' | 'vest_4';
+export type HelmetId = 'helmet_1' | 'helmet_2' | 'helmet_3' | 'helmet_4';
 export type ArmorId = VestId | HelmetId;
 /** Which worn piece an ArmorId fills. Equals `balance.items.<id>.slot` (validated). */
 export type ArmorSlot = 'vest' | 'helmet';
 /** Equals `balance.items.<id>.tier` and the id suffix (validated). */
-export type ArmorTier = 1 | 2 | 3;
+export type ArmorTier = 1 | 2 | 3 | 4;
 /** 0 = no piece worn (snapshot `vestTier` / `helmetTier`). */
 export type ArmorTierOrNone = 0 | ArmorTier;
 /** M2a: the frag grenade. Stackable item; held in slot GRENADE_SLOT; numbers in `balance.items.grenade`. */
-export type ThrowableId = 'grenade';
+export type ThrowableId = 'grenade' | 'smoke';
 /** Anything that can exist as a ground loot item. Fists never appear as loot. */
-export type ItemId = GunId | AmmoId | HealId | ArmorId | ThrowableId;
+export type ItemId = GunId | 'knife' | 'machete' | 'paddle' | AmmoId | HealId | ArmorId | ThrowableId | 'scope_red_dot' | 'scope_2x' | 'scope_4x' | 'scope_8x';
 /**
  * M2a: what a player holds in hand. A WeaponId for slots 0-2, 'grenade' for slot 3. Used by PlayerState.weapon,
  * weaponSwitch and kill events (kill feed weapon 'grenade'). `balance.weapons` is keyed by WeaponId only, so code
@@ -210,7 +243,7 @@ export type HeldId = WeaponId | ThrowableId;
  * The grenade slot behaves as 'none' (no ADS). src/render/procedural/weapons.ts keeps its own mirror of the gun
  * sights for model anchors; gameplay and camera code read the sight from Balance.
  */
-export type SightType = 'none' | 'iron' | 'red_dot' | 'scope_4x' | 'scope_8x';
+export type SightType = 'none' | 'iron' | 'red_dot' | 'scope_2x' | 'scope_4x' | 'scope_8x';
 /** M2a: player stance (systems/stance.md). */
 export type Stance = 'stand' | 'crouch' | 'prone';
 /** M2a: edge request from the C (crouch) and Z (prone) keys. Space stays the `jump` edge (the step interprets it). */
@@ -219,16 +252,20 @@ export type StanceRequest = 'crouch' | 'prone';
 export type StanceTransitionKey =
   | 'stand_crouch' | 'stand_prone' | 'crouch_stand' | 'crouch_prone' | 'prone_stand' | 'prone_crouch';
 
-export const WEAPON_IDS: readonly WeaponId[] = ['fists', 'pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper'];
-export const GUN_IDS: readonly GunId[] = ['pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper'];
-export const AMMO_IDS: readonly AmmoId[] = ['ammo_light', 'ammo_heavy', 'ammo_shell', 'ammo_sniper'];
+export const WEAPON_IDS: readonly WeaponId[] = ['fists', 'pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper', 'knife', 'machete', 'paddle', 'dbshotgun', 'revolver', 'rpg'];
+export const GUN_IDS: readonly GunId[] = ['pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper', 'dbshotgun', 'revolver', 'rpg'];
+export const AMMO_IDS: readonly AmmoId[] = ['ammo_light', 'ammo_heavy', 'ammo_shell', 'ammo_sniper', 'ammo_rocket'];
 export const HEAL_IDS: readonly HealId[] = ['bandage', 'medkit'];
-export const VEST_IDS: readonly VestId[] = ['vest_1', 'vest_2', 'vest_3'];
-export const HELMET_IDS: readonly HelmetId[] = ['helmet_1', 'helmet_2', 'helmet_3'];
+export const VEST_IDS: readonly VestId[] = ['vest_1', 'vest_2', 'vest_3', 'vest_4'];
+export const HELMET_IDS: readonly HelmetId[] = ['helmet_1', 'helmet_2', 'helmet_3', 'helmet_4'];
 export const ARMOR_IDS: readonly ArmorId[] = [...VEST_IDS, ...HELMET_IDS];
-export const THROWABLE_IDS: readonly ThrowableId[] = ['grenade'];
-export const ITEM_IDS: readonly ItemId[] = [...GUN_IDS, ...AMMO_IDS, ...HEAL_IDS, ...ARMOR_IDS, ...THROWABLE_IDS];
-export const SIGHT_TYPES: readonly SightType[] = ['none', 'iron', 'red_dot', 'scope_4x', 'scope_8x'];
+export const THROWABLE_IDS: readonly ThrowableId[] = ['grenade', 'smoke'];
+/** M2c gate: melee ids and scope ids are items too (literals here: MELEE_IDS / SCOPE_IDS are declared below). */
+export const ITEM_IDS: readonly ItemId[] = [
+  ...GUN_IDS, 'knife', 'machete', 'paddle', ...AMMO_IDS, ...HEAL_IDS, ...ARMOR_IDS, ...THROWABLE_IDS,
+  'scope_red_dot', 'scope_2x', 'scope_4x', 'scope_8x',
+];
+export const SIGHT_TYPES: readonly SightType[] = ['none', 'iron', 'red_dot', 'scope_2x', 'scope_4x', 'scope_8x'];
 export const STANCES: readonly Stance[] = ['stand', 'crouch', 'prone'];
 export const STANCE_TRANSITION_KEYS: readonly StanceTransitionKey[] = [
   'stand_crouch', 'stand_prone', 'crouch_stand', 'crouch_prone', 'prone_stand', 'prone_crouch',
@@ -242,6 +279,8 @@ export const ARMOR_PIECES: Readonly<Record<ArmorId, { slot: ArmorSlot; tier: Arm
   helmet_1: { slot: 'helmet', tier: 1 },
   helmet_2: { slot: 'helmet', tier: 2 },
   helmet_3: { slot: 'helmet', tier: 3 },
+  vest_4: { slot: 'vest', tier: 4 },
+  helmet_4: { slot: 'helmet', tier: 4 },
 };
 /** M2a: inverse of ARMOR_PIECES, e.g. armorIdOf('helmet', 2) === 'helmet_2'. */
 export const armorIdOf = (slot: ArmorSlot, tier: ArmorTier): ArmorId => `${slot}_${tier}` as ArmorId;
@@ -314,6 +353,11 @@ export interface PlayerInput {
    * 'prone' from prone = stand (falls back to crouch without headroom).
    */
   stanceToggle: StanceRequest | null;
+  /**
+   * M2c edge (scopes.md "T"): T pressed since the previous input = switch sight on the held gun. Stays optional
+   * (absent = false; ADR 0007 §10); the protocol carries it from PROTOCOL_VERSION 4.
+   */
+  cycleScope?: boolean;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -381,6 +425,12 @@ export interface MovementInput {
    * (Dropping, stance transitions and sight 'none' are checked by the step itself.)
    */
   adsBlocked: boolean;
+  /**
+   * M2c (scopes.md, ADR 0007 §5): the held item's EFFECTIVE ADS numbers (effectiveWeapon with the mounted scope), filled
+   * by toMovementInput on the server and in client prediction from the same slot state. Absent = weapons[held] (the
+   * M2b rule). The step reads sight / adsTimeMs / adsMoveMultiplier from here when present.
+   */
+  adsSpec?: { sight: M2cSightType; adsTimeMs: number; adsMoveMultiplier: number };
 }
 
 /** M2a: a stance transition that began this step. */
@@ -433,7 +483,7 @@ export interface PlayerAnim {
 }
 
 /** A player as every client sees it. Dead players stay in the list (alive = false) until the match ends. */
-export interface PlayerState extends PlayerDropFields {
+export interface PlayerState extends PlayerDropFields, PlayerM2cFields {
   id: PlayerId;
   name: string;
   /** Feet position. */
@@ -465,7 +515,19 @@ export interface PlayerState extends PlayerDropFields {
   kills: number;
 }
 
-export interface WeaponSlotState { weapon: GunId; mag: number }
+export interface WeaponSlotState {
+  weapon: GunId;
+  mag: number;
+  /**
+   * M2c (levels.md): the instance's level. Stays optional after the C-gate (ADR 0007 §10: fixtures and M2b-era states
+   * read as L1): absent = 1. The sim always writes it.
+   */
+  level?: ItemLevel;
+  /** M2c (scopes.md): mounted scope; null or absent = the gun's built-in sight. The sim always writes it. */
+  scope?: ScopeId | null;
+}
+/** M2c name for a gun in a slot (combat.md "Inventory and keys"). Same shape as WeaponSlotState. */
+export type WeaponInstance = WeaponSlotState;
 
 /** M2a: a worn armor piece (owner-only). The id is armorIdOf(slot, tier); max durability = items[id].durability. */
 export interface ArmorPieceState {
@@ -475,7 +537,7 @@ export interface ArmorPieceState {
 }
 
 /** Extra state only the owning client receives. */
-export interface LocalPlayerState extends LocalDropFields {
+export interface LocalPlayerState extends LocalDropFields, LocalM2cFields {
   id: PlayerId;
   /** Seq of the last input the server applied to this player. Inputs <= this are acknowledged. */
   lastProcessedInputSeq: number;
@@ -531,6 +593,13 @@ export interface LootState {
    * Spawned pieces have items[id].durability; dropped pieces keep what was left.
    */
   durability?: number;
+  /**
+   * M2c (levels.md): the item's level, present iff the item is a weapon (gun, melee or rpg). Armor's level is its id
+   * suffix; ammo, heals, throwables and scopes have none. The ground marker colour and pips come from it.
+   */
+  level?: ItemLevel;
+  /** M2c (scopes.md): the scope mounted on a ground gun, null or absent = built-in sight. Guns only. */
+  scope?: ScopeId | null;
 }
 
 /** M2a: assigned by the sim. Positive integer, unique per match. */
@@ -552,6 +621,11 @@ export interface GrenadeState {
   explodesAt: number;
   /** Has entered water (the one-off waterVelocityDamping was applied). Needed to continue the path exactly. */
   inWater: boolean;
+  /**
+   * M2c (smoke.md): 'grenade' (frag) or 'smoke' (canister). Clients pick the model, the fuse tick and the danger
+   * indicator (frags only) from it.
+   */
+  kind: M2cThrowableId;
 }
 
 export interface ZoneState {
@@ -611,6 +685,19 @@ export interface WorldSnapshot {
   loot: LootState[];
   /** M2a: every live grenade, sorted by id. Empty outside 'playing'. Always present (no version gating). */
   grenades: GrenadeState[];
+  /**
+   * M2c (ADR 0007 §6): every live rocket as its immutable launch record, sorted by id. Clients compute the position
+   * with rocketPosAt (src/shared/rocket.ts). On the wire it is carried forward in delta snapshots while unchanged.
+   * Optional until the C-gate (absent = []).
+   */
+  rockets: RocketState[];
+  /** M2c (ADR 0007 §6): every live smoke cloud, sorted by id; carried forward like `rockets`. Absent = []. */
+  smokes: SmokeCloudState[];
+  /**
+   * M2c (ADR 0007 §8): ids of the glass panes broken this match (glassPanes in maps.ts), ascending. Only grows during
+   * a match; carried forward like `rockets`. Absent = [].
+   */
+  brokenPanes: PaneId[];
   /** Per-recipient. null if the recipient is not a participant (lobby, mid-match spectator). */
   local: LocalPlayerState | null;
 }
@@ -637,6 +724,12 @@ export interface WelcomeInfo {
   matchId: number;
   /** M2b: the room this match belongs to. */
   roomId: RoomId;
+  /**
+   * M2c (ADR 0007 §1.5): this match's layout. The client builds the MatchLayout from (getMap(mapId), layout.seed),
+   * checks `version` and `hash`, and uses `look`. Sent at the vote lock with the welcome (also to mid-match joiners).
+   * Optional until the C-gate; absent = the base map (no layout).
+   */
+  layout: MatchLayoutRef;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -818,8 +911,11 @@ export interface RoomState {
   phaseSince: number;
   /** Server MAP env pin (votes disabled), else null. */
   pinnedMap: MapId | null;
-  /** Map of the running or locked match and how it was chosen; null while the vote is open. */
-  map: { id: MapId; via: MapPickVia } | null;
+  /**
+   * Map of the running or locked match and how it was chosen; null while the vote is open.
+   * M2c: `layout` (seed and look) once locked, for the waiting-room map card (UI M2c §7.2). Optional until the C-gate.
+   */
+  map: { id: MapId; via: MapPickVia; layout?: { seed: number; look: LookId } } | null;
   /** Server ms when the countdown ends; null outside 'countdown'. */
   countdownEndsAt: number | null;
   /** Server ms of the map lock (countdownEndsAt - match.mapVoteLockSeconds); null outside 'countdown'. */
@@ -850,7 +946,7 @@ export type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'disconnect
  * Why a player took damage. M2a adds 'explosion' (grenades; the kill event's weapon is then 'grenade').
  * Armor applies to 'weapon' (vest or helmet by hit zone) and 'explosion' (vest only); never to 'zone' or 'fall'.
  */
-export type DeathCause = 'weapon' | 'zone' | 'fall' | 'explosion';
+export type DeathCause = 'weapon' | 'zone' | 'fall' | 'explosion' | 'melee' | 'rocket';
 /** M2b: 'glass' = glass walls and glass kit parts (solid; cosmetic difference only). */
 export type ImpactSurface = 'player' | 'terrain' | 'prop' | 'water' | 'none' | GlassSurface;
 /** M2a: what a grenade bounced off. 'edge' = the worldRadius wall. */
@@ -903,8 +999,18 @@ export type SimEvent =
       vest: ArmorHit | null;
       /** M2a: helmet involvement (head hits only), null otherwise. */
       helmet: ArmorHit | null;
-      /** M2a: explosion id when cause === 'explosion', else absent. */
+      /**
+       * M2a: explosion id when cause === 'explosion', else absent. M2c: the blast entity id of a grenade OR a rocket
+       * (one id space, ADR 0007 §6), and the rocket id for cause 'rocket' (impact).
+       */
       grenadeId?: GrenadeId;
+      /**
+       * M2c (gate: required): the attacker's weapon: the gun or melee id (cause weapon/melee), 'rpg' (rocket impact and
+       * rocket blasts), 'grenade' (frag blasts); null for zone/fall.
+       */
+      weapon?: HeldId | M2cWeaponId | null;
+      /** M2c (gate: required): that weapon's level; null for fists, frags, zone and fall. */
+      weaponLevel?: ItemLevel | null;
     }
   | {
       type: 'kill';
@@ -917,15 +1023,32 @@ export type SimEvent =
       placement: number;
       /** M1-fix (producer: game-developer): the lethal hit was a headshot. Always false for zone/fall/explosion. */
       headshot?: boolean;
+      /** M2c (gate: required): level of `weapon` at the kill (kill feed badge); null for fists, frags, zone, fall. */
+      weaponLevel?: ItemLevel | null;
+      /** M2c: a rocket kill whose rocket struck the victim (impact or its blast on the same tick). Absent = false. */
+      direct?: boolean;
     }
   /** M2a: `durability` is set when `item` is an ArmorId (the worn piece's durability after the pickup). */
-  | { type: 'pickup'; playerId: PlayerId; lootId: LootId; item: ItemId; qty: number; pos: Vec3; durability?: number }
-  | { type: 'reloadStart'; playerId: PlayerId; weapon: GunId; durationMs: number }
+  | {
+      type: 'pickup';
+      playerId: PlayerId;
+      lootId: LootId;
+      item: ItemId;
+      qty: number;
+      pos: Vec3;
+      durability?: number;
+      /** M2c: the picked weapon's level (weapons only). */
+      level?: ItemLevel;
+      /** M2c: scope mounted on a picked gun (guns only; null = built-in). */
+      scope?: ScopeId | null;
+    }
+  /** M2c: `rounds` = rounds this reload will load when it completes (audio: shell count). */
+  | { type: 'reloadStart'; playerId: PlayerId; weapon: GunId; durationMs: number; rounds?: number }
   | { type: 'reloadEnd'; playerId: PlayerId; weapon: GunId; completed: boolean }
   | { type: 'healStart'; playerId: PlayerId; item: HealId; durationMs: number }
   | { type: 'healEnd'; playerId: PlayerId; item: HealId; completed: boolean; hpAfter: number }
   /** M2a: weapon is 'grenade' with slot 3. Also emitted for the auto-switch after the last grenade is thrown. */
-  | { type: 'weaponSwitch'; playerId: PlayerId; weapon: HeldId; slot: SlotIndex }
+  | { type: 'weaponSwitch'; playerId: PlayerId; weapon: HeldId; slot: SlotIndex; /** M2c: held item's level. */ level?: ItemLevel | null }
   | { type: 'matchEnded'; winnerId: PlayerId | null; standings: Standing[] }
   /**
    * M2a: a stance transition started (player request or forced water stand-up). Public: remotes play the cloth
@@ -933,7 +1056,7 @@ export type SimEvent =
    */
   | { type: 'stanceChange'; playerId: PlayerId; from: Stance; to: Stance; forced: boolean; durationMs: number }
   /** M2a: pin pulled (cook started). Public (positional click ~10 m). */
-  | { type: 'grenadeCook'; playerId: PlayerId; pos: Vec3; explodesAt: number }
+  | { type: 'grenadeCook'; playerId: PlayerId; pos: Vec3; explodesAt: number; /** M2c. */ kind: M2cThrowableId }
   /**
    * M2a: a grenade entity was created. `dropped` = released by a swap-away, death or disconnect while cooking (no
    * throw whoosh). pos/vel at this tick's serverTime; the entity also appears in the next snapshot.
@@ -946,18 +1069,34 @@ export type SimEvent =
       vel: Vec3;
       explodesAt: number;
       dropped: boolean;
+      /** M2c: frag or smoke canister. For smoke, `explodesAt` is the cloud deploy time. */
+      kind: M2cThrowableId;
     }
   /** M2a: a contact with impact normal speed >= items.grenade.bounceEventMinSpeed, or the water entry. */
-  | { type: 'grenadeBounce'; id: GrenadeId; pos: Vec3; surface: GrenadeContactSurface; speed: number }
+  | { type: 'grenadeBounce'; id: GrenadeId; pos: Vec3; surface: GrenadeContactSurface; speed: number; /** M2c. */ kind: M2cThrowableId }
   /**
    * M2a: emitted BEFORE the damage events of the same blast; the entity is gone from the next snapshot.
    * `inHand` = cook-out (exploded at the thrower's eye; `id` is still a fresh GrenadeId).
    */
-  | { type: 'explosion'; id: GrenadeId; ownerId: PlayerId; pos: Vec3; radius: number; inHand: boolean }
+  | {
+      type: 'explosion';
+      id: GrenadeId;
+      ownerId: PlayerId;
+      pos: Vec3;
+      radius: number;
+      inHand: boolean;
+      /** M2c: 'grenade' (frag) or 'rocket'. Smoke never explodes. */
+      source: 'grenade' | 'rocket';
+      /** M2c: a rocket that struck a player (VFX star flash). Absent = false. */
+      direct?: boolean;
+      /** M2c: a rocket that reached max range with no contact (no ground ring). Absent = false. */
+      airburst?: boolean;
+    }
   /** M1-fix (Contract revision 1 #5): translated by src/game/simEvents.ts, validated by protocol isSimEvent. */
   | ActionFailedSimEvent
   /** M2b: carrier jump and parachute (public). */
-  | DropSimEvent;
+  | DropSimEvent
+  | M2cSimEvent;
 
 /**
  * M1-fix (producer: game-developer). A human's edge action was refused. Emitted at most once per press (edge
@@ -967,7 +1106,7 @@ export type SimEvent =
 export interface ActionFailedSimEvent { type: 'actionFailed'; playerId: PlayerId; action: FailedAction; reason: ActionFailReason }
 
 /** Actions that can be refused by the sim. M2a: 'swap' (slot 3 with no grenades), 'stance'. */
-export type FailedAction = 'heal' | 'pickup' | 'reload' | 'fire' | 'swap' | 'stance';
+export type FailedAction = 'heal' | 'pickup' | 'reload' | 'fire' | 'swap' | 'stance' | 'scope';
 /**
  * Why an action was refused.
  * - noHeals: Q with no bandage/medkit.        - fullHp: Q when no carried heal would add HP (at/above healCap).
@@ -979,6 +1118,299 @@ export type FailedAction = 'heal' | 'pickup' | 'reload' | 'fire' | 'swap' | 'sta
  * - noHeadroom (M2a): stance request to a taller stance blocked by a collider overhead (action 'stance').
  */
 export type ActionFailReason =
-  | 'noHeals' | 'fullHp' | 'inventoryFull' | 'betterArmor' | 'noAmmo' | 'noGrenades' | 'tooDeep' | 'noHeadroom';
+  | 'noHeals' | 'fullHp' | 'inventoryFull' | 'betterArmor' | 'noAmmo' | 'noGrenades' | 'tooDeep' | 'noHeadroom' | 'scopePouchFull' | 'scopeCantFit' | 'scopeNoneFits';
 
 export type SimEventType = SimEvent['type'];
+
+// ---------------------------------------------------------------------------------------------
+// M2c "Fresh Every Match & Bigger Arsenal" (ADR 0007). Transitional like M2b: the live unions and state types above are
+// unchanged until the C-gate, so every exhaustive table in the tree still compiles. New code targets the `M2c*` names
+// below (they are the final unions) and fills the optional fields; at the C-gate tech-lead widens the live unions and
+// merges the field blocks in one commit (ARCHITECTURE.md §16.2 lists the flips and the per-owner checklist).
+// ---------------------------------------------------------------------------------------------
+
+/** M2c (levels.md): weapon and armor level. 1 = today's numbers. */
+export type ItemLevel = 1 | 2 | 3 | 4;
+export const ITEM_LEVELS: readonly ItemLevel[] = [1, 2, 3, 4];
+export const isItemLevel = (v: unknown): v is ItemLevel => v === 1 || v === 2 || v === 3 || v === 4;
+
+/** M2c (melee.md): melee weapons. A subset of WeaponId (after the gate); they live in slot 2 and never take a gun slot. */
+export type MeleeId = 'knife' | 'machete' | 'paddle';
+export const MELEE_IDS: readonly MeleeId[] = ['knife', 'machete', 'paddle'];
+export const isMeleeId = (v: unknown): v is MeleeId => v === 'knife' || v === 'machete' || v === 'paddle';
+
+/** M2c (scopes.md): scope attachments (loot items, no level). */
+export type ScopeId = 'scope_red_dot' | 'scope_2x' | 'scope_4x' | 'scope_8x';
+export const SCOPE_IDS: readonly ScopeId[] = ['scope_red_dot', 'scope_2x', 'scope_4x', 'scope_8x'];
+export const isScopeId = (v: unknown): v is ScopeId => (SCOPE_IDS as readonly unknown[]).includes(v);
+
+/** M2c additions to the live unions (each joins its union at the C-gate). */
+export type M2cGunAdd = 'dbshotgun' | 'revolver' | 'rpg';
+export type M2cWeaponAdd = MeleeId | M2cGunAdd;
+export type M2cAmmoAdd = 'ammo_rocket';
+export type M2cThrowableAdd = 'smoke';
+export type M2cArmorAdd = 'vest_4' | 'helmet_4';
+export type M2cSightAdd = 'scope_2x';
+export type M2cDeathCauseAdd = 'melee' | 'rocket';
+export type M2cFailedActionAdd = 'scope';
+export type M2cActionFailReasonAdd = 'scopePouchFull' | 'scopeCantFit' | 'scopeNoneFits';
+
+/** The M2c unions (after the gate each equals the live name, which stays the canonical one; these remain synonyms). */
+export type M2cWeaponId = WeaponId | M2cWeaponAdd;
+/** Guns: slot weapons that use ammo. Never fists or melee. */
+export type M2cGunId = GunId | M2cGunAdd;
+export type M2cAmmoId = AmmoId | M2cAmmoAdd;
+export type M2cThrowableId = ThrowableId | M2cThrowableAdd;
+export type M2cVestId = VestId | 'vest_4';
+export type M2cHelmetId = HelmetId | 'helmet_4';
+export type M2cArmorId = M2cVestId | M2cHelmetId;
+/** Armor tier = the item level (levels.md). */
+export type M2cArmorTier = ItemLevel;
+export type M2cArmorTierOrNone = 0 | ItemLevel;
+export type M2cHeldId = M2cWeaponId | M2cThrowableId;
+export type M2cItemId = M2cGunId | MeleeId | M2cAmmoId | HealId | M2cArmorId | M2cThrowableId | ScopeId;
+/** 'scope_2x' is new (2x overlay). */
+export type M2cSightType = SightType | M2cSightAdd;
+export type M2cDeathCause = DeathCause | M2cDeathCauseAdd;
+export type M2cFailedAction = FailedAction | M2cFailedActionAdd;
+/**
+ * M2c reasons (scopes.md):
+ * - scopePouchFull: E on a scope that fits nowhere while the pouch holds one (action 'pickup'), or T with a mounted
+ *   scope and a pouch scope that does not fit the held gun (action 'scope').
+ * - scopeCantFit: T while the held item accepts no scope (fists, melee, throwables, rpg, dbshotgun) (action 'scope').
+ * - scopeNoneFits: T on a gun with nothing mounted and nothing in the pouch that fits (action 'scope').
+ * The throwable slot keeps 'noGrenades' for "no throwables" (grenades.md).
+ */
+export type M2cActionFailReason = ActionFailReason | M2cActionFailReasonAdd;
+
+export const M2C_GUN_ADD_IDS: readonly M2cGunAdd[] = ['dbshotgun', 'revolver', 'rpg'];
+export const M2C_WEAPON_IDS: readonly M2cWeaponId[] = WEAPON_IDS;
+export const M2C_GUN_IDS: readonly M2cGunId[] = GUN_IDS;
+export const M2C_AMMO_IDS: readonly M2cAmmoId[] = AMMO_IDS;
+export const M2C_THROWABLE_IDS: readonly M2cThrowableId[] = ['grenade', 'smoke'];
+export const M2C_VEST_IDS: readonly M2cVestId[] = VEST_IDS;
+export const M2C_HELMET_IDS: readonly M2cHelmetId[] = HELMET_IDS;
+export const M2C_ARMOR_IDS: readonly M2cArmorId[] = [...M2C_VEST_IDS, ...M2C_HELMET_IDS];
+export const M2C_ITEM_IDS: readonly M2cItemId[] = [
+  ...M2C_GUN_IDS, ...MELEE_IDS, ...M2C_AMMO_IDS, ...HEAL_IDS, ...M2C_ARMOR_IDS, ...M2C_THROWABLE_IDS, ...SCOPE_IDS,
+];
+export const M2C_SIGHT_TYPES: readonly M2cSightType[] = ['none', 'iron', 'red_dot', 'scope_2x', 'scope_4x', 'scope_8x'];
+/** Sights a gun can have (every sight but 'none'); the keys of balance `scopes.sightFactors`. */
+export type ScopedSightType = Exclude<M2cSightType, 'none'>;
+export const SCOPED_SIGHT_TYPES: readonly ScopedSightType[] = ['iron', 'red_dot', 'scope_2x', 'scope_4x', 'scope_8x'];
+export const isM2cGunId = (v: unknown): v is M2cGunId => (M2C_GUN_IDS as readonly unknown[]).includes(v);
+export const isM2cThrowableId = (v: unknown): v is M2cThrowableId => v === 'grenade' || v === 'smoke';
+
+/** M2c: ARMOR_PIECES with the level 4 pieces (ARMOR_PIECES itself widens at the gate). */
+export const M2C_ARMOR_PIECES: Readonly<Record<M2cArmorId, { slot: ArmorSlot; tier: M2cArmorTier }>> = {
+  ...ARMOR_PIECES,
+  vest_4: { slot: 'vest', tier: 4 },
+  helmet_4: { slot: 'helmet', tier: 4 },
+};
+
+/**
+ * M2c slot rules (combat.md "Inventory and keys"): index 2 is the MELEE slot (key 3): fists, or the carried melee
+ * weapon. Index 3 is the THROWABLE slot (key 4 / G; again = cycle frag <-> smoke). FISTS_SLOT and GRENADE_SLOT keep
+ * their names and values; these are the M2c names for the same indices.
+ */
+export const MELEE_SLOT: SlotIndex = 2;
+export const THROWABLE_SLOT: SlotIndex = 3;
+
+/** M2c (melee.md): the melee slot's weapon. null in LocalM2cFields.melee = fists. */
+export interface MeleeSlotState {
+  weapon: MeleeId;
+  level: ItemLevel;
+}
+
+/** M2c ids. Grenades, rockets and smoke clouds share ONE per-World id counter (a smoke cloud keeps its canister's id). */
+export type RocketId = number;
+export type SmokeId = number;
+/** M2c: index into glassPanes(map) (src/shared/maps.ts) of the match's (layout-applied) map. */
+export type PaneId = number;
+
+/**
+ * M2c (rpg.md, ADR 0007 §6): a live rocket as its immutable launch record. Position at server time t (ms):
+ * rocketPosAt(this, t, weapons.rpg.rocket.gravity) in src/shared/rocket.ts; the sim samples the same closed form at
+ * every tick, so server and clients agree exactly. The rocket ends with `explosion` (source 'rocket') or `rocketDud`.
+ */
+export interface RocketState {
+  id: RocketId;
+  /** Shooter (kill credit; kept if the owner dies or leaves). */
+  ownerId: PlayerId;
+  /** Level of the rpg that fired it (impact and blast damage scale). */
+  level: ItemLevel;
+  /** Launch origin (eye + aim x rocket.originForward) at `firedAt`. */
+  pos: Vec3;
+  /** Launch velocity, m/s (aim within the launch cone x rocket.speed). */
+  vel: Vec3;
+  /** Server ms of the launch tick. */
+  firedAt: number;
+}
+
+/**
+ * M2c (smoke.md, ADR 0007 §7): a live smoke cloud. Its shape is a pure function of time (src/shared/smoke.ts):
+ * centre = pos + (0, cloud.centerHeight, 0); radius grows over growMs from deployedAt, holds, and fades over fadeMs from
+ * fadeAt; gone at fadeAt + fadeMs. fadeAt = deployedAt + growMs + holdMs unless `cloud.maxActive` forced it earlier.
+ */
+export interface SmokeCloudState {
+  /** = the canister's GrenadeId. */
+  id: SmokeId;
+  ownerId: PlayerId;
+  /** Deploy point (in water: the point at y = 0 above it). */
+  pos: Vec3;
+  /** Server ms of the deploy tick. */
+  deployedAt: number;
+  /** Server ms when the fade starts. */
+  fadeAt: number;
+}
+
+/** M2c: what a rocket ended on (rocketDud.surface). */
+export type RocketContactSurface = 'player' | 'terrain' | 'prop' | 'water' | 'edge' | GlassSurface | 'range';
+
+/**
+ * M2c field block → PlayerState (merged with `extends` at the C-gate, every field required). Producer: World snapshot.
+ */
+export interface PlayerM2cFields {
+  /** Level of the held weapon (gun, melee or rpg); null for fists and throwables. Remotes draw the level collar. */
+  weaponLevel: ItemLevel | null;
+  /**
+   * Effective sight of the held item (scopes.md): the mounted scope's sight, else the gun's built-in sight; 'none'
+   * for fists, melee and throwables. Remotes draw the scope model and the glint (isScopeSight) from it.
+   */
+  sight: M2cSightType;
+}
+
+/** M2c field block → LocalPlayerState (merged at the C-gate). Owner-only. */
+export interface LocalM2cFields {
+  /** Slot 2: the carried melee weapon, null = fists. */
+  melee: MeleeSlotState | null;
+  /**
+   * Carried smoke canisters, 0..items.smoke.maxCarry (grenades.md "Throwable slot"). Frags stay in
+   * LocalPlayerState.grenades. A smoke held for a throw is NOT subtracted until release (not cookable).
+   */
+  smokes: number;
+  /** The throwable slot's selected type (persists across slot changes; reset to 'grenade' at match start). */
+  selectedThrowable: M2cThrowableId;
+  /** The spare-scope pouch (scopes.spareSlots = 1): null = empty. */
+  spareScope: ScopeId | null;
+  /** ms left of a T sight switch (scopes.swapMs total); 0 = none. The throwable cycle uses swapRemainingMs. */
+  scopeSwapRemainingMs: number;
+}
+
+/** M2c sim events (public unless noted). Join SimEvent at the C-gate. */
+export type M2cSimEvent =
+  /**
+   * A melee swing started (melee.md "Swing"). Remotes play the wind-up from it (no per-tick swing state on the wire);
+   * the owner's ClientGame predicts its own swing and treats this as the echo. hitAt = server ms of the hit frame.
+   */
+  | { type: 'meleeSwing'; playerId: PlayerId; weapon: MeleeId; level: ItemLevel; pos: Vec3; hitAt: number; cycleMs: number }
+  /**
+   * The hit check found something within reach (centre ray or sweep). Not emitted on a clean miss. `surface` 'player'
+   * with victimId; 'glass' when the pane broke (glassBroken follows). Damage arrives as a `damage` event (cause melee).
+   */
+  | {
+      type: 'meleeHit';
+      attackerId: PlayerId;
+      weapon: MeleeId;
+      level: ItemLevel;
+      pos: Vec3;
+      surface: ImpactSurface;
+      victimId: PlayerId | null;
+      headshot: boolean;
+      /** Paddle knockback was applied to the victim. */
+      knockback: boolean;
+    }
+  /** A rocket was launched; the same data as its RocketState (late joiners get it from WorldSnapshot.rockets). */
+  | ({ type: 'rocketFired' } & RocketState)
+  /** A rocket ended within rocket.armDistance (no blast; impact damage only if it struck a player). */
+  | { type: 'rocketDud'; id: RocketId; ownerId: PlayerId; pos: Vec3; surface: RocketContactSurface; victimId: PlayerId | null }
+  /** A smoke canister became a cloud; the same data as its SmokeCloudState. The canister leaves `grenades`. */
+  | ({ type: 'smokeDeployed' } & SmokeCloudState)
+  /** A glass pane broke for the rest of the match (melee centre ray or rocket contact). */
+  | { type: 'glassBroken'; paneId: PaneId; pos: Vec3; byId: PlayerId | null; cause: 'melee' | 'rocket' }
+  /**
+   * A scope was mounted, removed or exchanged on a gun (pickup auto-mount, or the end of a T switch). to null =
+   * removed (built-in sight). Positional click for everyone; the HUD needs no per-slot identity.
+   */
+  | {
+      type: 'scopeChanged';
+      playerId: PlayerId;
+      slot: 0 | 1;
+      gun: M2cGunId;
+      from: ScopeId | null;
+      to: ScopeId | null;
+      /** true = auto-mount from a scope pickup; false = T. */
+      auto: boolean;
+      pos: Vec3;
+    };
+export type M2cSimEventType = M2cSimEvent['type'];
+
+// ---- Per-match layout (ADR 0007 §1; docs/design/levels/variety.md §8) ----
+
+/** M2c look presets (art M2c.md §10). `noon` and `day` are today's looks. Cosmetic only: no sim effect. */
+export type IslandLookId = 'morning' | 'noon' | 'golden' | 'overcast';
+export type OfficeLookId = 'day' | 'evening' | 'afterHours';
+export type LookId = IslandLookId | OfficeLookId;
+export const ISLAND_LOOK_IDS: readonly IslandLookId[] = ['morning', 'noon', 'golden', 'overcast'];
+export const OFFICE_LOOK_IDS: readonly OfficeLookId[] = ['day', 'evening', 'afterHours'];
+export const LOOK_IDS: readonly LookId[] = [...ISLAND_LOOK_IDS, ...OFFICE_LOOK_IDS];
+export const isLookId = (v: unknown): v is LookId => (LOOK_IDS as readonly unknown[]).includes(v);
+/** Look used when there is no layout (title screen, tests, LAYOUT_SEED=baseline). */
+export const baselineLook = (kind: MapKind): LookId => (kind === 'indoor' ? 'day' : 'noon');
+
+/** One zone's choice, in generation order (logs, dev overlay, repeat avoidance, tests). */
+export interface LayoutPick {
+  /** 'summit', 'TL', 'fishbowl', 'K3', ... */
+  zone: string;
+  /** 'cairns', 'pods', 'rotated', 'wall', ... ('baseline' variants keep their data name). */
+  variant: string;
+  /** e.g. { column: 3 }, { removed: 'N.1,N.2' }, { mirror: 1, turn: 2 }. */
+  params?: Record<string, number | string>;
+}
+
+/** M2c: a client-only, no-collider placement (decor). `kind` keys the render decor table (graphics-designer). */
+export interface DecorPlacement {
+  kind: string;
+  x: number;
+  y: number;
+  z: number;
+  rotY: number;
+  scale: number;
+  variant?: number;
+}
+
+/**
+ * M2c (ADR 0007 §1): the result of the pure generator `buildMatchLayout(base, seed, opts)` in
+ * src/game/levels/layout/ (level-designer). Identical on server and clients for the same (base map data, seed,
+ * LAYOUT_FORMAT_VERSION). `applyLayout(base, layout)` returns an ordinary AnyMapData (props and lootSpawns replaced),
+ * so colliders, nav, prepareMap, World, renderer, minimap and bots keep their signatures. Never sent on the wire.
+ */
+export interface MatchLayout {
+  /** LAYOUT_FORMAT_VERSION (src/shared/layout.ts) of the generator that built it. */
+  version: number;
+  mapId: MapId;
+  /** layoutSeed (uint32). 0 = baseline (every zone's baseline variant, baseline look). */
+  seed: number;
+  picks: LayoutPick[];
+  look: LookId;
+  /** Sim part: replaces the base map's props (island PropPlacement[], indoor IndoorPropPlacement[]). */
+  props: PropPlacement[] | IndoorPropPlacement[];
+  /** Sim part: the activated loot points (with group and guarantee); replaces the base map's lootSpawns. */
+  lootSpawns: LootSpawn[];
+  /** layoutHash(props, lootSpawns) (src/shared/layout.ts): FNV-1a 32 over the canonical sim part. */
+  hash: number;
+  /** Fallback uses (variety.md §3.2): logged per match; tests bound it. */
+  fallbacks: number;
+  /** Client part: decor (empty when built with { decor: false }). Not in the hash. */
+  decor: DecorPlacement[];
+  /** Indoor client part: sorted indices into `props` of lit lightPanel placements (afterHours). Absent = all lit. */
+  lightsOn?: number[];
+}
+
+/** M2c: what travels on the wire about a layout (WelcomeInfo.layout). The client rebuilds the rest. */
+export interface MatchLayoutRef {
+  seed: number;
+  version: number;
+  hash: number;
+  look: LookId;
+}

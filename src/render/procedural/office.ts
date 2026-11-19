@@ -768,6 +768,25 @@ function acCassette(): Spec {
 // -------------------------------------------------------------------------------------------------
 // Registry + public API
 // -------------------------------------------------------------------------------------------------
+/** M2c water cooler: white cabinet, cool / warm taps, drip tray, cup tube, pale-aqua bottle with a blue cap. */
+function waterCooler(): Spec {
+  return {
+    outline: OUTLINE.prop, origin: 'floor', budget: 220, notes: 'M2c wall-band clutter; 0.32 x 1.1 real, bottle on top',
+    body: [
+      bx(0.32, 0.9, 0.32, 0, 0, 0, O.potWhite),
+      bx(0.22, 0.2, 0.01, 0, 0.6, -0.162, O.cabinetDark, { outline: false }), // front recess panel
+      bx(0.04, 0.035, 0.04, -0.05, 0.71, -0.17, 0x2e86de, { outline: false }), // cool tap
+      bx(0.04, 0.035, 0.04, 0.05, 0.71, -0.17, O.plushCrab, { outline: false }), // warm tap
+      bx(0.2, 0.02, 0.06, 0, 0.55, -0.18, O.handle),
+      cy(0.03, 0.03, 0.22, 0.185, 0.45, 0, O.cabinet, 6), // paper-cup tube on +X
+      cy(0.14, 0.14, 0.13, 0, 0.9, 0, O.bottle, 10),
+      cy(0.05, 0.14, 0.04, 0, 1.03, 0, O.bottle, 10, { open: true }),
+      cy(0.05, 0.05, 0.03, 0, 1.07, 0, O.bottleCap, 8),
+      cy(0.142, 0.142, 0.02, 0, 0.96, 0, 0xffffff, 10, { open: true, outline: false }), // label band
+    ],
+  };
+}
+
 const SPECS: Record<OfficePropKind, () => Spec> = {
   desk: () => desk(false),
   deskWood: () => desk(true),
@@ -803,6 +822,7 @@ const SPECS: Record<OfficePropKind, () => Spec> = {
   pantryCounter,
   lightPanel,
   acCassette,
+  waterCooler,
 };
 
 const SCALE_M = new THREE.Matrix4().makeScale(Sx, Sx, Sx);

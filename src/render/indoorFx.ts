@@ -181,4 +181,5 @@ export function resetIndoorFx(): void {
   INDOOR_FX.uCoverOn.value = 0;
   INDOOR_FX.uCoverTex.value = blank;
   INDOOR_FX.uCutOn.value = 0;
+  INDOOR_FX.uCoverDark.value = 0.75;
 }

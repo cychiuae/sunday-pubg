@@ -4,6 +4,19 @@ Data: `src/game/levels/island.ts` (`ISLAND`, generated deterministically at modu
 Registry: `src/game/levels/index.ts` (`MAPS`, `getMap(id)`). Tests: `src/game/levels/island.test.ts`.
 Name keys: `map.island01.name`, `poi.<id>` (narrative-designer owns the display text).
 
+> **M2c: every match is different.** From M2c, each match builds its layout from a `layoutSeed`
+> ([variety.md](variety.md), data `src/game/levels/variety/island01.variety.json`). The layout described on this page is the
+> **baseline**: every zone's `baseline` variant, the `noon` look, and the layout you get with `LAYOUT_SEED=baseline`.
+> - **Fixed in every match:** terrain and hills, the 24 spawn points, the 8 zone-centre candidates, the POI ids and centres, and
+>   the landmarks: both docks, the boathouse, the fish shed, the dock torches, the wreck hull, the summit beacon and the tiki-bar
+>   hut.
+> - **Varies per match:**
+>   - each POI's prop arrangement (3 variants each, section "Per-match variety" below);
+>   - the scatter of palms, bushes, rocks, driftwood and umbrellas;
+>   - the loot positions, picked from a pool about twice the size of what is used (the counts per tier stay 51 / 19 / 7);
+>   - client-only beach and jungle decor;
+>   - the look (`noon`, `morning`, `golden`, `overcast`).
+
 ## At a glance
 | | |
 |---|---|
@@ -98,7 +111,10 @@ Follows `docs/design/systems/loot.md`.
 ## Spawns
 - 24 points at r = 100 m, at 7.5 + 15k degrees. They are always on sand, whatever the shoreline noise is (sand spans 96-106 m in the worst case).
 - Palm clusters sit in the gaps between spawns, so each spawn lands on open sand with shade on both sides.
-- No prop footprint comes within 2.5 m of a spawn.
+- No prop footprint comes within 2.5 m of a spawn. **M2c:** the per-match layout keeps a 4 m landing pad around every spawn
+  (variety.md LV3).
+- **M2c guaranteed weapons:** in every match, half of the 24 gaps (alternating, phase from the seed) carry 2 commons, and one of
+  them is a guaranteed weapon. Every spawn borders one such gap, so a weapon is always about 13-16 m away.
 - Suggestion for `game-developer` and `network-engineer`: with N players, pick a random rotation offset and take every (24 / N)-th spawn. At 12 players
   that puts players about 52 m apart. With the drop (30 m height, 8 m/s fall, 9 m/s steer) each player can steer about 30 m, so nobody can land on
   a neighbour's spot before the neighbour does.
@@ -127,6 +143,11 @@ About 350 placements of 10 kinds. Rough split: palms ~135, bushes ~75, rocks ~60
 huts 9, boats 2, docks 2. Every kind is a repeated model, so `graphics-engineer` can draw each kind with one InstancedMesh (plus an outline pass).
 That is about 10-20 draw calls for the whole prop set.
 
+M2c budget for the worst layout seed (variety.md section 7):
+- sim props: <= 400 placements, palms <= 140, prop triangles <= 300k;
+- decor: up to 8 new client-only kinds, <= 600 instances, each <= 0.5 m tall, no outline hull, no shadow, about 1 draw call per kind;
+- the props layer stays <= 31 calls.
+
 Scale assumptions at scale 1 (also used for the layout footprints in `propFootprint()`):
 | Kind | Size | Layout footprint |
 |---|---|---|
@@ -147,7 +168,32 @@ Prop scale ranges: palms 0.85-1.35, rocks 0.5-2.0, huts 0.9-1.2, the wreck hull 
 Note for `game-developer`: the docks stand over water. The dock deck should be walkable (collider top at deck height), or else treated as a solid
 pier wall. Everything else sits on land.
 
+## Per-match variety (M2c)
+Full spec: [variety.md](variety.md) sections 4 and 6. Summary of the POI arrangements (`baseline` first; each has weight 1):
+
+| POI | Variants | Landmark that never moves |
+|---|---|---|
+| summit | `beacon` (rock ring + 4 crates), `cairns` (3 rock cairns, 3 pockets), `supplyDrop` (crate L on one flank, rock rim on the other) | 4-torch beacon |
+| grove | `dense`, `clearing` (log ring + crates in an r 7 clearing), `trail` (5 m trail through the palms) | the palm mass itself |
+| dock | `quay`, `stacks` (3 x 3 crate grid), `unloading` (crate wall along the shore, rowboat) | docks, boathouse, fish shed, torches |
+| village | `ring`, `crescent` (5 huts open to the sea, crate barricade), `street` (2 facing rows of 3 huts) | huts (count 5-6), plaza torches |
+| wreck | `cove`, `spill` (crate trail inland), `camp` (small hut, fire ring, torches) | the big hull |
+| rocks | `field`, `walls` (2 broken boulder walls of 4 + 2 giants), `giants` (7 big + 7 small) | boulders |
+| tikibar | `bar`, `party` (7 umbrellas, torch path, hut turned +-30 deg), `boarded` (crate barricade) | bar hut |
+
+Rules that every variant keeps:
+- Epic loot stays at the summit and grove only.
+- Long Beach stays open: only low driftwood.
+- Every variant's cover score stays within +-20 % of the baseline and its sightline median within +-25 %.
+- Props keep the 2 m gap rule and the 105 m land limit.
+- Docks keep a clear landward apron.
+
+Pin a layout with `LAYOUT_SEED=<n>` on the server to reproduce it.
+
 ## QA checklist (`qa-tester`)
+M2c: run the layout checks LV1-LV17 in [variety.md](variety.md) section 6 over 202 seeds. Do the items below on the baseline
+(`LAYOUT_SEED=baseline`) and on any seed a check flags.
+
 - Walk the full beach ring and confirm the coastline matches the 105 m on-land limit. Look for props whose base floats over water where the coast
   dips by 4 m.
 - Dock: walk to the end of both docks, jump off, and wade back. Confirm you cannot get stuck between the dock pilings and the beach.

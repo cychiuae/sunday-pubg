@@ -1,12 +1,15 @@
-# Beach Survival PvP: Game Design Document (M1 "First Playable" + M2a "Arsenal & Stance")
+# Beach Survival PvP: Game Design Document (M1 "First Playable" + M2a "Arsenal & Stance" + M2b "Office & Drop" + M2c "Fresh Every Match & Bigger Arsenal")
 
 Owner: game-designer. Every number lives in `docs/design/balance.json`; this doc names keys as `section.key`.
 Units: metres, m/s, degrees. Times are in ms unless the key ends in `Seconds`. Y is up, sea level is y = 0.
 Detail specs: `systems/combat.md` (combat, ADS, weapons, inventory, heals), `systems/armor.md` (vests and helmets),
 `systems/stance.md` (crouch and prone), `systems/grenades.md` (frag grenades), `systems/zone.md` (the tide), `systems/loot.md` (loot),
-`systems/maps.md` (map vote, office rules, per-map overrides; M2b), `systems/drop.md` (carrier drop; M2b), `systems/rooms.md` (rooms; M2b), `systems/camera.md` (first-person camera; M2b).
+`systems/maps.md` (map vote, office rules, per-map overrides; M2b), `systems/drop.md` (carrier drop; M2b), `systems/rooms.md` (rooms; M2b), `systems/camera.md` (first-person camera; M2b),
+M2c: `systems/levels.md` (item levels L1-L4), `systems/melee.md` (knife, machete, paddle, breakable glass), `systems/rpg.md`, `systems/smoke.md`,
+`systems/scopes.md` (scope attachments), `systems/layout.md` (per-match layout variety rules). M2c numbers are live in `balance.json` since v6
+(the `_m2cPending` staging block is gone).
 
-Scope tags: **MVP** = in M1. **M2a** = added in milestone M2a. **Later** = planned after that. **Maybe** = only if playtests ask for it.
+Scope tags: **MVP** = in M1. **M2a** / **M2b** / **M2c** = added in that milestone. **Later** = planned after that. **Maybe** = only if playtests ask for it.
 
 ## 1. Pitch
 Twelve cute chibi castaways wash up on a bright tropical island. They grab whatever is lying on the sand,
@@ -21,6 +24,10 @@ postcard and plays like a tense duel. Matches take 6 to 9 minutes in a browser t
 3. **Fast to fun.** Spawn, drop, loot and fight in under 30 seconds. There is no plane and no menus mid-match.
 4. **Always a decision.** Loot now or rotate? Heal now or push? Keep the shotgun or swap it for a rifle? Aim down sights (accurate, slow)
    or hip-fire on the move? Go prone (small, steady, stuck) or stay mobile? Throw the grenade now or cook it? Mechanics without a decision are cut.
+   M2c: an L2 SMG or an L1 rifle? A 4x on the rifle or keep the red dot? Smoke out to heal, or smoke in to push? Rocket the rock, or save
+   it? Knife (first hit) or paddle (reach and push)?
+5. **Fresh every match (M2c).** Same island and office, different details: loot positions, prop arrangements and light change per match from a
+   seed, while POI loot counts, routes and fairness stay fixed (`systems/layout.md`). Knowledge of the map pays; memorised loot routes do not.
 
 ## 3. Core loop
 **Drop -> Loot -> Rotate with the tide -> Fight -> Win (or spectate -> results -> next match).**
@@ -30,7 +37,7 @@ postcard and plays like a tense duel. Matches take 6 to 9 minutes in a browser t
 | Flight + drop | ~10-25 s (M2b) | When to jump off the carrier and where to land: a busy POI under the route or a quiet edge; open the parachute early to glide far |
 | Loot | 0:00-1:30 | What to keep (2 weapon slots), when to leave. Bots mostly loot here too (section 10) |
 | Rotate | each phase | Which path into the next circle: open beach (fast, exposed) or treeline (slow, cover) |
-| Mid-game | 1:30-5:20 | Roomy circles (65 m, then 47.5 m). Pick your fights, third-party others, or hold and heal |
+| Mid-game | 1:30-5:40 | Roomy circles (65 m, then 47.5 m). Pick your fights, third-party others, or hold and heal |
 | Fight | anytime | Engage, disengage, or heal behind cover |
 | Endgame | ~6:00+ | The circle drops to 27.5 m, then 14 m, then 5 m. Hold position or force the last fights |
 
@@ -40,6 +47,9 @@ postcard and plays like a tense duel. Matches take 6 to 9 minutes in a browser t
    bots" off); the countdown also starts when all humans (>= 2) are ready, or after a 60 s timer in public rooms. Countdown
    `match.countdownSeconds`; the map (fixed by the host, or the `maps.md` vote) and the carrier route lock 3 s before the end. At zero, bots
    fill to `match.targetPlayers` when the fill toggle is on. Someone who joins mid-match spectates, then waits in the waiting room.
+2b. **Layout (M2c, `systems/layout.md`)**: at the map lock the match gets a `layoutSeed`; server and clients build the same layout from it
+   (loot positions from candidate pools, POI / desk-zone arrangements, decoration, look or lighting preset). The office nav grid is built here.
+   The seed is shown in the Esc panel and on results; `LAYOUT_SEED=` pins it for QA.
 3. **Drop (M2b carrier drop, full rules in `systems/drop.md`; replaces the M1 spawn-in-the-air start)**: everyone starts aboard one carrier
    (island: a seaplane at 120 m; office: a toy delivery drone at 25 m) flying a random straight route, shown on the map from the vote lock.
    Aboard you are invulnerable and cannot act. After `drop.noJumpMs`, Space or F jumps; anyone left is auto-ejected at the eject point.
@@ -57,18 +67,18 @@ postcard and plays like a tense duel. Matches take 6 to 9 minutes in a browser t
    resolves. Remaining bots are ranked by current HP + vest durability + helmet durability, then kills, then entity id. The top bot wins. Nobody waits minutes for a bot-only match.
 7. **Disconnect mid-match**: the player is eliminated on the spot (counted as "left"). Their loot drops. Kill credit follows the rule in section 8.
 
-Expected length: the tide schedule ends at 8:00 (480 s), and the final collapse guarantees an end by 8:40 (520 s). Target: median 6-7 min,
-nearly all matches between 5:30 and 8:40. Timeline (detail in `systems/zone.md`):
+Expected length (M2c v8 schedule): the tide schedule ends at 8:25 (505 s), and the final collapse guarantees an end by 9:05 (545 s). Target:
+median 6-7 min, nearly all matches between 5:30 and 9:05. Timeline (detail in `systems/zone.md`):
 
 | Time | Tide | Bots |
 |---|---|---|
 | 0:00-1:15 | Phase 1 wait, circle 125 m (whole island) | Loot phase: fight only at point blank or when shot |
 | 1:15-2:00 | Shrink to 87.5 m | Loot phase ends at about 1:15-2:00 (depends on personality) |
-| 2:00-3:45 | Phase 2: wait, then shrink to 65 m | Eagerness ramping; mostly local fights |
-| 3:45-5:20 | Phase 3: wait, then shrink to 47.5 m | Mid-range fights, third parties |
-| 5:20-6:30 | Phase 4: wait, then shrink to 27.5 m | Full eagerness at about 6:30 |
-| 6:30-8:00 | Phases 5-6: 13.75 m, then 5 m | Everyone in range |
-| 8:00-8:40 | Final hold 20 s, collapse to 0 | Match always ends |
+| 2:00-3:55 | Phase 2: wait 70 s, then shrink to 65 m | Eagerness ramping; mostly local fights |
+| 3:55-5:40 | Phase 3: wait 65 s, then shrink to 47.5 m | Mid-range fights, third parties |
+| 5:40-6:55 | Phase 4: wait 45 s, then shrink to 27.5 m | Full eagerness at about 6:30 |
+| 6:55-8:25 | Phases 5-6: 13.75 m, then 5 m | Everyone in range |
+| 8:25-9:05 | Final hold 20 s, collapse to 0 | Match always ends |
 
 ## 5. Controls (mouse + keyboard, MVP)
 | Input | Action |
@@ -84,12 +94,16 @@ nearly all matches between 5:30 and 8:40. Timeline (detail in `systems/zone.md`)
 | Z | Toggle prone (M2a) |
 | R | Reload. Firing an empty magazine also auto-reloads if you have reserve ammo |
 | E | Pick up the nearest pickup within `player.pickupRange` |
-| 1 / 2 / 3 / 4 | Weapon slot 1 / slot 2 / fists / grenade (M2a). G also selects the grenade. Mouse wheel cycles |
+| 1 / 2 / 3 / 4 | Weapon slot 1 / slot 2 / melee (fists, or the knife/machete/paddle; M2c) / throwable (M2a; M2c: frag or smoke). G also selects the throwable slot. Mouse wheel cycles |
+| 4 or G again (M2c) | While holding the throwable slot: cycle frag <-> smoke (only types you carry; 250 ms). Ignored while cooking |
+| T (M2c) | Switch sight on the held gun: mounted scope <-> pouch scope, or remove to the pouch (600 ms; not while aiming; `systems/scopes.md`) |
 | Q | Use the best heal (see 7.4). Press again to cancel |
 | V | While spectating: switch first person / third-person chase (M2b) |
 | Esc | Release the pointer and open settings (sensitivity, ADS mode, ADS sensitivity, FOV, head bob, reduce motion, volume) |
 
-Ctrl is never bound (Ctrl+W closes the tab). Later: a drop-weapon key, Tab for the scoreboard, M for the full map, lean.
+Ctrl is never bound (Ctrl+W closes the tab). Later: a drop-weapon key, Tab for the scoreboard, M for the full map, lean, key rebinding.
+RMB with a melee weapon does nothing (M2c decision; a block/shove is Maybe). Touch (M2c notes): the sight switch is a tap on the active slot's
+sight chip; the throwable button cycles on a second tap. Gamepad (Maybe): D-pad down for the sight switch.
 Touch (Later): twin virtual sticks, a fire button on the right stick, context buttons for E/Q/R, an ADS button, one stance button
 (stand -> crouch -> prone), and a grenade button that shows the arc while held. Gamepad (Maybe): left stick move, L3 sprint, right stick aim,
 LT ADS, RT fire, X reload/pick up, Y swap, LB heal, RB grenade, B tap crouch / hold prone. Gamepad aim needs aim slowdown near targets.
@@ -194,12 +208,32 @@ and zooms by `adsZoom`. No ADS while reloading, healing, swapping, dropping or c
 - It can kill an unarmored player within about 2 m but never a full-HP player in any vest: it flushes campers out of cover.
   Live grenades near you show an on-screen warning and blink faster as they are about to explode.
 
+### 7.7 Bigger arsenal (M2c)
+- **Item levels L1-L4** (`systems/levels.md`) on every weapon except fists, and armor tiers 1-4 (`vest_4`, `helmet_4`, epic only). L1 = the
+  numbers above. Guns: damage x1.08 / 1.16 / 1.25 and reload x0.95 / 0.90 / 0.85; melee: damage as guns and a faster swing. The pump,
+  DMR, sniper and RPG have overrides so no new one-shot appears. Result: about 25-35% faster TTK at L4 on the same gun. Loot spot tier rolls the
+  level (common spots never give L4). One colour + numeral/pips scale shared by every HUD element, the ground glow and the weapon models.
+  Picking up a higher level of a gun you carry swaps that copy.
+- **New guns**: revolver (heavy, 6 rounds, 3 body / 2 head) and double barrel (2 shells, 120 per barrel at point blank, useless past 8 m).
+- **Melee** (`systems/melee.md`): knife, machete, paddle in slot 3 (replacing fists, never a gun slot). One hit check at the swing's hit frame
+  (centre ray for headshots, plus a short sweep for body hits); the paddle knocks back. Melee and rockets **break office glass**; bullets and
+  grenades still do not.
+- **RPG** (`systems/rpg.md`): epic only, 3 rockets per spawn. A visible rocket (45 m/s, slight drop); impact 40 + frag-style blast 110 (5 m).
+  A direct hit kills unarmored and vest_1 players and leaves a vest_2 player at 5 HP. Rockets that hit within 5 m are duds.
+- **Smoke** (`systems/smoke.md`): a throwable sharing slot 4 with frags (4/G cycles). A 6.5 m cloud for about 22 s. It blocks sight (and bot
+  sight), name tags and hit markers, but not bullets, blasts or the kill marker.
+- **Scopes** (`systems/scopes.md`): red dot, 2x, 4x and 8x as loot. They mount on compatible guns (auto on pickup when better), travel with the
+  gun, and there is one spare in a pouch; T switches. A scope changes zoom, ADS time, ADS cone and ADS move speed, never damage. Built-in sights
+  (DMR 4x, sniper 8x) never get worse.
+
+M2c TTK at L1 and L4, kill-share expectations and pacing: `systems/combat.md` "M2c". Expected items per match per map: `systems/loot.md` "M2c".
+
 ## 8. The tide (shrinking zone, MVP; full rules in `systems/zone.md`)
 - It starts as a circle of radius `zone.startRadius` (125 m) centred on the origin, which covers the whole island (radius ~110). Each phase is: wait `waitSeconds` with the next circle shown,
   then shrink linearly (radius and centre) over `shrinkSeconds` to `radiusFraction * startRadius`.
 - The next circle lies fully inside the current one and is centred on land. The final circle is biased to `MapData.zoneCenters`.
 - Outside the circle you take the current phase's `dps` every `zone.damageTickMs`, ignoring armor.
-- 6 phases end at radius 5 m at 8:00. The middle phases are long and roomy and the late phases are short and tight (see the timeline in section 4). After `zone.finalCollapseDelaySeconds` the tide closes to 0 over `zone.finalCollapseSeconds` at `zone.finalCollapseDps`. This safety net guarantees the match ends.
+- 6 phases end at radius 5 m at 8:25 (M2c v8; 8:00 before). The middle phases are long and roomy and the late phases are short and tight (see the timeline in section 4). After `zone.finalCollapseDelaySeconds` the tide closes to 0 over `zone.finalCollapseSeconds` at `zone.finalCollapseDps`. This safety net guarantees the match ends.
 - The tide is a translucent animated water wall at the circle edge. A warning plays `zone.warningSecondsBeforeShrink` before each shrink.
 
 ## 8b. Maps (M2b; full rules in `systems/maps.md`, layout in `levels/office.md`)
@@ -212,6 +246,9 @@ and zooms by `adsZoom`. No ADS while reloading, healing, swapping, dropping or c
 - Glass walls are solid (they block movement, bullets, grenades and bot sight) and only look transparent. Grenades bounce off all walls.
 - Desk tops are reached by climb routes (steps <= 0.35 m walk or <= 0.95 m jump, at least 2 per desk block). Bots use a nav graph indoors
   and climb only for loot or hold positions.
+- **M2c layout variety** (`systems/layout.md`): each match picks loot positions from candidate pools (fixed counts per POI and tier), POI and
+  desk-zone arrangements with comparable cover, scattered decoration and a look/lighting preset, all from a shared seed. Walls, rooms, doors,
+  glass and climb routes stay fixed. M2c also makes glass panes breakable by melee and rockets (`systems/melee.md`).
 
 ## 9. Kills, placement, winning (MVP)
 - Placement = number of players alive just before you died (the winner gets 1). If several players die on the same tick, the one with more
@@ -270,6 +307,16 @@ Bots never cheat on information (no wallhacks) and never aim at heads deliberate
 - **Armor**: bots pick up and wear better vests and helmets (`lootScoreVest` / `lootScoreHelmet` + `lootScoreArmorPerTier` x tier).
 - Bots aim at the chest of the target's current stance.
 
+**M2c bot additions** (numbers in `bots.melee/rpg/smoke/scopes`, `levels.botValueMultiplier`):
+- **Levels**: loot value x 1 / 1.2 / 1.4 / 1.6 by level, so a bot swaps an L1 rifle for an L2 one.
+- **Melee**: the melee weapon replaces the fists fallback; it is also used when the target is within 2.5 m and the held gun is empty.
+- **RPG**: a special action like the grenade, at 12-50 m, against a visible target that is near cover, grouped or standing still. Never at
+  point blank (needs 10 m of clear aim line).
+- **Smoke**: thrown toward the attacker when retreating to heal, or when crossing into the zone after being hit (cautious bots most). All
+  bot sight tests treat clouds as opaque.
+- **Scopes**: picked up only to auto-mount; a mounted 2x/4x/8x stretches the gun's range band.
+- Pacing: `bots.eagernessCurve` 1.5 -> 1.75 to keep the median at 6-7 min with slightly faster M2c fights (`systems/combat.md` "Pacing").
+
 ## 11. Feedback requirements (summary for UI, audio, VFX)
 - **Shots**: muzzle flash, tracer from muzzle toward the hit point, positional shot sound per weapon type.
 - **Hits dealt**: hit marker (white for body, yellow for head, red X for a kill), hit sound (separate head ping), vest-hit and helmet-hit
@@ -282,14 +329,36 @@ Bots never cheat on information (no wallhacks) and never aim at heads deliberate
 - **Tide**: a phase timer ("Tide rising in 0:23" / "Tide moving 0:12"), minimap rings (current and next), a warning sting, a blue screen tint plus a damage tick sound while outside.
 - **Heals**: a channel progress bar with a cancel hint. **Reload**: progress on the ammo counter.
 - Kill feed (killer, weapon icon, victim; headshot icon), alive count, your kills, and a pickup prompt that names the item and quantity.
+- **M2c**: level colour + numeral/pips on slots, ground glow, prompts, kill feed, armor icons and weapon models; melee wind-ups readable at
+  15 m and swing whooshes; glass shatter; rocket launch, whistle, smoke trail and explosion; smoke cloud volume and hiss; the throwable slot
+  showing the selected type and both counts; scope chips on slots, the pouch chip, the 2x overlay; the layout seed in the Esc panel and on
+  results.
 
 ## 12. Out of scope
 Delivered in M2a: crouch/prone, ADS with sights and scopes, helmets and armor tiers, frag grenades, DMR, sniper, LMG.
 Out of scope for M2a: attachments (scopes as separate pickups), smoke and flash grenades, vehicles, lean (Q/E), first-person mode outside
 scopes, lag compensation.
 Delivered in M2b: plane/drone carrier drop, the office map, map vote, rooms, first-person camera (no 3P toggle on foot).
+M2c (in design): per-match layout variety, item levels, revolver, double barrel, melee weapons, RPG, smoke, scope attachments, tier-4 armor,
+breakable glass (melee and rockets only). Out of scope for M2c: destructible walls and terrain, vehicles, attachments other than scopes,
+weapon skins, airdrops, new maps, lag compensation, incendiary and flash grenades, procedural terrain shape, bots spraying into smoke or
+using smoke offensively (Later), pre-scoped loot guns (Maybe), a melee block/shove (Maybe), bot nav through broken glass (Later).
 Later: vehicles, crafting, building, hunger/thirst, backpacks, squads, accounts, multiple lobbies and matchmaking,
 mobile/touch controls, gamepad, binary protocol, lag compensation (hits are checked against the server's current state; the design assumes
 it will be added later), weapon drop key, scoreboard, spectator free-cam, cosmetics selection, a cosmetic local grenade on release.
-Maybe: swimming in deep water, weapon attachments, revive, same-tier armor swap when the ground piece is fresher, a prone turn-rate limit,
-water muffling grenade damage.
+Maybe: swimming in deep water, attachments other than scopes, revive, same-tier armor swap when the ground piece is fresher, a prone
+turn-rate limit, water muffling grenade damage.
+
+## 13. M2c acceptance summary (detail and exact tests in each system spec)
+1. Two matches with different layout seeds on the same map differ in loot positions and arrangements; the same seed gives the same layout on
+   server and every client; per-POI loot counts and the hard guarantees hold over 200+ seeds per map (`systems/layout.md`).
+2. Every weapon except fists carries a level 1-4 through pickup, drop and death; L1 stats equal today's; the L1/L4 TTK table in
+   `systems/combat.md` holds shot for shot (`systems/levels.md`).
+3. Knife, machete and paddle live in slot 3, hit once at their hit frame, and the paddle knocks back; melee and rockets break office glass
+   (`systems/melee.md`).
+4. The RPG fires a deterministic rocket that explodes on contact or at 120 m with the frag blast model and the impact bonus; duds under 5 m
+   (`systems/rpg.md`).
+5. Smoke shares the throwable slot (4/G cycles), deploys a cloud whose radius is a pure function of time, and blocks bot sight, name tags
+   and hit markers, but not bullets (`systems/smoke.md`, `systems/grenades.md`).
+6. Scopes mount by the auto-mount rule, travel with their gun, and switch with T; default sights are unchanged (`systems/scopes.md`).
+7. `matchReport.ts` (30 matches per map): median match 330-480 s (target 360-420 s), no weapon above 35% of weapon kills.

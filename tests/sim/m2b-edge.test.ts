@@ -94,7 +94,7 @@ describe('plateau gap rule vs monitor tops (level-designer request; maps.md 2.4 
     expect(near[0]!.top - 10.44).toBeCloseTo(0.585, 3);
   });
 
-  it.fails('BUG-011 (fails until fixed): no sprint-jump from either perch ends standing on a monitor top', () => {
+  it('BUG-011 (fixed): no sprint-jump from either perch ends standing on a monitor top', () => {
     const found: string[] = [];
     for (const p of perches) {
       const r = landingsOnMonitors(p.id, p.top);
@@ -105,42 +105,32 @@ describe('plateau gap rule vs monitor tops (level-designer request; maps.md 2.4 
     expect(found).toEqual([]);
   });
 
-  it('BUG-011 detail: the touchdown on the monitor top lasts 1-2 ticks (no one can stay), but a jump on that tick chains', () => {
+  it('BUG-011 fix detail: monitor screens are noStand (they block but never support), so no touchdown and no chained jump', () => {
     const ctx = officeCtx();
+    const screens = monitorScreens(ctx);
+    expect(screens.length).toBeGreaterThan(20);
+    // Single-monitor screens (0.36 m deep) are noStand; dual-monitor screens (1.17 m deep) stay standable but sit 4.37 m
+    // above the desk top, out of reach from everything except the perches, and the perch scan above finds 0 landings.
+    const single = screens.filter((c) => OFFICE.props[c.prop]!.kind === 'monitor');
+    expect(single.filter((c) => c.noStand !== true).map((c) => c.prop)).toEqual([]);
+    console.info(`[monitor-top] standable dual-monitor screens: ${screens.filter((c) => c.noStand !== true).length}`);
     let touches = 0;
-    let stays = 0;
-    let chainedApex = 0;
+    let maxApex = 0;
     for (const sx of [77, 78, 79]) {
       for (const jumpAt of [6, 8, 10, 12, 14]) {
         let s = initialMovementState({ x: sx, y: 10.44, z: -27.5 }, false);
-        let first = -1;
-        let on = 0;
         for (let i = 0; i < 150; i++) {
-          // After touchdown the player tries to stop: S for 6 ticks, then nothing.
-          const fwd = first < 0 ? 1 : i - first < 6 ? -1 : 0;
-          s = stepMovement(s, mvIn({ moveForward: fwd, sprint: fwd > 0, yaw: Math.PI, jump: i === jumpAt }), SIM_DT, ctx).state;
-          const onTop = i > jumpAt + 2 && s.grounded && Math.abs(s.pos.y - 11.025) < 1e-3;
-          if (onTop) {
-            on++;
-            if (first < 0) first = i;
-          }
-        }
-        if (first < 0) continue;
-        touches++;
-        expect(on).toBeLessThanOrEqual(2);
-        if (Math.abs(s.pos.y - 11.025) < 1e-3) stays++;
-        // Replay with a jump on the touchdown tick.
-        let c = initialMovementState({ x: sx, y: 10.44, z: -27.5 }, false);
-        for (let i = 0; i < 150; i++) {
-          c = stepMovement(c, mvIn({ moveForward: 1, sprint: true, yaw: Math.PI, jump: i === jumpAt || i === first + 1 }), SIM_DT, ctx).state;
-          if (i > first + 1) chainedApex = Math.max(chainedApex, c.pos.y);
+          // Jump at jumpAt and again on every grounded tick afterwards (a chained jump would need a support).
+          s = stepMovement(s, mvIn({ moveForward: 1, sprint: true, yaw: Math.PI, jump: i === jumpAt || (i > jumpAt + 2 && s.grounded) }), SIM_DT, ctx).state;
+          if (i > jumpAt + 2 && s.grounded && Math.abs(s.pos.y - 11.025) < 1e-3) touches++;
+          if (i > jumpAt) maxApex = Math.max(maxApex, s.pos.y);
         }
       }
     }
-    console.info(`[monitor-top] touches ${touches}, stays ${stays}, chained apex ${chainedApex.toFixed(2)} m`);
-    expect(touches).toBeGreaterThan(0);
-    expect(stays).toBe(0);
-    expect(chainedApex).toBeGreaterThan(12);
+    console.info(`[monitor-top] touches ${touches}, max height after leaving the perch ${maxApex.toFixed(2)} m`);
+    expect(touches).toBe(0);
+    // Highest point is the perch jump itself (10.44 + 1.056), never a second jump from a screen top.
+    expect(maxApex).toBeLessThan(10.44 + 1.06 + 0.01);
   });
 });
 
@@ -179,8 +169,15 @@ describe('ping-pong net on the real office (maps.md 2.4)', () => {
   });
 });
 
+/** The longest glass wall segment running along X (meeting-room fronts; at least 5 m, so a ray at +-0.15 rad from 12 m hits it). */
+function longestGlassAlongX(): IndoorMapData['walls'][number] {
+  const g = OFFICE.walls.filter((w) => w.material === 'glass' && w.z1 === w.z2).sort((a, b) => Math.abs(b.x2 - b.x1) - Math.abs(a.x2 - a.x1))[0]!;
+  expect(Math.abs(g.x2 - g.x1)).toBeGreaterThanOrEqual(5);
+  return g;
+}
+
 describe('glass and walls on the real office (maps.md 2.5 / 15-16)', () => {
-  const glass = OFFICE.walls.find((w) => w.material === 'glass' && w.z1 === w.z2 && Math.abs(w.x2 - w.x1) > 15)!;
+  const glass = longestGlassAlongX();
   const midX = (glass.x1 + glass.x2) / 2;
   const wz = glass.z1;
 
@@ -250,7 +247,7 @@ describe('carrier drop on the real office: aboard players take no zone damage', 
 
 describe('camera.md acceptance gaps (QA, sim side)', () => {
   it('QA 2: at full ADS with 0 spread, the shot lands exactly on the world point under the FP screen centre (stand, crouch, prone)', () => {
-    const glassWall = OFFICE.walls.find((w) => w.material === 'glass' && w.z1 === w.z2 && Math.abs(w.x2 - w.x1) > 15)!;
+    const glassWall = longestGlassAlongX();
     const x = (glassWall.x1 + glassWall.x2) / 2;
     for (const stance of ['stand', 'crouch', 'prone'] as const) {
       const { w, ids } = playingWorld(2, { map: OFFICE, balance: noSpreadBalance() });
@@ -298,7 +295,7 @@ describe('camera.md acceptance gaps (QA, sim side)', () => {
     expect(p.pitch).toBeCloseTo(OB.movement.stances.pronePitchMinDeg * DEG2RAD, 9);
   });
 
-  it.fails('BUG-012 (fails until fixed): entering prone at +70 deg is clamped to +45 on the first tick of the transition', () => {
+  it('BUG-012 (fixed): entering prone at +70 deg is clamped to +45 on the first tick of the transition', () => {
     const { w, ids } = playingWorld(2, { map: OFFICE, balance: clone(OB) });
     const [s, t] = ids as [number, number];
     land(w, s, 0, 0);
@@ -308,8 +305,8 @@ describe('camera.md acceptance gaps (QA, sim side)', () => {
     run(w, 3, { [s]: () => ({ pitch: up }), [t]: () => ({}) });
     run(w, 1, { [s]: () => ({ pitch: up, stanceToggle: 'prone' }), [t]: () => ({}) });
     expect(p.move.stanceFrom === 'prone' || p.move.stance === 'prone').toBe(true);
-    // Actual: 70 deg on this tick (also in the snapshot), 45 from the next tick.
     expect(p.pitch).toBeCloseTo(OB.movement.stances.pronePitchMaxDeg * DEG2RAD, 9);
+    expect(w.snapshotFor(t).players.find((x) => x.id === s)!.pitch).toBeCloseTo(OB.movement.stances.pronePitchMaxDeg * DEG2RAD, 6);
   });
 
   it('QA 9: bots obey the prone pitch clamp (all-bot matches: 3 island + 3 office seeds, every 3rd tick)', () => {
@@ -344,16 +341,44 @@ describe('camera.md acceptance gaps (QA, sim side)', () => {
   }, 120_000);
 });
 
-describe('maps.md 18 on the SHIPPED balance (owner test uses a synthetic override)', () => {
-  it('office loot weights read common grenade 7, rare grenade 8, epic sniper 6, epic shotgun 12; the island keeps the base', () => {
-    expect(OB.loot.tiers.common.grenade).toBe(7);
-    expect(OB.loot.tiers.rare.grenade).toBe(8);
-    expect(OB.loot.tiers.epic.sniper).toBe(6);
-    expect(OB.loot.tiers.epic.shotgun).toBe(12);
+describe('maps.md 18 on the SHIPPED balance (structure only; the designer owns the numbers)', () => {
+  it('office loot = base loot deep-merged with maps.office.loot; the island keeps the base; office fall threshold differs', () => {
+    const raw = (BALANCE as unknown as { maps?: Record<string, { loot?: { tiers?: Record<string, Record<string, number>> } }> }).maps;
+    const over = raw?.office?.loot?.tiers ?? {};
+    for (const [tier, weights] of Object.entries(over)) {
+      for (const [id, w] of Object.entries(weights)) {
+        if (id.startsWith('_')) continue;
+        expect((OB.loot.tiers as Record<string, Record<string, number>>)[tier]![id], `office ${tier}.${id}`).toBe(w);
+      }
+    }
     const island = balanceForMap(BALANCE, 'island01');
-    expect(island.loot.tiers.common.grenade).toBe(BALANCE.loot.tiers.common.grenade);
-    expect(island.loot.tiers.epic.sniper).toBe(BALANCE.loot.tiers.epic.sniper);
+    expect(island.loot.tiers).toEqual(BALANCE.loot.tiers);
     expect(island.movement.fallDamageMinSpeed).toBe(BALANCE.movement.fallDamageMinSpeed);
-    expect(OB.movement.fallDamageMinSpeed).toBe(18);
+    expect(OB.movement.fallDamageMinSpeed).toBeGreaterThan(BALANCE.movement.fallDamageMinSpeed);
+  });
+});
+
+describe('office climb routes, walked like a player (E2E m2b-office counterpart)', () => {
+  it('every walk route (ramps) is climbed by holding W from 1.5 m before its foot, no jump: the top reaches the plateau', () => {
+    const ctx = officeCtx();
+    const walks = OFFICE.climbRoutes.filter((r) => r.mode === 'walk');
+    expect(walks.length).toBeGreaterThanOrEqual(4);
+    for (const r of walks) {
+      const p0 = r.points[0]!;
+      const pN = r.points[r.points.length - 1]!;
+      const len = Math.hypot(pN.x - p0.x, pN.z - p0.z);
+      const yaw = Math.atan2(-(pN.x - p0.x), -(pN.z - p0.z));
+      let s = initialMovementState({ x: p0.x - ((pN.x - p0.x) / len) * 1.5, y: 0, z: p0.z - ((pN.z - p0.z) / len) * 1.5 }, false);
+      let maxY = 0;
+      let jumps = 0;
+      for (let i = 0; i < 30 * 8; i++) {
+        const before = s.grounded;
+        s = stepMovement(s, mvIn({ moveForward: 1, yaw }), SIM_DT, ctx).state;
+        if (before && !s.grounded && s.vel.y > 1) jumps++;
+        maxY = Math.max(maxY, s.pos.y);
+      }
+      expect(maxY, `${r.id} reaches ${pN.y}`).toBeGreaterThanOrEqual(pN.y - 0.01);
+      expect(jumps, `${r.id} needs no jump`).toBe(0);
+    }
   });
 });

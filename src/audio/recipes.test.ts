@@ -6,23 +6,39 @@ import { RECIPES } from './recipes';
 import type { Voice } from './synth';
 
 const VARIANTS: Partial<Record<CueId, string[]>> = {
-  'weapon.dryFire': ['pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper'],
-  'weapon.switch': ['fists', 'pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper', 'grenade'],
-  'reload.start': ['pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper'],
-  'reload.finish': ['pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper'],
-  'hit.remote': ['body', 'head', 'vest1', 'vest3', 'helmet1', 'helmet3', 'vestBreak', 'helmetBreak'],
-  'hitConfirm.vest': ['vest1', 'vest3'],
-  'hitConfirm.helmet': ['helmet1', 'helmet3'],
-  'damage.vest': ['vest1', 'vest2', 'vest3'],
-  'damage.helmet': ['helmet1', 'helmet2', 'helmet3'],
-  'ads.in': ['iron', 'red_dot', 'scope_4x', 'scope_8x'],
-  'ads.out': ['iron', 'red_dot', 'scope_4x', 'scope_8x'],
+  'weapon.dryFire': ['pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper', 'dbshotgun', 'revolver', 'rpg'],
+  'weapon.switch': ['fists', 'pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper', 'grenade', 'knife', 'machete', 'paddle', 'dbshotgun', 'revolver', 'rpg', 'smoke'],
+  'reload.start': ['pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper', 'dbshotgun', 'revolver', 'rpg'],
+  'reload.finish': ['pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper', 'dbshotgun', 'revolver', 'rpg'],
+  'hit.remote': ['body', 'head', 'vest1', 'vest3', 'vest4', 'helmet1', 'helmet3', 'helmet4', 'vestBreak', 'helmetBreak'],
+  'hitConfirm.vest': ['vest1', 'vest3', 'vest4'],
+  'hitConfirm.helmet': ['helmet1', 'helmet3', 'helmet4'],
+  'damage.vest': ['vest1', 'vest2', 'vest3', 'vest4'],
+  'damage.helmet': ['helmet1', 'helmet2', 'helmet3', 'helmet4'],
+  'ads.in': ['iron', 'red_dot', 'scope_2x', 'scope_4x', 'scope_8x'],
+  'ads.out': ['iron', 'red_dot', 'scope_2x', 'scope_4x', 'scope_8x'],
   'stance.change': ['stand_crouch', 'stand_prone', 'crouch_stand', 'crouch_prone', 'prone_stand', 'prone_crouch'],
   'foot.crouch.remote': ['sand', 'grass', 'water', 'wood', 'carpet', 'tile'],
   'foot.crawl.local': ['sand', 'grass', 'water', 'wood', 'carpet', 'tile'],
   'foot.crawl.remote': ['sand', 'grass', 'water', 'wood', 'carpet', 'tile'],
-  'pickup.vest': ['vest_1', 'vest_3'],
-  'pickup.helmet': ['helmet_1', 'helmet_3'],
+  'pickup.vest': ['vest_1', 'vest_3', 'vest_4'],
+  'pickup.helmet': ['helmet_1', 'helmet_3', 'helmet_4'],
+  'pickup.weapon': ['pistol', 'knife', 'paddle', 'dbshotgun', 'revolver', 'rpg'],
+  'pickup.grenade': ['grenade', 'smoke'],
+  'grenade.throw': ['', 'smoke'],
+  // M2c
+  'melee.swing.local': ['knife', 'machete', 'paddle'],
+  'melee.swing.remote': ['knife', 'machete', 'paddle'],
+  'melee.hit': ['knife', 'machete', 'paddle'].flatMap((w) =>
+    ['body', 'head', 'vest2', 'helmet4', 'wall', 'ground', 'water', 'glass'].map((m) => `${w}.${m}`),
+  ),
+  'melee.knockback': ['', 'sand'],
+  'explosion.rocket': ['ground', 'water'],
+  'smoke.bounce': ['terrain', 'prop', 'water', 'edge', 'glass'],
+  'pickup.level': ['1', '2', '3', '4'],
+  'pickup.scope': ['scope_red_dot', 'scope_2x', 'scope_4x', 'scope_8x'],
+  'scope.mount': ['scope_red_dot', 'scope_2x', 'scope_4x', 'scope_8x'],
+  'scope.unmount': ['scope_red_dot', 'scope_8x'],
   'grenade.bounce': ['terrain', 'prop', 'water', 'edge', 'glass'],
   explosion: ['ground', 'water'],
   'damage.hp': ['body', 'head'],
@@ -43,7 +59,14 @@ const VARIANTS: Partial<Record<CueId, string[]>> = {
   'drop.land': ['sand', 'wood', 'carpet', 'tile'],
 };
 
-function run(cue: CueId, variant: string, intensity: number, distance: number, durationS = 2.5): { len: number; ctx: FakeAudioContext; v: Voice & { nodes: AudioNode[]; sources: AudioScheduledSourceNode[] } } {
+function run(
+  cue: CueId,
+  variant: string,
+  intensity: number,
+  distance: number,
+  durationS = 2.5,
+  params?: readonly number[],
+): { len: number; ctx: FakeAudioContext; v: Voice & { nodes: AudioNode[]; sources: AudioScheduledSourceNode[] } } {
   const ctx = new FakeAudioContext();
   const noise = createNoiseBank(ctx.asAudioContext());
   const out = ctx.createGain();
@@ -65,6 +88,7 @@ function run(cue: CueId, variant: string, intensity: number, distance: number, d
     addNode: (n: AudioNode) => nodes.push(n),
     nodes,
     sources,
+    params,
   };
   const len = RECIPES[cue](v);
   return { len, ctx, v };
@@ -77,7 +101,7 @@ describe('recipes', () => {
         for (const [intensity, distance] of [[0, 0], [1, 120]] as const) {
           const { len, ctx, v } = run(cue, variant, intensity, distance);
           expect(Number.isFinite(len) && len > 0, `${cue}/${variant} length ${len}`).toBe(true);
-          expect(len).toBeLessThan(cue.endsWith('Loop') || cue.endsWith('.loop') ? 200 : 4);
+          expect(len).toBeLessThan(cue.endsWith('Loop') || cue.endsWith('.loop') || cue === 'smoke.hiss' ? 200 : 4);
 
           // Every node the recipe created (all but the voice's own `out`) is registered for disconnect,
           // every source is started, and none is scheduled to stop long after the reported length.
@@ -156,6 +180,54 @@ describe('recipes', () => {
         .join(',');
     const sigs = new Set(['sand', 'wood', 'carpet', 'tile'].map(sig));
     expect(sigs.size).toBe(4);
+  });
+
+  // --- M2c ---------------------------------------------------------------------------------------------------------
+  const startsOf = (v: { sources: AudioScheduledSourceNode[]; t: number }): number[] =>
+    (v.sources as unknown as FakeNode[]).map((s) => (s.started as number) - v.t);
+
+  it('M2c: the melee whoosh peaks on the hit frame (durationS), not at the click', () => {
+    const { v } = run('melee.swing.local', 'knife', 0, 0, 0.3);
+    expect(Math.min(...startsOf(v))).toBeGreaterThan(0.2); // the knife whoosh rises over its last 50 ms
+    const paddle = run('melee.swing.local', 'paddle', 0, 0, 0.5);
+    expect(paddle.len).toBeGreaterThan(0.5); // the decay follows the peak
+  });
+
+  it('M2c: the knockback thud lands at durationS', () => {
+    const { v } = run('melee.knockback', 'sand', 0, 0, 0.3);
+    expect(Math.max(...startsOf(v))).toBeCloseTo(0.32, 2);
+  });
+
+  it('M2c: the level sparkle plays exactly `level` notes', () => {
+    for (const n of [1, 2, 3, 4]) {
+      const tri = run('pickup.level', String(n), 0, 0).ctx.nodes.filter((x) => x.kind === 'oscillator' && x.type === 'triangle').length;
+      expect(tri).toBe(n);
+    }
+  });
+
+  it('M2c: reload rounds change the dbshotgun shell and revolver round counts', () => {
+    const clicks = (variant: string, rounds: number): number =>
+      run('reload.start', variant, 0, 0, 2, [rounds]).ctx.nodes.filter((x) => x.kind === 'bufferSource').length;
+    expect(clicks('dbshotgun', 2)).toBeGreaterThan(clicks('dbshotgun', 1));
+    expect(clicks('revolver', 6)).toBeGreaterThan(clicks('revolver', 2));
+  });
+
+  it('M2c: the smoke hiss lasts grow + hold + fade, minus a late joiner\'s offset', () => {
+    expect(run('smoke.hiss', '', 0, 0, 0, [1.5, 15, 3, 0]).len).toBeCloseTo(19.5, 6);
+    expect(run('smoke.hiss', '', 0, 0, 0, [1.5, 15, 3, 10]).len).toBeCloseTo(9.5, 6);
+    expect(run('smoke.hiss', '', 0, 0, 0, [1.5, 15, 3, 25]).len).toBeLessThan(0.1);
+  });
+
+  it('M2c: a bigger rocket blast is longer; the rocket bang has a sharper front than the frag', () => {
+    expect(run('explosion.rocket', 'ground', 0, 10, 0, [1.5]).len).toBeGreaterThan(run('explosion.rocket', 'ground', 0, 10, 0, [0.8]).len);
+    expect(run('explosion.rocket', 'ground', 0, 10, 0, [1]).ctx.nodes.length).toBeGreaterThan(run('explosion', 'ground', 0, 10).ctx.nodes.length);
+  });
+
+  it('M2c: smoke bounces never use the frag clink (no bell partials on terrain/prop)', () => {
+    for (const variant of ['terrain', 'prop']) {
+      const sines = run('smoke.bounce', variant, 1, 5).ctx.nodes.filter((x) => x.kind === 'oscillator' && x.type === 'sine').length;
+      expect(sines).toBe(0);
+    }
   });
 
   it('M2b: the indoor zone warning swaps the conch for a chime but keeps the whistles', () => {

@@ -72,6 +72,30 @@ Pillars, in priority order:
 | Grenade pin ring | `#FF3B5C` | ring shape; also the explosion / arc danger colour |
 | Sight glass / red dot | `#9FE8F0` / `#FF3B5C` | glass discs on every sight; dot always inside an ink ring |
 
+### Item levels (M2c): one scale for weapons, armor, HUD, ground markers and the kill feed
+Full spec, checks and usage: `docs/art/M2c.md` §1. Names from narrative. Always paired with a numeral or pips.
+| Level | Name | Base | Text on dark panel | Additive glow | Numeral |
+|---|---|---|---|---|---|
+| 1 | Breezy | `#B8E7FF` ice blue | `#B8E7FF` | `#B8E7FF` | ink |
+| 2 | Warm | `#FFF14D` lemon | `#FFF14D` | `#FFF14D` | ink |
+| 3 | Hot | `#F2590D` hot orange | `#FF7A3D` | `#FF8048` | ink |
+| 4 | Scorcher | `#B963E3` UV violet | `#D08BF0` | `#D494F2` | ink |
+The loot-tier colours below are retired from ground markers in M2c (the spot tier only rolls the level). Non-levelled
+items use a cream supply marker.
+
+### M2c family colours (`docs/art/M2c.md` §2–4, §14)
+| Item | Main | Secondary |
+|---|---|---|
+| knife | steel `#D3DCE6` | coral handle `#FF7A5C` |
+| machete | steel `#D3DCE6` | palm-green handle `#34983F` |
+| paddle | plank `#D09A62` | teal tip `#2EC4B6`, cream stripe |
+| dbshotgun | mint barrels `#7FDDB8` | waffle stock `#D9A05B`, strawberry `#FF8FB1` + vanilla `#FFF3D6` toy tips |
+| revolver | sky `#4FB4EE` | sand-dollar cylinder `#F2E2C2`, walnut grip `#8A5A34` |
+| rpg + rocket | cream `#FFF4E2` | coral spiral `#FF5A5F`, mango sunburst `#FFC43D` |
+| smoke can / cloud | lilac `#C9B6F2`, pink hoops `#FFB3D1` | cloud `#FBEAF6` / `#EBCFF0` / `#C9AEDF`, veil `#EFDDF2` |
+| scope accents | red dot cream `#FFF3D6`, 2x coral `#FF7A5C`, 4x cornflower `#5B8DEF`, 8x bubblegum `#FF6FA8` | |
+| L4 armor | bell brass `#C98B2E`, board violet `#B963E3` | tape grey `#C9CED6` |
+
 ### Armor tiers (M2a)
 Each tier is told apart by **silhouette first** (cloth hat vs vented dome vs ridged shell; open vest vs ribbed
 puffer vs plate carrier), then by colour. Vests and helmets of a tier share the scheme.
@@ -92,8 +116,8 @@ Values assume Three r155+ physical light units, `outputColorSpace = SRGBColorSpa
 | Fog | linear, colour `#D2F1FF`, near 60 m, far 260 m |
 | Sky | vertical gradient from `#D2F1FF` at the horizon to `#4FB2F0` at the zenith, with a soft sun disc `#FFF6DA` |
 
-Future moods (out of scope for M1, palette reserved): dawn (sun `#FFC9A3` 1.6, sky top `#7FA8E8`, horizon `#FFD9B8`),
-dusk (sun `#FF9E6B` 1.4, sky top `#3D4C9A`, horizon `#FFB38A`, tiki flames brighten), night (moon `#A9C4FF` 0.5).
+M2c: these values are the island look preset **`noon`**. The other per-match presets (`morning`, `golden`,
+`overcast`, and the office `day` / `evening` / `afterHours`) are in `docs/art/M2c.md` §10. Night stays out of scope.
 
 ## 4. Toon ramp
 One shared 3×1 `DataTexture` (`RedFormat`, `NearestFilter`, no mipmaps). `getToonGradient()` builds it.
@@ -776,3 +800,21 @@ view kicks rot x 0.01. Alternate hands on consecutive hits.
 
 **Parachute / freefall**: hide the item; arms up on the risers (hands at (±0.18, +0.22, −0.25), fingers curled)
 while the canopy is open; in freefall the arms spread out to the screen edges (hands at (±0.45, −0.05, −0.35)).
+
+## 22. M2c: "Fresh Every Match & Bigger Arsenal" (spec: `docs/art/M2c.md`)
+- **Item levels 1–4**: the heat-ladder colours in §2, a raised **level collar** with N pips on every weapon (same spot on
+  every gun: the receiver front, ahead of the trigger hand), ground markers with N pips plus ring count and beam height,
+  and armor tier accents recoloured to the level colour.
+- **New items**: Shucking Knife, Coconut Machete, Lifeboat Paddle, Double Scoop Shotgun, Sand Dollar Revolver, Sunburst
+  Launcher + rocket + Fireworks ammo, Candyfloss Smoke Bomb (cylinder + candyfloss cap: never round like the frag),
+  Ship's Bell Helmet (L4), Surfboard Vest (L4).
+- **Smoke cloud**: opaque cel puffs around an opaque core at 0.88 × the sim radius, 3 draw calls for all clouds, a veil
+  while the camera is inside, a dithered fade. **Rocket boom** = the grenade boom scaled + a fireworks burst. **Glass
+  shatter**: a new effect built on the M2b glass chip.
+- **Scopes** (§14 of M2c.md): every gun has a `rail` anchor, and every scope has one frame, so `eye = rail + scope.eye` and
+  ADS lines up for any pair. There is a new **2x overlay** ("sunrise ring", lens 46vmin) next to the §17 4x/8x overlays.
+- **Layout variety**: island and office prop kits (sim vs decor), `variant` colourways, and look presets (§3 is `noon`).
+- **A model per item level** (Addendum 2, M2c.md §15): L1 makeshift (dulled, taped, cord loop), L2 standard, L3
+  upgraded (muzzle device, ribbed grip), L4 sleek (chrome fin and trims, star badge). Anchors identical at every level.
+- **Budgets**: island static props + decor merged per chunk (2 calls per chunk); office ≤ 150 calls in the worst view.
+  Ground loot: batch item meshes by material (BatchedMesh), not by (id, level, scope) (M2c.md §15.4).

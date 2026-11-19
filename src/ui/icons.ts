@@ -4,12 +4,16 @@
  * - CSS clip-path shapes + family colour (guns, ammo, heals): no image assets.
  * - M2a: full-colour inline SVG icons for the armor pieces and the grenade (STYLE.md §18), used as a data-URI
  *   background so they stay a single element. Armor tier is also shown by pips next to the icon (hud.ts).
+ * - M2c (docs/ui/M2c.md §1, §16; docs/art/M2c.md §12, §14.6): SVGs for every new item come from the graphics-designer's
+ *   M2C_ICON_SVG (src/render/procedural/icons.ts); the clip-path shapes and family colours below stay as the
+ *   tiny-chip fallback (iconCssShape) and the non-SVG path.
  * Owner: ui-ux-designer.
  */
-import type { ArmorTier, HeldId, ItemId } from '../shared/types';
+import { M2C_ICON_SVG } from '../render/procedural/icons';
+import type { ItemLevel, M2cArmorTier, M2cHeldId, M2cItemId } from '../shared/types';
 import { h } from './dom';
 
-export type IconId = ItemId | HeldId;
+export type IconId = M2cItemId | M2cHeldId;
 
 const SHAPE: Record<IconId, string> = {
   fists: 'ring',
@@ -33,10 +37,44 @@ const SHAPE: Record<IconId, string> = {
   helmet_2: 'dome',
   helmet_3: 'dome',
   grenade: 'pineapple',
+  // M2c
+  knife: 'blade',
+  machete: 'machete',
+  paddle: 'paddle',
+  dbshotgun: 'barrels',
+  revolver: 'pentagon',
+  rpg: 'rocket',
+  ammo_rocket: 'rocket',
+  smoke: 'cloud',
+  vest_4: 'shield',
+  helmet_4: 'dome',
+  scope_red_dot: 'circle',
+  scope_2x: 'square',
+  scope_4x: 'capsule',
+  scope_8x: 'capsule',
 };
 
-/** Armor tier main colours (STYLE.md §2 "Armor tiers"). */
-export const ARMOR_TIER_COLOUR: Record<ArmorTier, string> = { 1: '#7fa8c8', 2: '#3a6fd8', 3: '#3d4a5c' };
+/** Armor tier main colours (STYLE.md §2 "Armor tiers"; level 4 from docs/art/M2c.md §6). */
+export const ARMOR_TIER_COLOUR: Record<M2cArmorTier, string> = { 1: '#7fa8c8', 2: '#3a6fd8', 3: '#3d4a5c', 4: '#b963e3' };
+
+/**
+ * M2c level scale (docs/art/M2c.md §1.1, final): `base` fills the badge, pips and collars; `text` is the variant for
+ * text or thin strokes on a dark panel. The numeral on the badge is always ink #2A1D33 (contrast >= 4.5 : 1).
+ */
+export const LEVEL_COLOUR: Record<ItemLevel, { base: string; text: string }> = {
+  1: { base: '#b8e7ff', text: '#b8e7ff' },
+  2: { base: '#fff14d', text: '#fff14d' },
+  3: { base: '#f2590d', text: '#ff7a3d' },
+  4: { base: '#b963e3', text: '#d08bf0' },
+};
+
+/** M2c scope accents (docs/art/M2c.md §14.3): the chip fill and the overlay rim. */
+export const SCOPE_ACCENT: Record<'scope_red_dot' | 'scope_2x' | 'scope_4x' | 'scope_8x', string> = {
+  scope_red_dot: '#fff3d6',
+  scope_2x: '#ff7a5c',
+  scope_4x: '#5b8def',
+  scope_8x: '#ff6fa8',
+};
 
 /** Family colours (palette: weapons/ammo share a family colour; see materials.ts and STYLE.md §18). */
 const COLOUR: Record<IconId, string> = {
@@ -61,6 +99,21 @@ const COLOUR: Record<IconId, string> = {
   helmet_2: ARMOR_TIER_COLOUR[2],
   helmet_3: ARMOR_TIER_COLOUR[3],
   grenade: '#ff9f1c',
+  // M2c (docs/art/M2c.md §12)
+  knife: '#d3dce6',
+  machete: '#34983f',
+  paddle: '#d09a62',
+  dbshotgun: '#7fddb8',
+  revolver: '#4fb4ee',
+  rpg: '#ff5a5f',
+  ammo_rocket: '#ff5a5f',
+  smoke: '#c9b6f2',
+  vest_4: ARMOR_TIER_COLOUR[4],
+  helmet_4: '#c98b2e',
+  scope_red_dot: SCOPE_ACCENT.scope_red_dot,
+  scope_2x: SCOPE_ACCENT.scope_2x,
+  scope_4x: SCOPE_ACCENT.scope_4x,
+  scope_8x: SCOPE_ACCENT.scope_8x,
 };
 
 const NS = "xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'";
@@ -117,16 +170,24 @@ const urlCache = new Map<IconId, string>();
 export function svgIconUrl(id: IconId): string | null {
   const cached = urlCache.get(id);
   if (cached) return cached;
-  const markup = SVG[id];
+  const markup = svgMarkup(id);
   if (!markup) return null;
   const url = `url("data:image/svg+xml,${encodeURIComponent(markup)}")`;
   urlCache.set(id, url);
   return url;
 }
 
+/**
+ * SVG markup for an id: M2c items from the graphics-designer's art (src/render/procedural/icons.ts, pure data), else
+ * the M2a STYLE §18 icons above; undefined = CSS shape.
+ */
+function svgMarkup(id: IconId): string | undefined {
+  return M2C_ICON_SVG[id] ?? SVG[id];
+}
+
 /** Visual code of an icon: the SVG silhouette when there is one, else the CSS shape. */
 export function iconShape(id: IconId): string {
-  return SVG[id] ? 'svg' : SHAPE[id];
+  return svgMarkup(id) ? 'svg' : SHAPE[id];
 }
 
 /** CSS-shape name for an id (also used where only a shape fits, e.g. tiny chips). */
@@ -154,4 +215,23 @@ export function setIcon(el: HTMLElement, id: IconId | null): void {
   el.style.setProperty('--icon-colour', id ? COLOUR[id] : 'transparent');
   if (url) el.style.setProperty('--icon-svg', url);
   else el.style.removeProperty('--icon-svg');
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2c level badge (docs/ui/M2c.md §1.1): rounded square, ink outline, level fill (CSS --lvN), ink numeral; L4 adds a
+// sparkle corner. The numeral is the primary non-colour tell. aria-hidden: the parent's label names the level.
+// ---------------------------------------------------------------------------------------------
+export function levelBadge(extraCls = ''): HTMLSpanElement {
+  const el = h('span', `ui-lv ${extraCls}`.trim(), { 'aria-hidden': 'true' });
+  el.hidden = true;
+  return el;
+}
+
+/** Diffed: shows the badge for a level, hides it for null. */
+export function setLevelBadge(el: HTMLElement, level: ItemLevel | null): void {
+  const v = level === null ? '' : String(level);
+  if (el.dataset['level'] === v) return;
+  el.dataset['level'] = v;
+  el.textContent = v;
+  el.hidden = level === null;
 }

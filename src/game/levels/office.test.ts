@@ -391,4 +391,16 @@ describe('no real names', () => {
     const doc = readFileSync(new URL('../../../docs/design/levels/office.md', import.meta.url), 'utf8');
     expect(nameHits(doc, true)).toBe(0);
   });
+
+  it('finds none of the seat-plan names in the M2c variety spec and layout data (variety.md LV16)', () => {
+    // The variety JSON mixes kind ids with design prose (intents, notes), so it is scanned like prose: names only.
+    for (const path of [
+      '../../../docs/design/levels/variety.md',
+      './variety/office.variety.json',
+      './variety/island01.variety.json',
+    ]) {
+      const text = readFileSync(new URL(path, import.meta.url), 'utf8');
+      expect(nameHits(text, true), path).toBe(0);
+    }
+  });
 });

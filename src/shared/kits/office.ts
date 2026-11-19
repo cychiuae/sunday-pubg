@@ -51,6 +51,8 @@ export const OFFICE_KIT_KINDS = [
   'filingCabinet', 'printer', 'pinboard', 'fireExtinguisher', 'phoneBooth',
   'wallSolid', 'wallGlass', 'doorFrame', 'pingPongTable', 'foosballTable', 'dumbbellRack', 'guitarStand',
   'pantryCounter', 'lightPanel', 'acCassette',
+  // M2c (variety.md §5.4, art M2c.md §9.2): wall-band / room-corner clutter
+  'waterCooler',
 ] as const;
 export type OfficeKitKind = (typeof OFFICE_KIT_KINDS)[number];
 
@@ -90,7 +92,8 @@ function monitorColliders(dual: boolean): KitCollider[] {
 /** keyboardRamp: a 0.44 real keyboard tipped from the floor (+Z) onto a bookStack (-Z, 3 books). */
 function keyboardRampColliders(): KitCollider[] {
   const L = 0.44, T = 0.025, rise = BOOK_T * 3;
-  const run = L * Math.cos(Math.asin((rise - T) / L));
+  // = L * cos(asin(h / L)), written with sqrt only (IEEE-exact on every engine; feeds sim colliders).
+  const run = Math.sqrt(L * L - (rise - T) * (rise - T));
   return [ramp('ramp', -0.07, 0, -run / 2, 0.07, rise, run / 2)];
 }
 
@@ -113,7 +116,8 @@ function bookStairsColliders(): KitCollider[] {
 /** whiteboardRamp: a fallen 1.2 x 1.8 real whiteboard from the floor (+Z) to the desk top (-Z). */
 function whiteboardRampColliders(): KitCollider[] {
   const W = 1.2, L = 1.8, T = 0.02;
-  const run = L * Math.cos(Math.asin((DESK_H - T) / L));
+  // = L * cos(asin(h / L)), written with sqrt only (IEEE-exact on every engine; feeds sim colliders).
+  const run = Math.sqrt(L * L - (DESK_H - T) * (DESK_H - T));
   return [ramp('ramp', -W / 2, 0, -run / 2, W / 2, DESK_H, run / 2)];
 }
 
@@ -189,6 +193,11 @@ export const OFFICE_KIT: Readonly<Record<OfficeKitKind, PropKitEntry>> = {
   box: e('surface', [4.53, 2.73, 3.65], cardboard(0.5, 0.3, 0.4)),
   boxSmall: e('surface', [3, 1.02, 2.02], cardboard(0.33, 0.11, 0.22)),
   whiteboardRamp: e('floor', [11.2, 6.82, 15.16], whiteboardRampColliders()),
+  // M2c: 0.32 x 1.1 x 0.32 real water cooler: cabinet (top 8.1 m, unreachable) + bottle to 9.9 m; <= 3.6 m deep
+  waterCooler: e('floor', [3.34, 9.9, 3.33], [
+    box('cabinet', -0.16, 0, -0.16, 0.16, 0.9, 0.16),
+    cyl('bottle', 0, 0, 0.145, 0.9, 1.1),
+  ]),
   plushSeal: e('surface', [3.99, 2.34, 3.33], [box('plush', -0.2, 0, -0.16, 0.2, 0.26, 0.21)]),
   plushCrab: e('surface', [4.7, 2.46, 2.42], [box('plush', -0.27, 0, -0.14, 0.27, 0.28, 0.14)]),
   plushWhale: e('surface', [3.17, 2.34, 4.36], [box('plush', -0.2, 0, -0.2, 0.2, 0.27, 0.32)]),

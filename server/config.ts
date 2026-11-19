@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { MAP_IDS } from '../src/game/levels';
 import { BALANCE, validateBalance, type Balance, type RoomsBalance } from '../src/shared/balance';
+import { formatLayoutSeed, parseLayoutSeed } from '../src/shared/layout';
 import type { LagConfig } from './lag';
 import { parseOriginPolicy, type OriginPolicy } from './origin';
 
@@ -77,6 +78,24 @@ export function parseMapPin(raw: string | undefined, ids: readonly string[], war
   return null;
 }
 
+/**
+ * LAYOUT_SEED env (ADR 0007 §1.3, variety.md §2): pins every match's layout seed on every map (`baseline` or 0 = the
+ * baseline layout; decimal uint32 or 0x hex). A pin is never re-rolled by repeat avoidance. Empty = per-match seeds.
+ * An invalid value logs one warning and is ignored.
+ */
+export function parseLayoutSeedEnv(raw: string | undefined, warn: (msg: string) => void): number | null {
+  if (raw === undefined || raw.trim() === '') return null;
+  const seed = parseLayoutSeed(raw);
+  if (seed === null) {
+    warn(`[server] LAYOUT_SEED="${raw.trim().slice(0, 40)}" is not a uint32, 0x hex or "baseline"; ignored, layouts vary per match`);
+  }
+  return seed;
+}
+
+/** Log form of a layout pin. */
+export const describeLayoutPin = (seed: number | null): string =>
+  seed === null ? 'per match' : seed === 0 ? `baseline (${formatLayoutSeed(0)})` : `pinned ${formatLayoutSeed(seed)}`;
+
 export interface ServerConfig {
   port: number;
   host: string | undefined;
@@ -94,6 +113,8 @@ export interface ServerConfig {
   maxConnections: number;
   /** MAP env pin (validated), else null. */
   mapPin: string | null;
+  /** M2c LAYOUT_SEED env pin (validated; 0 = baseline), else null = a fresh layout every match. */
+  layoutSeed: number | null;
   /** Max sockets per remote address (0 = unlimited). */
   maxConnsPerIp: number;
   /** WebSocket upgrade Origin policy from ALLOWED_ORIGINS (server/origin.ts). Empty: `self` in production, `*` in dev. */
@@ -122,6 +143,7 @@ export function readConfig(
     maxRooms,
     maxConnections: num(env, 'MAX_CONNECTIONS', maxRooms * balance.match.maxPlayers + 32, 1, 1_000_000),
     mapPin: parseMapPin(env.MAP, levelIds(), warn),
+    layoutSeed: parseLayoutSeedEnv(env.LAYOUT_SEED, warn),
     maxConnsPerIp: num(env, 'MAX_CONNS_PER_IP', 128, 0, 100_000),
     originPolicy: parseOriginPolicy(env.ALLOWED_ORIGINS, production),
     trustProxy: env.TRUST_PROXY === '1' || env.TRUST_PROXY === 'true',

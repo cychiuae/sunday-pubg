@@ -348,7 +348,7 @@ describe('glass in combat (maps.md 15) and grenades (maps.md 15-16)', () => {
 
 describe('indoor zone (maps.md 12-14)', () => {
   const office = roomMap([], [], { floor: { minX: -117, minZ: -72, maxX: 117, maxZ: 72 }, walls: [], zoneCenters: [{ x: 60, z: 20 }, { x: -110, z: 0 }] });
-  it('12: radius 140 covers every floor corner at t = 0; phase end radii and times match maps.md', () => {
+  it('12: radius 140 covers every floor corner at t = 0; phase end radii match maps.md, end times match balance', () => {
     const z = createZone(OFFICE, office, createRng(1), 0);
     expect(z.state.radius).toBe(140);
     expect(z.state.center).toEqual({ x: 0, z: 0 });
@@ -356,7 +356,9 @@ describe('indoor zone (maps.md 12-14)', () => {
     const radii: number[] = [];
     const ends: number[] = [];
     let last = z.state.phaseIndex;
-    for (let t = 0; t <= 530_000; t += 100) {
+    const z0 = OFFICE.zone;
+    const totalMs = (z0.phases.reduce((acc, p) => acc + p.waitSeconds + p.shrinkSeconds, 0) + z0.finalCollapseDelaySeconds + z0.finalCollapseSeconds) * 1000;
+    for (let t = 0; t <= totalMs + 10_000; t += 100) {
       updateZone(z, OFFICE, office, createRng(2), t);
       if (z.state.phaseIndex !== last) {
         radii.push(z.state.radius);
@@ -365,7 +367,13 @@ describe('indoor zone (maps.md 12-14)', () => {
       }
     }
     [95, 70, 50, 30, 15, 5].forEach((r, i) => expect(Math.abs(radii[i]! - r)).toBeLessThanOrEqual(0.1));
-    [120, 225, 320, 390, 440, 480].forEach((s, i) => expect(ends[i]).toBe(s * 1000));
+    // Phase end times from balance (cumulative wait + shrink), on the 100 ms sampling grid.
+    let tEnd = 0;
+    OFFICE.zone.phases.forEach((p, i) => {
+      tEnd += p.waitSeconds + p.shrinkSeconds;
+      expect(ends[i]).toBe(Math.ceil((tEnd * 1000) / 100) * 100);
+    });
+    expect(ends.length).toBeGreaterThanOrEqual(OFFICE.zone.phases.length);
     expect(z.closed).toBe(true);
   });
 
@@ -382,7 +390,7 @@ describe('indoor zone (maps.md 12-14)', () => {
       };
       check(prev.c);
       let idx = z.state.phaseIndex;
-      for (let t = 0; t <= 480_000; t += 5000) {
+      for (let t = 0; t <= OFFICE.zone.phases.reduce((acc, p) => acc + (p.waitSeconds + p.shrinkSeconds) * 1000, 0); t += 5000) {
         updateZone(z, OFFICE, office, rng, t);
         if (z.state.phaseIndex !== idx && z.state.phaseIndex < OFFICE.zone.phases.length) {
           idx = z.state.phaseIndex;

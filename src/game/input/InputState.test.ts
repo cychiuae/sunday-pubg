@@ -340,3 +340,19 @@ describe('M2b input mapping', () => {
     expect(s.pitchLimits.max).toBeLessThan(10);
   });
 });
+
+describe('M2c: T = switch sight (scopes.md)', () => {
+  it('KeyT latches cycleScope for exactly one input; absent otherwise; latchCycleScope does the same', () => {
+    const s = new InputState(0.002);
+    expect(DEFAULT_KEY_BINDINGS.KeyT).toBe('cycleScope');
+    expect(s.sample(1, DT).input.cycleScope).toBeUndefined();
+    s.keyDown('KeyT');
+    expect(s.sample(2, DT).input.cycleScope).toBe(true);
+    expect(s.sample(3, DT).input.cycleScope).toBeUndefined();
+    s.latchCycleScope();
+    s.clearEdges();
+    expect(s.sample(4, DT).input.cycleScope).toBeUndefined();
+    s.latchCycleScope();
+    expect(s.sample(5, DT).input.cycleScope).toBe(true);
+  });
+});

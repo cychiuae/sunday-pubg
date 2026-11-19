@@ -74,6 +74,8 @@ export function sanitizeInput(input: PlayerInput, lastSeq: number): PlayerInput 
     pitch: clamp(input.pitch, PITCH_MIN, PITCH_MAX),
     ads: input.ads === true,
     stanceToggle,
+    // M2c: the T edge, coerced like `ads` (absent = false).
+    cycleScope: input.cycleScope === true,
   };
 }
 
@@ -124,6 +126,7 @@ export class WindowCounter {
  * held axes/aim (and M2a `ads`) come from `newer`; edge buttons and `fire` are OR-ed so a press is never lost; a slot
  * selection survives unless `newer` selects another one. M2a `stanceToggle` works like `selectSlot`: the later
  * request wins, an older one survives a null (the same "later press wins" rule the client applies to C and Z).
+ * M2c `cycleScope` (T) is OR-ed like the other edges.
  */
 export function mergeInputs(older: PlayerInput, newer: PlayerInput): PlayerInput {
   return {
@@ -133,6 +136,8 @@ export function mergeInputs(older: PlayerInput, newer: PlayerInput): PlayerInput
     reload: older.reload || newer.reload,
     interact: older.interact || newer.interact,
     useHeal: older.useHeal || newer.useHeal,
+    // M2c: an edge like the buttons above; a T press is never lost to a merge.
+    cycleScope: older.cycleScope === true || newer.cycleScope === true,
     selectSlot: newer.selectSlot !== -1 ? newer.selectSlot : older.selectSlot,
     stanceToggle: newer.stanceToggle ?? older.stanceToggle,
   };

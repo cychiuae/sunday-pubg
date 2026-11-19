@@ -32,7 +32,7 @@ describe('inventory rules', () => {
     expect(inv.activeSlot).toBe(0);
     const r2 = applyPickup(inv, none(), { item: 'rifle', qty: 1, mag: 7 }, b);
     expect(r2).toMatchObject({ kind: 'taken', slot: 1, activeChanged: false });
-    expect(inv.slots[1]).toEqual({ weapon: 'rifle', mag: 7 });
+    expect(inv.slots[1]).toEqual({ weapon: 'rifle', mag: 7, level: 1, scope: null });
   });
 
   it('full inventory: replaces the held weapon and drops it with its mag (AT10)', () => {
@@ -44,7 +44,7 @@ describe('inventory rules', () => {
     inv.activeSlot = 1;
     const r = applyPickup(inv, none(), { item: 'shotgun', qty: 1, mag: 5 }, b);
     expect(r).toMatchObject({ kind: 'taken', slot: 1, dropped: { weapon: 'smg', mag: 11 }, activeChanged: true });
-    expect(inv.slots[1]).toEqual({ weapon: 'shotgun', mag: 5 });
+    expect(inv.slots[1]).toEqual({ weapon: 'shotgun', mag: 5, level: 1, scope: null });
     // Holding fists with both full: replaces slot 1 (index 0) and equips it.
     inv.activeSlot = 2;
     const r2 = applyPickup(inv, none(), { item: 'rifle', qty: 1, mag: 25 }, b);
@@ -121,7 +121,7 @@ describe('inventory rules', () => {
     inv.heals.medkit = 1;
     inv.grenades = 2;
     expect(deathDrops(inv, { vest: { tier: 2, durability: 30 }, helmet: { tier: 1, durability: 30 } }, b)).toEqual([
-      { item: 'pistol', qty: 1, mag: 4 },
+      { item: 'pistol', qty: 1, mag: 4, level: 1, scope: null },
       { item: 'ammo_shell', qty: 7, mag: null },
       { item: 'medkit', qty: 1, mag: null },
       { item: 'grenade', qty: 2, mag: null },

@@ -1,18 +1,22 @@
-# Architecture (M1 "First Playable" + M2a "Arsenal & Stance" + M2b "Office, Drop & Rooms")
+# Architecture (M1 "First Playable" + M2a "Arsenal & Stance" + M2b "Office, Drop & Rooms" + M2c "Fresh Every Match & Bigger Arsenal")
 
 Owner: tech-lead. Decisions: [ADR 0001 stack and netcode](../adr/0001-stack-and-netcode.md),
 [ADR 0002 M1 netcode and boundary clarifications](../adr/0002-m1-netcode-and-boundary-clarifications.md),
 [ADR 0003 low-health signal, typed bot tuning, graphics status](../adr/0003-low-health-signal-and-typed-bot-tuning.md),
 [ADR 0004 M2a stance, ADS, grenades, two-piece armor](../adr/0004-m2a-stance-ads-grenades-armor.md) (+ D2 addendum),
 [ADR 0005 M2b maps, indoor office, per-map balance, carrier drop](../adr/0005-m2b-maps-indoor-office-and-carrier-drop.md),
-[ADR 0006 M2b rooms](../adr/0006-m2b-rooms.md).
-**M2a build contract: §14. M2b build contract: §15** (each supersedes older sections where they disagree).
-Latest review: [REVIEW-M2b.md](REVIEW-M2b.md) (earlier: [REVIEW-M2a.md](REVIEW-M2a.md), [REVIEW-M1.md](REVIEW-M1.md)).
+[ADR 0006 M2b rooms](../adr/0006-m2b-rooms.md),
+[ADR 0007 M2c layouts, levels, melee, rockets, smoke, scopes, snapshot rows](../adr/0007-m2c-layouts-levels-melee-rockets-smoke-scopes.md).
+**M2a build contract: §14. M2b build contract: §15. M2c build contract: §16** (each supersedes older sections where they
+disagree).
+Latest review: [REVIEW-M2c.md](REVIEW-M2c.md) (earlier: [REVIEW-M2b.md](REVIEW-M2b.md), [REVIEW-M2a.md](REVIEW-M2a.md), [REVIEW-M1.md](REVIEW-M1.md)).
 Contracts in code (the source of truth when this doc and the code disagree):
 [`src/shared/types.ts`](../../src/shared/types.ts), [`src/shared/events.ts`](../../src/shared/events.ts),
 [`src/shared/contracts.ts`](../../src/shared/contracts.ts), [`src/shared/balance.ts`](../../src/shared/balance.ts),
 [`src/shared/constants.ts`](../../src/shared/constants.ts), [`src/shared/math.ts`](../../src/shared/math.ts),
-[`src/main.ts`](../../src/main.ts).
+[`src/main.ts`](../../src/main.ts); M2c: [`detmath.ts`](../../src/shared/detmath.ts),
+[`layout.ts`](../../src/shared/layout.ts), [`smoke.ts`](../../src/shared/smoke.ts),
+[`rocket.ts`](../../src/shared/rocket.ts).
 
 ## 1. Overview
 
@@ -53,14 +57,14 @@ Contracts in code (the source of truth when this doc and the code disagree):
 | Path | Owner | Contents |
 |---|---|---|
 | `src/main.ts` | tech-lead | Client composition root and rAF loop |
-| `src/shared/*.ts` | tech-lead | `types`, `events`, `contracts`, `balance`, `constants`, `math`, M2b `maps` |
+| `src/shared/*.ts` | tech-lead | `types`, `events`, `contracts`, `balance`, `constants`, `math`, M2b `maps`, M2c `detmath`, `layout`, `smoke`, `rocket` |
 | `src/shared/kits/` | graphics-designer | M2b: pure-data prop kits (`PropKit`, no three.js), e.g. `office.ts` `OFFICE_KIT` |
 | `src/shared/sim/` | game-developer | Pure deterministic sim: terrain, colliders, movement, combat, inventory, loot, zone, match, bots, `World` |
 | `src/shared/protocol/` | network-engineer | Wire message types, encode/decode, validation |
 | `server/` | network-engineer | ws server, static `dist/` in production, room, tick loop |
 | `src/net/` | network-engineer | `NetClient`: socket, clock sync, snapshot buffer, interpolation |
 | `src/game/` (except `levels/`) | game-developer | `ClientGame`: input capture, prediction/reconciliation, camera yaw/pitch, spectate, view building, server→bus translation |
-| `src/game/levels/` | level-designer | Map data + `getMap(id)`, `DEFAULT_MAP_ID` |
+| `src/game/levels/` | level-designer | Map data + `getMap(id)`, `DEFAULT_MAP_ID`; M2c `variety/*.json` and `layout/` (`buildMatchLayout`, `applyLayout`, `pickVariants`, LV tests) |
 | `src/render/` (except `procedural/`) | graphics-engineer | `Renderer`, scene, terrain mesh, water, sky, entity views, animation, VFX, camera |
 | `src/render/procedural/` | graphics-designer | Model factories (characters, props, weapons, loot), toon materials |
 | `src/ui/` | ui-ux-designer | DOM/CSS HUD and menus, settings persistence |
@@ -80,6 +84,7 @@ An arrow means "may import". Anything not listed is forbidden. `type`-only impor
 | `src/shared/kits/` (M2b) | `src/shared/types.ts` (types only). Imported by `src/game/levels/` and `src/render/`; **never by the sim**, which reads `map.kit` |
 | `src/shared/sim/` | `src/shared/*.ts`, `src/shared/sim/`. **Never** DOM, `three`, audio, `src/net`, `src/game`, `server`. No `Math.random`, `Date.now`, `performance.now` (use `Rng` from `math.ts` and world time). |
 | `src/shared/protocol/` | `src/shared/*.ts` (types only) |
+| `src/game/levels/` (M2c `layout/`) | `src/shared/*.ts`, `src/shared/kits/`, `src/game/levels/**`. Never `three`, DOM, `src/shared/sim/`. The generator follows the determinism rules of ADR 0007 §1.4 (no `Math.sin/cos/atan2/hypot` in decisions; `detmath.ts`) |
 | `server/` | `src/shared/**`, `src/game/levels/`, `src/content/strings/`, `ws`, node built-ins |
 | `src/net/` | `src/shared/**` (including `protocol/`) |
 | `src/game/` | `src/shared/**` (not `protocol/`), `src/game/**`. It sees the network only through `INetClient`. |
@@ -364,6 +369,9 @@ and `Renderer` keep a `BALANCE` fallback until their owners remove it; main.ts a
 
 60 fps on a mid-range integrated GPU at 1080p (16 players, about 300 props); initial download < 15 MB (JS < 1.5 MB gzip);
 time-to-playable < 10 s; snapshot < 8 KB per client without loot; server tick < 5 ms at 16 players.
+M2c (ADR 0007 §9): the 8 KB full-snapshot budget holds for 24 players, 16 grenades, 16 rockets and 12 smoke clouds
+(compact rows, 7.8 KB measured); the 16-player M2b worst case stays < 6.5 KB and the worst delta < 4 KB. Office nav
+build per match ≤ 250 ms on the server (logged); client layout build ≤ 50 ms; island chunk merge ≤ 120 ms.
 
 ## 12. Phase B build contract
 
@@ -1032,3 +1040,166 @@ client: NetClient(hello, room msgs) ─▶ ClientGame ─▶ HudView.rooms / roo
 - `main.ts`: forward the new `UiCallbacks` to `IClientGame`, pass `balance` to `AudioEngine`, and call
   `audio.setGrenades` (the edits pending from REVIEW-M2a).
 - The D2 review of M2b.
+
+## 16. M2c build contract ("Fresh Every Match & Bigger Arsenal")
+
+Decisions: [ADR 0007](../adr/0007-m2c-layouts-levels-melee-rockets-smoke-scopes.md). Specs: `docs/design/systems/
+{levels,melee,rpg,smoke,scopes,layout}.md` and the M2c parts of `combat/loot/armor/grenades/maps.md`;
+`docs/design/levels/variety.md`; `docs/art/M2c.md`; `docs/ui/M2c.md`; `docs/audio/M2c.md`; `docs/narrative/M2c.md`;
+`balance.json` `_m2cPending`. Same rules as §12-§15: edit only your files; ask tech-lead for shared changes.
+
+**The M2c C-gate was done on 2026-11-18** (ADR 0007 §10): every "At the C-gate" item in §16.1 is now in the code,
+`PROTOCOL_VERSION` is 4, `M2C_BALANCE_REQUIRED` is true, SimEvent `kind`/`source` are required, `ITEM_IDS` includes
+melee and scopes, and the M2c `Balance` blocks are required. Residue: game-developer, 10 tsc errors in
+`src/game/simEvents.test.ts` (6), `src/game/ClientGame.test.ts` (3), `src/game/ClientGame.m2b.test.ts` (1): event
+literals need `kind: 'grenade'` and `source: 'grenade'`.
+
+**M2c is closed (2026-11-18, [REVIEW-M2c](REVIEW-M2c.md) final verdict: approved).** MF1 measured: office nav-walk
+stuck rate over 200 layout seeds pooled 0.25 %, worst seed 4.39 % (gate < 2 % / ≤ 5 %). MF2: Chromium and Node
+agree on 24 map/seed pairs (`tests/e2e/m2c-layout.spec.ts`), and level data uses deterministic trig.
+`LAYOUT_FORMAT_VERSION` is 2 (BUG-015 data change).
+
+**State of the tree before the gate:** the whole M2c contract was in `src/shared/` and optional (field blocks and `M2c*`
+addition types). `npx tsc --noEmit -p .` is clean; `npx vitest run` is green (88 files, 1702 tests, incl.
+`src/shared/m2c.test.ts`). `validateBalance` accepts `balance.json` both before and after the `_m2cPending` merge.
+
+### 16.1 What is in the shared contract now
+| Area | Now | At the C-gate (tech-lead, one commit; ADR 0007 §10) |
+|---|---|---|
+| New ids (`types.ts`) | `ItemLevel`, `MeleeId`, `ScopeId`, `LookId`, `RocketId`, `SmokeId`, `PaneId`; `M2c*Add` types and the `M2c*` unions (`M2cWeaponId`, `M2cGunId`, `M2cAmmoId`, `M2cThrowableId`, `M2cArmorId`, `M2cHeldId`, `M2cItemId`, `M2cSightType`, `M2cDeathCause`, `M2cFailedAction`, `M2cActionFailReason`); `M2C_*_IDS` lists, `M2C_ARMOR_PIECES`, `MELEE_SLOT`, `THROWABLE_SLOT`, `isMeleeId`, `isScopeId`, `isItemLevel` | live unions and lists widen; `GunId` excludes melee; `ArmorTier = ItemLevel` |
+| State | `PlayerM2cFields` (`weaponLevel`, `sight`), `LocalM2cFields` (`melee`, `smokes`, `selectedThrowable`, `spareScope`, `scopeSwapRemainingMs`), `MeleeSlotState`, `RocketState`, `SmokeCloudState`; optional `WeaponSlotState.level/scope`, `LootState.level/scope`, `GrenadeState.kind`, `WorldSnapshot.rockets/smokes/brokenPanes`, `WelcomeInfo.layout`, `RoomState.map.layout`, `PlayerInput.cycleScope`, `MovementInput.adsSpec`, `LootSpawn.group/guarantee`, placement `variant` | blocks merged and required; `kind`, `rockets`, `smokes`, `brokenPanes`, `welcome.layout` required. `WeaponSlotState.level/scope`, `LootState.level/scope`, `cycleScope`, `adsSpec` stay optional |
+| Layout (`types.ts`, `layout.ts`, `detmath.ts`) | `MatchLayout`, `MatchLayoutRef`, `LayoutPick`, `DecorPlacement`; `LAYOUT_FORMAT_VERSION` (2), `LAYOUT_SALT`, `layoutSeedFor`, `parseLayoutSeed`, `formatLayoutSeed`, `layoutHash`, `countRepeatedPicks`; `detSin/detCos`, step helpers, `roundMm/roundMrad`, `fnv1a32`, `mixSeed`, `streamSeed`; arbitrary angles `sinRad/cosRad/atanDet/atan2Det/hypot2` (final review; `wallFrame` uses them) | none |
+| Geometry (`smoke.ts`, `rocket.ts`, `maps.ts`) | `smokeRadiusAt`, `smokeCenter`, `smokeGoneAt`, `pointInSmoke`, `segmentBlockedBySmoke`; `rocketPosAt`, `rocketVelAt`; `glassPanes`, `GLASS_PANE_MAX_WIDTH` | none |
+| Sim events | `M2cSimEvent` (`meleeSwing`, `meleeHit`, `rocketFired`, `rocketDud`, `smokeDeployed`, `glassBroken`, `scopeChanged`); optional `damage.weapon/weaponLevel`, `kill.weaponLevel/direct`, `pickup.level/scope`, `reloadStart.rounds`, `weaponSwitch.level`, `grenade*.kind`, `explosion.source/direct/airburst` | `SimEvent += M2cSimEvent`; `kind`, `source` required |
+| GameEvents | the 8 new events and the payload fields of ADR 0007 §8 | `kind`, `source`, `playerKilled.weaponLevel`, `interactPromptChanged.level`, `mapChanged.layout/look` required |
+| Views (`contracts.ts`) | `RocketView`, `SmokeCloudView`, `MeleeSwingView`; optional M2c fields on `FrameView`, `PlayerView`, `GrenadeView`, `ViewmodelView` (+ actions `swing`, `scopeSwap`, `cycle`), `HudSlotView`, `HudLocalView`, `HudCookView`, `HudView`, `HudMinimapView`, `RoomView`; `IAudio.setRockets/setSmokes`; `UiCallbacks.onCycleScope`; `IClientGame.cycleScope`; `ClientGameDeps.buildLayout` | the non-P2 view fields required |
+| Balance (`balance.ts`) | types `ThrowableBalance`, `BlastBalance`, `SmokeBalance`, `SmokeCloudBalance`, `MeleeBalance`, `RpgBalance`, `RocketBalance`, `LevelsBalance`, `ScopesBalance`, `LayoutBalance`, `GuaranteedWeaponBalance`, `Bot{Melee,Rpg,Smoke,Scopes}Balance`; validator rules (ADR 0007 §11); helpers `weaponBalance`, `levelMultiplier`, `effectiveWeapon`, `rocketBlastMaxDamage`, `compatibleScopes`, `scopeFits`, `sightRank`, `effectiveSight`, `hasScopeOverlay`, `armorBalanceM2c`; `sightOf` accepts `'smoke'` | `M2C_BALANCE_REQUIRED = true` (needs merge step 1 first) |
+| Protocol | none | `PROTOCOL_VERSION = 4`; after the review (SF4): `WireSnapshot.rocketsDelta/smokesDelta: RecordDelta<T> { add, remove }` (ADR 0007 §9.2) |
+
+### 16.2 C-gate trial (2026-11-18): the per-owner checklist
+The flip in a scratch copy gave **126 tsc errors in 38 files, none in `tests/`**. Make each file compile against the
+widened unions before the gate: key exhaustive tables by the `M2c*` names, add the new ids, fill the new required
+fields (producers may write them already; they are optional today).
+
+| Owner | Files (errors) | What breaks |
+|---|---|---|
+| game-developer (49) | `game/hudBuilder.ts` 8, `game/simEvents.ts` 6, `sim/World.ts` 4, `game/testFixtures.ts` 4, `game/ClientGame.ts` 4, `game/actionPrediction.test.ts` 3, `sim/movement.ts` 2, `game/hudBuilder.test.ts` 2, `game/grenades.test.ts` 2, `game/ClientGame.test.ts` 2, `game/ClientGame.m2b.test.ts` 2, `game/ads.ts` 2, `sim/loot.ts` 1, `sim/inventory.ts` 1, `sim/combat.ts` 1, `sim/bots.ts` 1, `game/viewmodel.test.ts` 1, `game/grenades.ts` 1, `game/derived.ts` 1, `game/derived.test.ts` 1 | `ammo_rocket` in `Record<AmmoId>` literals; `PlayerM2cFields`/`LocalM2cFields` in snapshot builders and fixtures; `GrenadeState.kind`, `GrenadeView.kind`, `explosion.source`; `HudSlotView`/`HudLocalView`/`FrameView`/`HudView` M2c fields; `mapChanged.layout/look`; `HeldId` now includes `'smoke'` (`sightOf` already accepts it); `Record<WeaponId>` tables (`DROP_TIERS` etc.) |
+| audio-designer (38) | `audio/AudioDirector.test.ts` 24, `audio/AudioEngine.test.ts` 11, `audio/soundMap.ts` 2, `audio/fuseTicks.test.ts` 1 | event fixtures without `kind`/`source`; `GrenadeView.kind`; `impactCue`/weapon tables keyed by `WeaponId` |
+| network-engineer (25) | `protocol/messages.ts` 11, `net/NetClient.test.ts` 5, `protocol/testing.ts` 4, `protocol/m2a.test.ts` 2, `protocol/messages.test.ts` 1, `server/GameRoom.ts` 1, `server/tools/measure-snapshot.ts` 1 | the enum lists (`WEAPONS`, `HELD`, `AMMOS`, `ITEMS`, `CAUSES`, `FAILED_ACTIONS`, `FAIL_REASONS`), `PLAYER_FIELDS`/`LOCAL_FIELDS` (new block keys), `EVENT_CHECKS` (7 new types), `isTierOrNone`/`isArmorTier` (tier 4), `WelcomeInfo.layout` |
+| ui-ux-designer (7) | `ui/logic.ts` 3, `ui/icons.ts` 3, `ui/rooms.ts` 1 | `Record<IconId>` and `ARMOR_TIER_COLOUR` (tier 4), weapon tables, `HudMinimapView.layout` |
+| graphics-engineer (7) | `render/vfx/Vfx.ts` 3, `render/viewmodelAnim.ts` 2, `render/viewmodelAnim.test.ts` 1, `render/characterPose.ts` 1 | `FLASH_SCALE`/`TRACER_WIDTH` `Record<WeaponId>`, `VM_RECOIL_ROLL`/`VM_MAG_POINT` `Record<GunId>`, armor tier 4 colours |
+
+Not in the trial (runtime, not types): `validateBalance` with `M2C_BALANCE_REQUIRED = true` needs the merged
+balance (the trial validated the merged file: OK). **Gate procedure:** each owner reports "C-gate ready"; the
+game-designer has done merge step 1; tech-lead flips; owners fix residue the same day.
+
+### 16.3 Data flow (M2c additions)
+```
+server lock: resolveMapChoice ─▶ worldSeed = mixSeed(roomSeed, serial) ─▶ layoutSeed (LAYOUT_SEED pin, else
+   layoutSeedFor(worldSeed, 0..8) with pickVariants repeat avoidance) ─▶ buildMatchLayout(base, seed, {decor:false})
+   ─▶ applyLayout ─▶ balanceForMap ─▶ prepareMap(applied) (LRU 4; nav timed) ─▶ createWorld({ map: applied, runtime })
+   ─▶ welcome { mapId, layout: {seed, version, hash, look} } + RoomState.map.layout ─▶ log line (variety.md §2.3)
+client welcome: getMap(base) ─▶ deps.buildLayout(base, seed) ─▶ version/hash check ─▶ prepareMap(applied, {nav:false})
+   ─▶ bus mapChanged { map: applied, layout, look, balance, zoneTheme } ─▶ Renderer (scene + look + decor), Ui (minimap,
+   look line), Audio (mood) — all before the carrier
+tick: World ─▶ snapshot (players as rows; rockets/smokes/brokenPanes carried forward while unchanged; a changed
+   rockets/smokes list as rocketsDelta/smokesDelta {add, remove} when smaller, else whole) + M2c events
+ClientGame: rockets ─▶ rocketPosAt ─▶ FrameView.rockets / IAudio.setRockets; smokes ─▶ smokeRadiusAt ─▶ FrameView.smokes /
+   IAudio.setSmokes; segmentBlockedBySmoke ─▶ PlayerView.smokeHidden, localHitConfirmed.obscured; pointInSmoke ─▶
+   HudView.inSmoke; brokenPanes ─▶ MovementContext (prediction) + FrameView.brokenPanes
+```
+
+### 16.4 New files and boundaries (so parallel builders do not collide)
+| Owner | New or main files |
+|---|---|
+| tech-lead | `src/shared/{detmath,layout,smoke,rocket}.ts`, `src/shared/m2c.test.ts`, `src/main.ts` wiring |
+| level-designer | `src/game/levels/layout/{index,island,office,grammar}.ts` + `layout.test.ts` (LV1-LV16), `variety/*.json`, office glass splits in `office.ts` |
+| game-developer, sim stream (G-sim) | **sole owner of `sim/World.ts`**; new `sim/{blast,melee,rockets,clouds,glass,scopes,levels}.ts` (+ tests); `inventory.ts`, `loot.ts`, `combat.ts`, `grenade.ts`, `movement.ts`, `colliders.ts`, `bots.ts`, `tools/matchReport.ts` |
+| game-developer, client stream (G-client) | `src/game/**` (ClientGame, hudBuilder, simEvents, derived, prediction, actionPrediction, viewmodel, grenades, ads, camera, testFixtures); new `src/game/{layoutClient,rocketsView,smokeView}.ts` |
+| network-engineer | `src/shared/protocol/{messages,delta}.ts`, new `src/shared/protocol/rows.ts`, `server/{GameRoom,app,config}.ts`, `server/tools/measure-snapshot.ts`, `src/net/` |
+| graphics-designer | `src/render/procedural/{melee,scopes,smokeCan,rocket,decor,levelCollar}.ts`, weapons/armor factories, `src/shared/kits/office.ts` (new kinds), the decor kind table |
+| graphics-engineer | `src/render/{RocketLayer,SmokeLayer,GlassLayer,DecorLayer,looks}.ts`, `Renderer.ts`, `PropLayer.ts` (chunk merge), `LootLayer.ts`, `PlayerViews.ts`, `characterPose.ts`, `vfx/`, `docs/tech/RENDERING.md` |
+| ui-ux-designer | the files in UI M2c §15 |
+| audio-designer | `src/audio/**` incl. new `RocketLayers.ts`, smoke hiss |
+| narrative-designer | `src/content/strings/en.json` |
+| qa-tester | `tests/**`, `docs/qa/**` |
+
+The two game-developer streams may run as two agents: G-sim never edits `src/game/`, G-client never edits
+`src/shared/sim/` (it calls the sim through the existing exports and `src/shared/*.ts`).
+
+### 16.5 Build plan by phase and owner
+**Phase 1: gate prep and independent work (all in parallel; needs only this contract).**
+- **game-designer:** merge `_m2cPending` step 1 now (every new key and block: `combat.throwableCycleMs`, `levels`,
+  the six new `weapons.*`, `items.{ammo_rocket,vest_4,helmet_4,smoke}`, `loot.guaranteedWeapon`, `scopes`, `layout`,
+  `bots.{weaponPrefs.revolver,weaponPrefs.dbshotgun,melee,rpg,smoke,scopes}`, `bots.personalities.*.
+  smokeChanceMultiplier`, `clientFeel.fpRecoil.{revolver,dbshotgun,rpg}`, `maps.office.layout`,
+  `maps.office.loot.guaranteedWeapon`). **Keep for step 2:** `loot.tiers.*`, `maps.office.loot.tiers.*`,
+  `bots.eagernessCurve`. Delete only the merged parts of `_m2cPending`.
+- **game-developer (gate prep, 49 errors):** §16.2 list; fill `PlayerM2cFields` (`weaponLevel` 1 for guns else null,
+  `sight` = `effectiveSight`), `LocalM2cFields` (`melee: null`, `smokes: 0`, `selectedThrowable: 'grenade'`,
+  `spareScope: null`, `scopeSwapRemainingMs: 0`), `GrenadeState.kind`, event `kind`/`source`, empty `rockets`/
+  `smokes`/`brokenPanes`, and the HUD/Frame fields with M2b-equivalent values.
+- **network-engineer (N1):** the row codec and carry-forward rules (ADR 0007 §9), the M2c validators behind a
+  `M2C_FIELDS_REQUIRED` switch (the M2b `gated()` pattern), `cycleScope` decode (absent = false), the new event checks,
+  the three budget tests, `measure-snapshot.ts` rows vs objects; §16.2 list (25 errors). `LAYOUT_SEED` in
+  `server/config.ts` via `parseLayoutSeed` (invalid: warn once).
+- **ui-ux-designer, audio-designer, graphics-engineer:** their §16.2 lists (7 / 38 / 7).
+- **level-designer (L1):** the generator, `pickVariants`, LV1-LV12 and LV15-LV16 tests over 202 seeds per map,
+  golden hashes for 3 pinned seeds per map; split the office glass runs into panes ≤ `GLASS_PANE_MAX_WIDTH`.
+- **graphics-designer (A1):** models (knife, machete, paddle, revolver, dbshotgun, rpg, rocket, smoke can, four
+  scopes with `SCOPE_GEOMETRY` and gun rails, vest_4, helmet_4, level collar), the decor table, new office kit kinds,
+  icons. No dependency on the gate.
+- **narrative-designer:** reconcile keys with UI M2c §11 and §16.9 (the director's list) and with `scopePouchFull`.
+
+**C-gate (tech-lead):** after every owner reports ready and merge step 1 is in. One commit: ADR 0007 §10 flips,
+`PROTOCOL_VERSION = 4`, `M2C_BALANCE_REQUIRED = true`.
+
+**Phase 2: features (parallel streams; dependencies in brackets).**
+- **G-sim** (in this order; each with the spec's acceptance tests in Vitest):
+  1. levels: `WeaponSlotState.level`, loot level rolls from `levels.lootTiers`, guaranteed-weapon points, upgrade swap,
+     damage and reload via `effectiveWeapon`, kill/damage/pickup level fields, bots' value multiplier;
+  2. blast extraction (`sim/blast.ts`) shared by frags and rockets;
+  3. glass: `paneId` on colliders from `glassPanes`, a per-World broken set used by movement, raycasts, grenade flight
+     and blast LOS, exported so `MovementContext` (client) can take the set too;
+  4. melee (swing state, hit check, knockback, glass break, events, cause `melee`);
+  5. rockets (`sim/rockets.ts` with `rocketPosAt`, sweep, dud, airburst, events order of ADR 0007 §4);
+  6. smoke and the throwable slot (`sim/clouds.ts`, `maxActive`, water rule; cycle via `selectSlot` 3);
+  7. scopes (pickup rules, pouch, T switch, `scopeChanged`, `adsSpec` in `toMovementInput`);
+  8. World takes the applied map; `prepareMap` per layout; nav timing exposed for the server log;
+  9. bots: melee, rpg, smoke throws, scopes, `segmentBlockedBySmoke` in every LOS test, `grenadeDanger` frags only;
+  10. `matchReport --layout-seed / --layout-seeds N` and the LV14 stuck-rate run [L1].
+- **G-client** [the matching G-sim step for each item]: `buildLayout` dep, version/hash check, `mapChanged` every
+  match, runtime cache per layout; prediction of the throwable cycle, melee swing (`meleeRecovery`, `meleeSwing` local
+  event) and the predicted sight on T; `MovementContext` broken panes; `FrameView.rockets/smokes/brokenPanes/look`,
+  `PlayerView.smokeHidden/swing`, `ViewmodelView` level/sight/actions; every HUD field of ADR 0007 §8; the SimEvent →
+  GameEvent translation including `obscured`; `KeyT` → `cycleScope`.
+- **network-engineer (N2)** [L1, G-sim 8]: the lock flow of §16.3 (layout pick with repeat avoidance, applied map,
+  per-layout `prepareMap` cache, timing log and warning), `welcome.layout`, `RoomState.map.layout`, the log line, the
+  NETCODE.md update and a load run with layouts.
+- **graphics-engineer** [A1; G-client fields]: look presets (`looks.ts`, art §10), island chunk merge with decor and
+  `variant`, office new kinds, `lightsOn`; `SmokeLayer` (radius from `SmokeCloudView`, same on every quality), name tag
+  and spectate outline hiding from `smokeHidden`; `RocketLayer` + trail + explosion variants; glass shatter and broken
+  mask; melee and RPG poses (1P and 3P); scopes on the rail, level collars, loot markers by level; LV13b budgets on the
+  worst seed (office ≤ 150 calls with 12 players and 4 clouds).
+- **ui-ux-designer** [G-client fields]: UI M2c §1-§10 and §16, AC M2C-UI-01..42.
+- **audio-designer** [G-client events]: audio M2c §2-§8, `setRockets`, `setSmokes`, look moods.
+- **game-designer:** merge step 2 when G-sim reports levels, melee, rpg, smoke and scopes spawnable; then the pacing
+  runs (`matchReport --matches 30 --variant both`, island and office, with layout seeds).
+- **tech-lead:** `main.ts`: pass `buildLayout`, forward `onCycleScope`, call `audio.setRockets/setSmokes`.
+
+**Phase 3:** qa-tester maps every spec acceptance list (levels 1-14, melee 1-14, rpg 1-13, smoke 1-14, scopes 1-12,
+layout 1-8, grenades 20-26, LV1-LV17, UI M2C-UI-01..42, audio §12) to Vitest, Playwright or manual steps, plus an
+E2E match with `LAYOUT_SEED` pinned on each map. Then the tech-lead D-review (REVIEW-M2c.md).
+
+### 16.6 Rules that every owner must keep
+- The sim never imports `src/game/levels/layout/`; it receives the applied map.
+- Every smoke visibility decision calls `segmentBlockedBySmoke` / `pointInSmoke`; no local copies.
+- Every weapon number that depends on level or scope comes from `effectiveWeapon` (or `rocketBlastMaxDamage`).
+- Rockets are drawn and heard only through `rocketPosAt`; there is no per-tick rocket sync.
+- Snapshots: `rockets`/`smokes` reach a delta snapshot as nothing (unchanged), the whole list, or `rocketsDelta`/
+  `smokesDelta` `{ add, remove }` (never both). Consumers read only the decoded lists (`SnapshotDeltaDecoder`), which
+  are sorted by id; nothing outside `src/shared/protocol/` sees a record delta.
+- The layout generator obeys ADR 0007 §1.4; `Math.random`, `Date.now`, `Math.sin/cos/atan2/hypot` in a decision
+  path are review blockers. Level data built at module load counts as a decision path (it feeds the generator):
+  use `detmath` (`sinRad/cosRad/atan2Det/hypot2` for arbitrary angles). Bump `LAYOUT_FORMAT_VERSION` whenever an
+  existing seed's output changes.

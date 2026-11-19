@@ -51,6 +51,8 @@ export class Session {
   token = '';
   /** Advertised `delta1` in hello. */
   deltas = false;
+  /** M2c: advertised `rows1` in hello (full-format entity lists as rows, protocol/rows.ts). */
+  rows = false;
   /** Subscribed to room list deltas (BROWSER only; cleared on entering a room). */
   listSubscribed = false;
   room: SessionRoomRef | null = null;

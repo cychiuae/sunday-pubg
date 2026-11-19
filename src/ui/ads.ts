@@ -5,9 +5,12 @@
  * - ScopeOverlay: the full-screen scope frame for scope_4x (chevron + mil ticks) and scope_8x (fine crosshair +
  *   mil-dots). Sits at the bottom of the Ui root (under every HUD panel, above the canvas) and covers the whole
  *   viewport, not just the 2.2:1 HUD box. 120 ms iris-in, 80 ms fade-out (CSS); no iris with reduced motion.
+ * M2c (docs/art/M2c.md §14.5, UI M2c §16.5): scope_2x, a wider 46vmin lens with a coral rim, a lighter 88% outside and
+ *   the "sunrise ring" reticle. Rims follow the SCOPE type (CSS data-sight), not the weapon.
  * Marks are decorative: the screen centre is the exact aim point (hitscan).
  * Owner: ui-ux-designer.
  */
+import { SCOPE_2X_RETICLE_SVG, SCOPE_RIM_COLOR } from '../render/procedural/icons';
 import type { AdsReticle, DotSight, ScopeSight } from './logic';
 import { Flags, h, StyleVar } from './dom';
 
@@ -58,7 +61,16 @@ const SCOPE_8X_SVG =
 /** Parses one of the constant SVG strings above (never game data). */
 function parseSvg(markup: string): Element {
   const doc = new DOMParser().parseFromString(markup, 'image/svg+xml');
-  return document.importNode(doc.documentElement, true);
+  const el = document.importNode(doc.documentElement, true);
+  // An inline <style> in an SVG would apply to the whole page: turn it into per-element attributes instead.
+  el.querySelectorAll('style').forEach((st) => {
+    if (/vector-effect\s*:\s*non-scaling-stroke/.test(st.textContent ?? '')) {
+      el.querySelectorAll('path, circle').forEach((n) => n.setAttribute('vector-effect', 'non-scaling-stroke'));
+    }
+    st.remove();
+  });
+  el.removeAttribute('style');
+  return el;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -104,11 +116,14 @@ export class ScopeOverlay {
   private hideTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
+    const r2 = h('div', 'ui-scope__mark ui-scope__mark--2x');
+    // docs/art/M2c.md §14.5 "sunrise ring" (graphics-designer's art, src/render/procedural/icons.ts).
+    r2.appendChild(parseSvg(SCOPE_2X_RETICLE_SVG));
     const r4 = h('div', 'ui-scope__mark ui-scope__mark--4x');
     r4.appendChild(parseSvg(SCOPE_4X_SVG));
     const r8 = h('div', 'ui-scope__mark ui-scope__mark--8x');
     r8.appendChild(parseSvg(SCOPE_8X_SVG));
-    const lens = h('div', 'ui-scope__lens', null, h('div', 'ui-scope__glass'), r4, r8);
+    const lens = h('div', 'ui-scope__lens', null, h('div', 'ui-scope__glass'), r2, r4, r8);
     this.el = h('div', 'ui-scope', { 'aria-hidden': 'true' }, lens);
     this.el.hidden = true;
     this.flags = new Flags(this.el);
@@ -124,6 +139,8 @@ export class ScopeOverlay {
       if (scope !== this.shownSight) {
         this.shownSight = scope;
         this.el.dataset['sight'] = scope;
+        // Rim = the scope's accent (SCOPE_RIM_COLOR), the same on any gun.
+        this.el.style.setProperty('--scope-c', SCOPE_RIM_COLOR[scope]);
       }
       if (!this.on) {
         this.on = true;

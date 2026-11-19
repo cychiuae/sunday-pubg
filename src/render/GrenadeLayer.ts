@@ -9,7 +9,8 @@ import * as THREE from 'three';
 import type { GrenadeArcView, GrenadeView } from '../shared/contracts';
 import type { GrenadeId, Vec3 } from '../shared/types';
 import { extractParts, makeInstancedMesh } from './instancing';
-import { createGrenadeModel, GRENADE_DIMENSIONS, palette } from './procedural';
+import type { ModelBatch, ModelHandle } from './ModelBatch';
+import { createGrenadeModel, createSmokeModel, GRENADE_DIMENSIONS, palette } from './procedural';
 import { PARTICLE_SHAPE } from './shaders/particles';
 import type { Markers } from './vfx/Markers';
 import { linearRgb } from './vfx/Particles';
@@ -85,6 +86,9 @@ interface GState {
   trail: number;
   blink: number;
   spark: number;
+  /** M2c: instance in the shared item batch (frag or smoke can), when the layer has one. */
+  handle: ModelHandle | null;
+  kind: string;
 }
 
 export class GrenadeLayer {
@@ -115,13 +119,22 @@ export class GrenadeLayer {
   private readonly blinkRed = linearRgb(palette.danger);
   private readonly blinkHot = linearRgb(palette.flowerCenter);
   private readonly flightScale = GRENADE_DIMENSIONS.flightScale;
+  /** The arc ring currently shows the smoke colour. */
+  private ringSmoke = false;
 
+  /**
+   * @param items M2c shared item batch: frags and smoke cans in flight join it (0 extra draw calls). Without it the
+   *   M2a instanced frag meshes are used (tests).
+   */
   constructor(
     private readonly markers: Markers,
     private readonly fx: GrenadeFx,
     private readonly heightAt: (x: number, z: number) => number,
+    private readonly items: ModelBatch | null = null,
   ) {
     this.group.name = 'grenades';
+    items?.register('throw:grenade', () => createGrenadeModel({ pin: false }));
+    items?.register('throw:smoke', () => createSmokeModel({ pin: false }));
     const template = createGrenadeModel({ pin: false });
     for (const part of extractParts(template)) {
       const mesh = makeInstancedMesh(part, CAPACITY, `grenade:${part.name}`);
@@ -181,7 +194,7 @@ export class GrenadeLayer {
   private stateFor(g: GrenadeView): GState {
     let s = this.states.get(g.id);
     if (!s) {
-      s = this.statePool.pop() ?? { id: 0, seen: 0, angle: 0, ax: 1, az: 0, lastX: 0, lastY: 0, lastZ: 0, trail: 0, blink: 0, spark: 0 };
+      s = this.statePool.pop() ?? { id: 0, seen: 0, angle: 0, ax: 1, az: 0, lastX: 0, lastY: 0, lastZ: 0, trail: 0, blink: 0, spark: 0, handle: null, kind: '' };
       s.id = g.id;
       s.angle = (g.id * 1.37) % 6.28;
       s.ax = 1;
@@ -194,6 +207,12 @@ export class GrenadeLayer {
       s.spark = 0;
       this.states.set(g.id, s);
     }
+    const kind = g.kind === 'smoke' ? 'smoke' : 'grenade';
+    if (this.items && s.kind !== kind) {
+      if (s.handle) this.items.swap(s.handle, `throw:${kind}`);
+      else s.handle = this.items.acquire(`throw:${kind}`);
+    }
+    s.kind = kind;
     return s;
   }
 
@@ -221,11 +240,29 @@ export class GrenadeLayer {
       this.q.setFromAxisAngle(this.axis, s.angle);
       this.pos.set(g.pos.x, g.pos.y, g.pos.z);
       this.m.compose(this.pos, this.q, this.scale);
-      for (let k = 0; k < this.meshes.length; k++) {
-        this.mOut.multiplyMatrices(this.m, this.locals[k]);
-        this.mOut.toArray(this.meshes[k].instanceMatrix.array as Float32Array, n * 16);
+      if (this.items && s.handle) {
+        this.items.setMatrix(s.handle, this.m);
+        this.items.setVisible(s.handle, true);
+      } else {
+        for (let k = 0; k < this.meshes.length; k++) {
+          this.mOut.multiplyMatrices(this.m, this.locals[k]);
+          this.mOut.toArray(this.meshes[k].instanceMatrix.array as Float32Array, n * 16);
+        }
+        n++;
       }
-      n++;
+      if (s.kind === 'smoke') {
+        // M2c smoke can (art M2c §4.1): no fuse blink or sparks; two tiny cream puffs from the cap every 150 ms.
+        this.v.set(0, GRENADE_DIMENSIONS.fuseY * this.flightScale, 0).applyQuaternion(this.q);
+        s.spark -= dt;
+        if (s.spark <= 0 && !g.resting) {
+          s.spark = 0.15;
+          this.fx.trailPuff(g.pos.x + this.v.x, g.pos.y + this.v.y, g.pos.z + this.v.z);
+        }
+        s.lastX = g.pos.x;
+        s.lastY = g.pos.y;
+        s.lastZ = g.pos.z;
+        continue;
+      }
 
       // Fuse point (top of the cap) in world space.
       this.v.set(0, GRENADE_DIMENSIONS.fuseY * this.flightScale, 0).applyQuaternion(this.q);
@@ -272,6 +309,9 @@ export class GrenadeLayer {
     for (const id of this.removeList) {
       const s = this.states.get(id)!;
       this.states.delete(id);
+      if (s.handle && this.items) this.items.release(s.handle);
+      s.handle = null;
+      s.kind = '';
       this.statePool.push(s);
     }
 
@@ -291,7 +331,15 @@ export class GrenadeLayer {
       const size = ARC_DOT_SIZE + (ARC_DOT_END_SIZE - ARC_DOT_SIZE) * t;
       this.markers.add(this.dots[i * 3], this.dots[i * 3 + 1], this.dots[i * 3 + 2], size, c[0], c[1], c[2], 1, PARTICLE_SHAPE.puff);
     }
-    // Blast ring at the end, draped over max(terrain, sea).
+    // Blast ring at the end, draped over max(terrain, sea). M2c: a smoke throw shows the cloud's final radius in lilac
+    // (art M2c §4.1: never danger red); the frag keeps the danger ring.
+    const smoke = arc.kind === 'smoke';
+    if (smoke !== this.ringSmoke) {
+      this.ringSmoke = smoke;
+      const col = smoke ? palette.smokeShadow : palette.danger;
+      (this.ring.material as THREE.MeshBasicMaterial).color.setHex(col);
+      (this.inner.material as THREE.MeshBasicMaterial).color.setHex(col);
+    }
     const e = arc.end;
     const R = Math.max(0.5, arc.radius);
     const P = this.ringPos.array as Float32Array;
@@ -326,6 +374,8 @@ export class GrenadeLayer {
   }
 
   dispose(): void {
+    if (this.items) for (const st of this.states.values()) if (st.handle) this.items.release(st.handle);
+    this.states.clear();
     for (const m of this.meshes) m.dispose();
     this.ring.geometry.dispose();
     (this.ring.material as THREE.Material).dispose();

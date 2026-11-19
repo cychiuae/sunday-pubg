@@ -250,8 +250,15 @@ test('browser input drives the authoritative player: drop, move, look, loot, sho
       const reloads0 = mine('reloadStart');
       await page.keyboard.press('r');
       if (reserve > 0) {
+        await page.waitForTimeout(600);
+        const diag = await page.evaluate(() => {
+          const g = (window as unknown as { __game: Record<string, unknown> }).__game;
+          return { weapon: g['localWeapon'], vm: g['viewmodel'], pending: g['pendingInputs'], locked: document.pointerLockElement !== null, phase: g['phase'] };
+        });
+        notes.push(`after R: reserve ${reserve}, reloadStart ${mine('reloadStart') - reloads0}, server anim.reloading ${(await me(obs)).anim.reloading}, client ${JSON.stringify(diag)}`);
         await expect.poll(() => mine('reloadStart'), { timeout: 3000 }).toBeGreaterThan(reloads0);
-        await expect(page.locator('.ui-ammo__reload')).toBeVisible();
+        // A one-shell reload (pump shotgun) can finish before the bar is checked: accept the bar or a finished reload.
+        await expect.poll(async () => (await page.locator('.ui-ammo__reload').isVisible()) || mine('reloadEnd') > 0, { timeout: 5000 }).toBe(true);
         await expect.poll(() => mine('reloadEnd'), { timeout: 4000 }).toBeGreaterThan(0);
         notes.push(`after R: mag ${await magOf()} (reserve was ${reserve})`);
         expect(await magOf()).toBeGreaterThan(mag0 - 1);

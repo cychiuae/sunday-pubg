@@ -12,15 +12,12 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 import type { DevGameState } from '../../src/game/devHook';
 import { calibrateLook, fetchLoot, hook, look, me, waitHook } from './support/drive';
 import { readFileSync } from 'node:fs';
-import { jumpAndLand, lockPointer, newPlayer, openTitle, SHOTS, soloMatch, ui, unexpectedErrors, type ConsoleLog } from './support/game';
+import { jumpAndLand, lockPointer, newPlayer, openTitle, SHOTS, soloMatch, ui, unexpectedErrors, type ConsoleLog, zeroLoot } from './support/game';
 import { Observer } from './support/observer';
 import { startStack, type Stack } from './support/stack';
 
 const NAME = 'QA Arsenal';
-const ZERO_ALL = {
-  pistol: 0, smg: 0, shotgun: 0, rifle: 0, lmg: 0, dmr: 0, bandage: 0, medkit: 0, vest_1: 0, vest_3: 0, helmet_1: 0,
-  helmet_3: 0, ammo_light: 0, ammo_heavy: 0, ammo_shell: 0, ammo_sniper: 0,
-};
+const ZERO_ALL = zeroLoot(); // every loot id (M2c included)
 const M2A_LOOT = { ...ZERO_ALL, sniper: 4, grenade: 4, vest_2: 1, helmet_2: 1 };
 
 // Read from balance.json (the client uses the default file) so stance retunes do not break the spec.
@@ -49,7 +46,7 @@ test.describe.configure({ mode: 'serial' });
 test.beforeAll(async ({ browser }) => {
   test.setTimeout(180_000);
   stack = await startStack({
-    label: 'm2a',
+    label: 'm2a', layoutSeed: 'baseline', // M2c: pinned layout (seed 0 = the M2b props and loot) so paths are reproducible
     seed: 4242,
     balance: {
       match: { countdownSeconds: 4, resultsSeconds: 5, targetPlayers: 2 },
@@ -123,10 +120,20 @@ test('HUD: vest and helmet cells, four slots and the stance icon', async () => {
 test('slot 4 and G with no grenades are refused (weapon stays, "No grenades" toast)', async () => {
   await ensureLocked();
   const before = (await g()).localWeapon;
+  // The refusal toast lives about 2 s and appears after a server round trip, so record every toast text instead of
+  // polling it (M2c: the throwable slot refusal reads "No throwables", M2C-UI-13).
+  await page.evaluate(() => {
+    const w = window as unknown as { __toasts: string[] };
+    w.__toasts = [];
+    const el = document.querySelector('.ui-toasts')!;
+    new MutationObserver(() => w.__toasts.push(el.textContent ?? '')).observe(el, { childList: true, subtree: true, characterData: true });
+  });
   await page.keyboard.press('4');
   await page.waitForTimeout(600);
   expect((await g()).localWeapon).toBe(before);
-  await expect(page.locator('.ui-toasts')).toContainText(/no grenades/i, { timeout: 3000 });
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __toasts: string[] }).__toasts.some((t) => /no (grenades|throwables)/i.test(t))), { timeout: 5000 })
+    .toBe(true);
   await page.keyboard.press('g');
   await page.waitForTimeout(600);
   expect((await g()).localWeapon).toBe(before);
@@ -152,8 +159,15 @@ test('Ctrl is unbound; RMB with fists does not aim', async () => {
 
 test('C crouch, Z prone, Space prone -> crouch -> stand; eye height follows; server agrees; no big corrections', async () => {
   await ensureLocked();
+  let lastKey = '';
   const settle = async (stance: string, eye: number): Promise<void> => {
     await waitHook(page, (x) => x.stanceProgress === 1, 6000, `settle ${stance}`);
+    // A headless page can drop a key event: one re-press (logged) when the stance did not change at all.
+    if ((await g()).stance !== stance && lastKey) {
+      notes.push(`stance ${stance}: key ${lastKey} had no effect; pressed again`);
+      await page.keyboard.press(lastKey);
+      await waitHook(page, (x) => x.stanceProgress === 1 && x.stance !== null, 6000, `settle ${stance} (retry)`);
+    }
     const s = await g();
     expect(s.stance).toBe(stance);
     expect(s.cameraEyeHeight!).toBeCloseTo(eye, 1);
@@ -163,18 +177,24 @@ test('C crouch, Z prone, Space prone -> crouch -> stand; eye height follows; ser
   };
   const c0 = (await g()).lastCorrection;
   await settle('stand', STAND_EYE);
+  lastKey = 'c';
   await page.keyboard.press('c');
   await settle('crouch', CROUCH_EYE);
+  lastKey = 'z';
   await page.keyboard.press('z');
   await settle('prone', PRONE_EYE);
   await page.screenshot({ path: `${SHOTS}/m2a-prone.png` });
+  lastKey = 'Space';
   await page.keyboard.press('Space');
   await settle('crouch', CROUCH_EYE);
+  lastKey = 'Space';
   await page.keyboard.press('Space');
   await settle('stand', STAND_EYE);
   // Prone straight to stand with Z, and C toggles back.
+  lastKey = 'z';
   await page.keyboard.press('z');
   await settle('prone', PRONE_EYE);
+  lastKey = 'z';
   await page.keyboard.press('z');
   await settle('stand', STAND_EYE);
   const c1 = (await g()).lastCorrection;

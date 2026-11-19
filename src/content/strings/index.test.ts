@@ -91,6 +91,7 @@ describe('en.json content', () => {
       'vest_1', 'vest_2', 'vest_3', 'helmet_1', 'helmet_2', 'helmet_3', 'grenade',
       // M2c
       'knife', 'machete', 'paddle', 'dbshotgun', 'revolver', 'rpg', 'ammo_rocket', 'smoke', 'vest_4', 'helmet_4',
+      'scope_red_dot', 'scope_2x', 'scope_4x', 'scope_8x',
     ];
     for (const id of ids) {
       expect(hasKey(`item.${id}.name`), id).toBe(true);
@@ -112,6 +113,29 @@ describe('en.json content', () => {
     }
     const names = [1, 2, 3, 4].map((n) => t(`level.${n}.name`));
     expect(new Set(names).size).toBe(4);
+  });
+
+  it('weapon names start with a consonant sound (feed and death card say "with a {weapon}")', () => {
+    const weapons = [
+      'fists', 'pistol', 'smg', 'shotgun', 'rifle', 'dmr', 'sniper', 'lmg', 'grenade',
+      'knife', 'machete', 'paddle', 'dbshotgun', 'revolver', 'rpg', 'smoke',
+    ];
+    for (const id of weapons) expect(t(`item.${id}.name`), id).not.toMatch(/^[AEIOU]/i);
+  });
+
+  it('M2c: scope keys exist, the zoom is in every scope name, and every sight type is named', () => {
+    for (const [id, zoom] of [['scope_2x', '2x'], ['scope_4x', '4x'], ['scope_8x', '8x']] as const) {
+      expect(t(`item.${id}.name`)).toContain(zoom);
+    }
+    for (const s of ['iron', 'red_dot', 'scope_2x', 'scope_4x', 'scope_8x']) expect(hasKey(`sight.${s}`), s).toBe(true);
+    for (const k of [
+      'mountsOn', 'toPouch', 'stashFull', 'pouchFull', 'fits', 'mounted', 'stashed', 'now', 'mounting', 'cantFit',
+      'noneFits', 'builtIn', 'mountedOn', 'inPouch', 'cycle', 'sr', 'srBuiltIn', 'stash',
+    ]) {
+      expect(hasKey(`hud.scope.${k}`), k).toBe(true);
+    }
+    expect(t('hud.scope.pouchFull')).toBe('Scope pouch full!');
+    expect(hasKey('hint.scope') && hasKey('menu.controls.scope.key') && hasKey('menu.controls.scope.label')).toBe(true);
   });
 
   it('M2c: names every look preset, with a loading line', () => {

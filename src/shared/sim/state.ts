@@ -8,11 +8,14 @@ import type {
   GunId,
   HealId,
   HeldId,
+  ItemLevel,
   MovementState,
   PlayerId,
   PlayerInput,
   SlotIndex,
+  WeaponId,
 } from '../types';
+import type { ScopeSwapState, SwingState } from './actions';
 import type { BotBrain } from './bots';
 import type { Inventory } from './inventory';
 
@@ -35,6 +38,10 @@ export interface PendingDeath {
   cause: DeathCause;
   /** The lethal hit was a headshot (kill event `headshot`). */
   headshot?: boolean;
+  /** M2c: level of `weapon` at the kill (null for fists, frags, zone, fall). */
+  weaponLevel?: ItemLevel | null;
+  /** M2c: a rocket kill whose rocket struck the victim. */
+  direct?: boolean;
 }
 
 export interface SimPlayer {
@@ -69,14 +76,22 @@ export interface SimPlayer {
   firingUntil: number;
   /** M2a: server ms of the last shot (combat.fireMoveWindowMs slow-down), -Infinity before the first. */
   lastShotAt: number;
-  /** M2a: weapon of the last shot (the fire-move window only applies while it is still in hand). */
-  lastShotWeapon: GunId | null;
+  /** M2a: weapon of the last shot or melee hit frame (the fire-move window only applies while it is still in hand). */
+  lastShotWeapon: WeaponId | null;
   /** M2a: grenade in hand with the pin pulled (explodes at this server ms), or null. */
   cook: { explodesAt: number } | null;
   /** M2a: ms until the next pin pull is allowed (items.grenade.throwRecoveryMs after a throw). */
   throwRecoveryMs: number;
   /** M2a: last non-grenade slot held (auto-switch target after the last grenade is thrown). */
   lastGunSlot: SlotIndex;
+  /** M2c: melee swing in its wind-up (actions.ts). */
+  swing: SwingState | null;
+  /** M2c: running T sight switch (actions.ts). */
+  scopeSwap: ScopeSwapState | null;
+  /** M2c: LMB held with a smoke selected. */
+  smokeHeld: boolean;
+  /** M2c: server ms of the last damage taken from anyone (bots: smoke on a zone escape). */
+  lastHurtAt: number;
   queue: PlayerInput[];
   lastInput: PlayerInput | null;
   /** Consecutive ticks the last input has been repeated because the queue was empty (MAX_INPUT_REPEAT_TICKS). */

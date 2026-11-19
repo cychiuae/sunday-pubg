@@ -2,8 +2,17 @@
  * Pure combat math (docs/design/systems/combat.md "Shot resolution"). The World wires these into the tick.
  */
 import type { Balance, WeaponBalance } from '../balance';
+import { weaponBalance } from '../balance';
 import { clamp, DEG2RAD, type Rng } from '../math';
-import type { ArmorPieceState, HeldId, MovementState, Stance, Vec3, WeaponId } from '../types';
+import type { ArmorPieceState, ItemLevel, M2cHeldId, MovementState, ScopeId, Stance, Vec3, WeaponId } from '../types';
+import { isM2cThrowableId } from '../types';
+import { effWeapon } from './levels';
+
+/** M2c: the level and mounted scope of the weapon instance in hand (absent = L1, built-in sight). */
+export interface WeaponInstance {
+  level?: ItemLevel;
+  scope?: ScopeId | null;
+}
 
 /** Shooter status for the spread cone (combat.md "Spread"). The M2a fields default to hip fire, standing, settled. */
 export interface SpreadStatus {
@@ -23,8 +32,8 @@ export interface SpreadStatus {
  * M = moveSpreadMultiplier when horizontal speed > combat.moveSpreadSpeedThreshold; J = combat.airSpreadMultiplier
  * when airborne. ClientGame uses this for the crosshair.
  */
-export function effectiveSpreadDeg(weapon: WeaponId, balance: Balance, status: SpreadStatus): number {
-  const w = balance.weapons[weapon];
+export function effectiveSpreadDeg(weapon: WeaponId, balance: Balance, status: SpreadStatus, inst: WeaponInstance = {}): number {
+  const w = effWeapon(balance, weapon, inst.level ?? 1, inst.scope ?? null);
   let s = w.spreadDeg;
   const ads = clamp(status.adsProgress ?? 0, 0, 1);
   if (ads > 0) s *= 1 + (w.adsSpreadMultiplier - 1) * ads;
@@ -38,9 +47,9 @@ export function effectiveSpreadDeg(weapon: WeaponId, balance: Balance, status: S
  * ADS progress in [0, 1] = adsMs / weapons[held].adsTimeMs (combat.md "ADS"). 0 for the grenade slot, sight 'none'
  * and adsTimeMs <= 0 (only fists, which never engage).
  */
-export function adsProgressOf(m: Pick<MovementState, 'adsMs'>, held: HeldId, b: Balance): number {
-  if (held === 'grenade') return 0;
-  const w = b.weapons[held];
+export function adsProgressOf(m: Pick<MovementState, 'adsMs'>, held: M2cHeldId, b: Balance, scope: ScopeId | null = null): number {
+  if (isM2cThrowableId(held)) return 0;
+  const w = scope === null ? weaponBalance(b, held) : effWeapon(b, held, 1, scope);
   if (w.sight === 'none' || !(w.adsTimeMs > 0) || !(m.adsMs > 0)) return 0;
   return clamp(m.adsMs / w.adsTimeMs, 0, 1);
 }

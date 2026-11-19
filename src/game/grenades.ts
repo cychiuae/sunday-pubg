@@ -18,7 +18,7 @@ import type { GrenadeArcView, GrenadeView, HudGrenadeDangerView } from '../share
 import { wrapAngle } from '../shared/math';
 import { predictGrenadeArc, stepGrenade, throwLaunch, type GrenadeBody } from '../shared/sim/grenade';
 import type { MovementContext } from '../shared/sim/movement';
-import type { GrenadeId, GrenadeState, PlayerId, Vec3 } from '../shared/types';
+import type { GrenadeId, GrenadeState, M2cThrowableId, PlayerId, Vec3 } from '../shared/types';
 
 /**
  * Fallback for the optional items.grenade.dangerMargin (grenades.md "Danger indicator": radius + 2 m). balance.json sets
@@ -26,13 +26,15 @@ import type { GrenadeId, GrenadeState, PlayerId, Vec3 } from '../shared/types';
  */
 export const DEFAULT_DANGER_MARGIN_M = 2;
 
-/** One physics step of a grenade body (injectable for tests). */
-export type GrenadeStepFn = (body: GrenadeBody, dt: number) => GrenadeBody;
+/** One physics step of a grenade body (injectable for tests). M2c: `kind` selects the throwable's keys (items.smoke). */
+export type GrenadeStepFn = (body: GrenadeBody, dt: number, kind: M2cThrowableId) => GrenadeBody;
 
 interface Sample {
   id: GrenadeId;
   ownerId: PlayerId;
   explodesAt: number;
+  /** M2c: frag or smoke canister (absent on the wire = frag). */
+  kind: M2cThrowableId;
   /** Server ms of `bodies[0]`. */
   time: number;
   /** bodies[k] = the body k ticks after the sample (lazily extended cache). */
@@ -68,7 +70,7 @@ export class GrenadeTracker {
     for (const g of grenades) {
       listed.add(g.id);
       if (this.exploded.has(g.id)) continue;
-      this.put(g.id, g.ownerId, g.explodesAt, serverTime, { pos: g.pos, vel: g.vel, inWater: g.inWater });
+      this.put(g.id, g.ownerId, g.explodesAt, serverTime, { pos: g.pos, vel: g.vel, inWater: g.inWater }, g.kind ?? 'grenade');
     }
     for (const [id, s] of this.samples) {
       if (!listed.has(id) && s.time <= serverTime) this.samples.delete(id);
@@ -76,12 +78,15 @@ export class GrenadeTracker {
   }
 
   /** SimEvent grenadeThrown (pos/vel at the event tick's `serverTime`). */
-  onThrown(ev: { id: GrenadeId; ownerId: PlayerId; pos: Vec3; vel: Vec3; explodesAt: number }, serverTime: number): void {
+  onThrown(
+    ev: { id: GrenadeId; ownerId: PlayerId; pos: Vec3; vel: Vec3; explodesAt: number; kind?: M2cThrowableId },
+    serverTime: number,
+  ): void {
     if (this.exploded.has(ev.id)) return;
-    this.put(ev.id, ev.ownerId, ev.explodesAt, serverTime, { pos: ev.pos, vel: ev.vel, inWater: false });
+    this.put(ev.id, ev.ownerId, ev.explodesAt, serverTime, { pos: ev.pos, vel: ev.vel, inWater: false }, ev.kind ?? 'grenade');
   }
 
-  /** SimEvent explosion: remove at once. */
+  /** SimEvent explosion (frag) or smokeDeployed (the canister becomes a cloud): remove at once. */
   onExplosion(id: GrenadeId): void {
     this.samples.delete(id);
     this.exploded.add(id);
@@ -103,21 +108,29 @@ export class GrenadeTracker {
         pos = { x: a.pos.x + (b.pos.x - a.pos.x) * frac, y: a.pos.y + (b.pos.y - a.pos.y) * frac, z: a.pos.z + (b.pos.z - a.pos.z) * frac };
         vel = b.vel;
       }
-      out.push({ id: s.id, ownerId: s.ownerId, pos: { ...pos }, vel: { ...vel }, explodesAt: s.explodesAt, resting: isZero(vel) });
+      out.push({
+        id: s.id,
+        ownerId: s.ownerId,
+        pos: { ...pos },
+        vel: { ...vel },
+        explodesAt: s.explodesAt,
+        resting: isZero(vel),
+        kind: s.kind,
+      });
     }
     return out.sort((x, y) => x.id - y.id);
   }
 
-  private put(id: GrenadeId, ownerId: PlayerId, explodesAt: number, time: number, body: GrenadeBody): void {
+  private put(id: GrenadeId, ownerId: PlayerId, explodesAt: number, time: number, body: GrenadeBody, kind: M2cThrowableId): void {
     const prev = this.samples.get(id);
     if (prev && prev.time > time) return; // never replace a fresher sample
-    this.samples.set(id, { id, ownerId, explodesAt, time, bodies: [cloneBody(body)] });
+    this.samples.set(id, { id, ownerId, explodesAt, kind, time, bodies: [cloneBody(body)] });
   }
 
   private bodyAt(s: Sample, k: number): GrenadeBody {
     while (s.bodies.length <= k) {
       const last = s.bodies[s.bodies.length - 1] as GrenadeBody;
-      s.bodies.push(isZero(last.vel) ? last : this.step(last, this.simDt));
+      s.bodies.push(isZero(last.vel) ? last : this.step(last, this.simDt, s.kind));
     }
     return s.bodies[k] as GrenadeBody;
   }
@@ -125,11 +138,11 @@ export class GrenadeTracker {
 
 /** Default GrenadeStepFn: the shared stepGrenade on the current map. */
 export function sharedGrenadeStep(ctx: () => MovementContext): GrenadeStepFn {
-  return (body, dt) => stepGrenade(body, dt, ctx()).body;
+  return (body, dt, kind) => stepGrenade(body, dt, ctx(), kind).body;
 }
 
 /**
- * HUD danger list: grenades whose 3D distance from `chest` is <= radius + dangerMargin, nearest (horizontal) first.
+ * HUD danger list (M2c: frags only): grenades whose 3D distance from `chest` is <= radius + dangerMargin, nearest (horizontal) first.
  * `bearing` is relative to `cameraYaw`: 0 ahead, +PI/2 right, in (-PI, PI]. `fuseRemainingMs` = explodesAt - now
  * (server ms), the same clock as the cook ring.
  */
@@ -148,6 +161,8 @@ export function grenadeDanger(
   const rz = -Math.sin(cameraYaw);
   const out: HudGrenadeDangerView[] = [];
   for (const n of grenades) {
+    // M2c (UI M2c §2.1): the danger indicator lists frags only; smoke canisters never warn.
+    if (n.kind !== 'grenade') continue;
     const dx = n.pos.x - chest.x;
     const dy = n.pos.y - chest.y;
     const dz = n.pos.z - chest.z;
@@ -173,9 +188,11 @@ export interface ArcInput {
   pitch: number;
   /** Settled prone (throw speed x throwSpeedProneMultiplier). */
   proneSettled: boolean;
-  /** items.grenade.fuseMs before the pin pull, else the remaining cook fuse. */
+  /** items.grenade.fuseMs before the pin pull, else the remaining cook fuse (smoke: items.smoke.fuseMs). */
   fuseRemainingMs: number;
   maxSeconds: number;
+  /** M2c: the selected throwable (end ring: blast radius for frags, cloud radius for smoke). Absent = frag. */
+  kind?: M2cThrowableId;
 }
 
 /**
@@ -183,9 +200,11 @@ export interface ArcInput {
  * returned `points` is then `out.points`, so callers must not keep it across calls.
  */
 export function buildGrenadeArc(input: ArcInput, ctx: MovementContext, balance: Balance, out?: { points: Vec3[] }): GrenadeArcView {
-  const launch = throwLaunch(input.eye, input.yaw, input.pitch, input.proneSettled, ctx);
-  const arc = predictGrenadeArc(launch, Math.max(0, input.fuseRemainingMs), ctx, input.maxSeconds, out);
-  return { ...arc, radius: balance.items.grenade.radius };
+  const kind = input.kind ?? 'grenade';
+  const launch = throwLaunch(input.eye, input.yaw, input.pitch, input.proneSettled, ctx, kind);
+  const arc = predictGrenadeArc(launch, Math.max(0, input.fuseRemainingMs), ctx, input.maxSeconds, out, kind);
+  // REVIEW-M2c SF3: `kind` tells the renderer which end ring it draws (blast radius for frags, cloud radius for smoke).
+  return { ...arc, radius: kind === 'smoke' ? balance.items.smoke.cloud.radius : balance.items.grenade.radius, kind };
 }
 
 /** Recompute thresholds of ArcPreview (plumbing, not feel): 1 cm of eye travel, 0.05 deg of aim. */
@@ -232,6 +251,7 @@ export class ArcPreview {
       Math.abs(a.pitch - b.pitch) > ARC_ANGLE_EPSILON_RAD ||
       a.proneSettled !== b.proneSettled ||
       a.maxSeconds !== b.maxSeconds ||
+      (a.kind ?? 'grenade') !== (b.kind ?? 'grenade') ||
       Math.abs(a.fuseRemainingMs - b.fuseRemainingMs) >= this.tickMs
     );
   }

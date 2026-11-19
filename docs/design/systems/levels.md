@@ -1,6 +1,6 @@
 # System: Item Levels (weapons and armor, L1-L4) (M2c)
 
-Numbers: `balance.json` `levels.*` (staged in `_m2cPending.levels` until the M2c types land), armor in `items.vest_N` / `items.helmet_N`.
+Numbers: `balance.json` `levels.*` (live), armor in `items.vest_N` / `items.helmet_N`.
 Server-authoritative: the level of every weapon instance, pickup and worn piece. Related: `combat.md` (TTK tables at L1 and L4),
 `loot.md` (level rolls), `armor.md` (vest_4, helmet_4), `melee.md`, `rpg.md`.
 Scope tags: **M2c** = this milestone, **Later**, **Maybe**.
@@ -50,11 +50,19 @@ A weapon rolled at a loot spot gets a level from `levels.lootTiers[spotTier]` (r
 | Spot tier | L1 | L2 | L3 | L4 |
 |---|---|---|---|---|
 | common | 70 | 25 | 5 | 0 |
-| rare | 30 | 45 | 22 | 3 |
-| epic | 5 | 30 | 45 | 20 |
+| rare | 32 | 45 | 21 | 2 |
+| epic | 8 | 32 | 45 | 15 |
 
-Expected weapon levels per island match (26.2 guns: 15.6 common-spot, 7.6 rare-spot, 2.94 epic-spot; `loot.md`): L1 13.4 (51%), L2 8.2
-(31%), L3 3.8 (14%), L4 0.82 (3%, 72% of them from epic spots). Most guns are L1-L2, and an L4 gun turns up in about 55% of matches.
+Tuning round 1 (pacing run 1): with rare 3 / epic 20 for L4, L4 was about 3% of guns but 10-17% of island kills, because winners keep
+the best gun from death drops and bots value it x1.6. That snowball is partly intended (the best gear ends up with whoever wins fights).
+L4 weights were cut (rare 3 -> 2, epic 20 -> 15); `botValueMultiplier` stays. Target: L4 at most 12% of weapon kills.
+
+Guaranteed-weapon points (`loot.md`) roll their own level table, `loot.guaranteedWeapon.levels` = 80 / 20 / 0 / 0 (L1-L2 only).
+Expected gun levels per island match (29.3 guns: 12 guaranteed, 7.5 from plain common spots, 7.05 rare, 2.77 epic; `loot.md`):
+L1 = 12 x 0.8 + 7.5 x 0.70 + 7.05 x 0.32 + 2.77 x 0.08 = 17.3 (59%); L2 = 2.4 + 1.88 + 3.17 + 0.89 = 8.3 (28%); L3 = 0.38 + 1.48 + 1.25
+= 3.1 (11%); L4 = 0.14 + 0.42 = 0.56 (2%, 74% of them from epic spots). Most guns are L1-L2, and at least one L4 gun turns up in about
+43% of matches (1 - e^-0.56). Mean damage multiplier over all guns = 0.59 + 0.28 x 1.08 + 0.11 x 1.16 + 0.02 x 1.25 = 1.045, so the
+average fight gets only about 4% shorter (less after shot-count rounding).
 Melee weapons use the same tables. Armor is not rolled (its level is its id; vest_4 and helmet_4 are epic-only, `loot.md`).
 
 ### Picking up
@@ -62,7 +70,10 @@ Melee weapons use the same tables. Armor is not rolled (its level is its id; ves
   **that** slot (even if the other slot is empty, and whichever slot you hold). The old weapon drops at your feet with its mag and level.
   The new one keeps its own mag. If you were holding the replaced slot you keep holding it (no swap time); otherwise the active slot does
   not change. Prompt: "[E] Swap Rifle Lv1 -> Lv3" (narrative text).
-- Same id at the same or a lower level: the normal pickup rules (`combat.md`: first empty slot, else the held slot).
+- Same id at the same or a lower level: **not refused**. The normal pickup rules apply (`combat.md`: first empty slot, else the held
+  slot), so no new refusal reason is needed. (Two copies can be a useful "spare mag"; replacing your held L3 with an L1 is your call, and
+  the prompt shows both levels so it is never an accident: "[E] Swap Rifle Lv3 -> Lv1".)
+- Mounted scopes travel with the gun (`scopes.md`); a scope on the old gun stays on the old gun when it drops.
 - Melee: E on any melee pickup takes it into the melee slot and drops your current melee weapon, whatever the levels (`melee.md`).
 - Armor: unchanged rule (`armor.md`): the pickup is worn only if its level is higher than the worn piece's level.
 

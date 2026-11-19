@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_VERSION } from '../shared/constants';
 import { CLIENT_TOKEN_STORAGE_KEY, type NetHandlers, type ServerHello } from '../shared/contracts';
 import { CAP_DELTA, SnapshotDeltaEncoder } from '../shared/protocol/delta';
+import { CAP_ROWS } from '../shared/protocol/rows';
 import { encode, encodeQuantized, quantizeDeep, type ServerMessage } from '../shared/protocol/messages';
-import { makeGrenade, makeInput, makeLocal, makePlayer, makeSnapshot } from '../shared/protocol/testing';
+import { makeGrenade, makeInput, makeLocal, makePlayer, makeSnapshot, makeWelcome } from '../shared/protocol/testing';
 import type { ConnectionStatus, RoomState, RoomSummary, WorldSnapshot } from '../shared/types';
 import { NetClient, loadClientToken, resolveWsUrl, type SocketLike, type TokenStorage } from './NetClient';
 
@@ -108,9 +109,9 @@ describe('NetClient', () => {
       name: 'Coco',
       protocolVersion: PROTOCOL_VERSION,
       clientToken: TOKEN,
-      caps: [CAP_DELTA],
+      caps: [CAP_DELTA, CAP_ROWS],
     });
-    sockets[0]!.receive({ t: 'welcome', welcome: { playerId: 7, mapId: 'island01', serverTime: 5000, matchId: 1, roomId: 'r1' } });
+    sockets[0]!.receive({ t: 'welcome', welcome: makeWelcome({ playerId: 7, mapId: 'island01', serverTime: 5000, matchId: 1, roomId: 'r1' }) });
     expect(net.playerId).toBe(7);
     expect(handlers.onWelcome).toHaveBeenCalledOnce();
     expect(statuses.map((s) => s[0])).toEqual(['connecting', 'connected']);
@@ -123,7 +124,7 @@ describe('NetClient', () => {
     s.open();
     net.sendInput(makeInput({ seq: 1 }));
     expect(s.sent.filter((m) => (m as { t: string }).t === 'input')).toHaveLength(0);
-    s.receive({ t: 'welcome', welcome: { playerId: 1, mapId: 'island01', serverTime: 0, matchId: 1, roomId: 'r1' } });
+    s.receive({ t: 'welcome', welcome: makeWelcome({ playerId: 1, mapId: 'island01', serverTime: 0, matchId: 1, roomId: 'r1' }) });
     net.sendInput(makeInput({ seq: 2 }));
     expect(s.sent.at(-1)).toEqual({ t: 'input', input: makeInput({ seq: 2 }) });
   });
@@ -260,10 +261,10 @@ describe('NetClient', () => {
     const v = { x: 1, y: 2, z: 3 };
     const events = [
       { type: 'stanceChange', playerId: 2, from: 'stand', to: 'crouch', forced: false, durationMs: 250 },
-      { type: 'grenadeCook', playerId: 2, pos: v, explodesAt: 4000 },
-      { type: 'grenadeThrown', id: 1, ownerId: 2, pos: v, vel: v, explodesAt: 4000, dropped: false },
-      { type: 'grenadeBounce', id: 1, pos: v, surface: 'terrain', speed: 4 },
-      { type: 'explosion', id: 1, ownerId: 2, pos: v, radius: 7, inHand: false },
+      { type: 'grenadeCook', playerId: 2, pos: v, explodesAt: 4000, kind: 'grenade' },
+      { type: 'grenadeThrown', id: 1, ownerId: 2, pos: v, vel: v, explodesAt: 4000, dropped: false, kind: 'grenade' },
+      { type: 'grenadeBounce', id: 1, pos: v, surface: 'terrain', speed: 4, kind: 'grenade' },
+      { type: 'explosion', id: 1, ownerId: 2, pos: v, radius: 7, inHand: false, source: 'grenade' },
       {
         type: 'damage', victimId: 3, attackerId: 2, amount: 50, headshot: false, cause: 'explosion', sourcePos: v, hpAfter: 70,
         vest: { tier: 1, absorbed: 20, broken: true }, helmet: null, grenadeId: 1,
@@ -462,7 +463,7 @@ describe('NetClient rooms', () => {
     s.receive({ t: 'roomJoined', rid: 1, room: roomState(), memberId: 2 });
     s.receive({ t: 'room', room: roomState({ phase: 'countdown' }) });
     s.receive({ t: 'reject', rid: 5, req: 'createRoom', code: 'rate_limited', retryAfterMs: 900 });
-    s.receive({ t: 'welcome', welcome: { playerId: 3, mapId: 'office', serverTime: 200, matchId: 1, roomId: 'r1' } });
+    s.receive({ t: 'welcome', welcome: makeWelcome({ playerId: 3, mapId: 'office', serverTime: 200, matchId: 1, roomId: 'r1' }) });
     expect(net.playerId).toBe(3);
     const before = s.sent.length;
     s.receive({ t: 'roomLeft', reason: 'kicked' });
@@ -483,13 +484,13 @@ describe('NetClient rooms', () => {
     const s = sockets[0]!;
     s.open();
     const enc1 = new SnapshotDeltaEncoder(true);
-    s.receive({ t: 'welcome', welcome: { playerId: 1, mapId: 'island01', serverTime: 0, matchId: 1, roomId: 'r1' } });
+    s.receive({ t: 'welcome', welcome: makeWelcome({ playerId: 1, mapId: 'island01', serverTime: 0, matchId: 1, roomId: 'r1' }) });
     for (let tick = 100; tick < 110; tick++) {
       s.receive(encodeQuantized({ t: 'snapshot', snap: enc1.encode(quantizeDeep(makeSnapshot(tick, [makePlayer(1)]))) }));
     }
     expect(net.latestSnapshot()!.tick).toBe(109);
     // Next match: a new World, ticks from 1, a new encoder on the server (first snapshot full).
-    s.receive({ t: 'welcome', welcome: { playerId: 4, mapId: 'office', serverTime: 9000, matchId: 2, roomId: 'r1' } });
+    s.receive({ t: 'welcome', welcome: makeWelcome({ playerId: 4, mapId: 'office', serverTime: 9000, matchId: 2, roomId: 'r1' }) });
     expect(net.latestSnapshot()).toBeNull();
     const enc2 = new SnapshotDeltaEncoder(true);
     for (let tick = 1; tick < 6; tick++) {

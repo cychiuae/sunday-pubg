@@ -15,6 +15,7 @@
  * is fully deterministic. The exported ISLAND is plain IslandMapData (kind 'island', carrier 'seaplane').
  */
 import type { IslandMapData } from '../../shared/types';
+import { atan2Det, cosRad, hypot2, sinRad } from './detTrig';
 
 type Prop = IslandMapData['props'][number];
 type PropKind = Prop['kind'];
@@ -130,13 +131,15 @@ const DEG = Math.PI / 180;
 /** Round to cm. The `+ 0` turns -0 into 0. */
 const r2 = (v: number): number => Math.round(v * 100) / 100 + 0;
 const r3 = (v: number): number => Math.round(v * 1000) / 1000 + 0;
-const wrapAngle = (a: number): number => Math.atan2(Math.sin(a), Math.cos(a));
-const len = (p: P2): number => Math.hypot(p.x, p.z);
-const dist = (a: P2, b: P2): number => Math.hypot(a.x - b.x, a.z - b.z);
+// Review MF2: all trig and hypot go through ./detTrig (identical bits on every engine; within about 1 ulp of Math,
+// so the cm / mrad-rounded data is today's).
+const wrapAngle = (a: number): number => atan2Det(sinRad(a), cosRad(a));
+const len = (p: P2): number => hypot2(p.x, p.z);
+const dist = (a: P2, b: P2): number => hypot2(a.x - b.x, a.z - b.z);
 
 /** Compass polar -> XZ (0 deg = north = -Z, 90 deg = east = +X). */
 function polar(deg: number, r: number): P2 {
-  return { x: r * Math.sin(deg * DEG), z: -r * Math.cos(deg * DEG) };
+  return { x: r * sinRad(deg * DEG), z: -r * cosRad(deg * DEG) };
 }
 
 function offset(c: P2, deg: number, r: number): P2 {
@@ -146,12 +149,12 @@ function offset(c: P2, deg: number, r: number): P2 {
 
 /** rotY that points local +Z from `from` toward `to`. */
 function facing(from: P2, to: P2): number {
-  return Math.atan2(to.x - from.x, to.z - from.z);
+  return atan2Det(to.x - from.x, to.z - from.z);
 }
 
 /** rotY that points local +Z away from the island centre (out to sea). */
 function outward(p: P2): number {
-  return Math.atan2(p.x, p.z);
+  return atan2Det(p.x, p.z);
 }
 
 function poiCentre(id: string): P2 {
@@ -185,8 +188,8 @@ function mulberry32(seed: number): () => number {
  */
 export function propFootprint(p: Prop): Circle[] {
   const s = p.scale;
-  const ax = Math.sin(p.rotY);
-  const az = Math.cos(p.rotY);
+  const ax = sinRad(p.rotY);
+  const az = cosRad(p.rotY);
   const along = (offsets: number[], r: number): Circle[] =>
     offsets.map((o) => ({ x: p.x + ax * o * s, z: p.z + az * o * s, r: r * s }));
   switch (p.kind) {
@@ -227,7 +230,7 @@ class Builder {
   inDisc(c: P2, radius: number): P2 {
     const a = this.rng() * Math.PI * 2;
     const r = radius * Math.sqrt(this.rng());
-    return { x: c.x + r * Math.sin(a), z: c.z + r * Math.cos(a) };
+    return { x: c.x + r * sinRad(a), z: c.z + r * cosRad(a) };
   }
 
   /** Uniform (by area) point in an annulus around the origin. */

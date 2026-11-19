@@ -11,15 +11,12 @@
  */
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 import { calibrateLook, fetchLoot, hook, me, waitHook } from './support/drive';
-import { game, joinByCode, lockPointer, newPlayer, openTitle, SHOTS, soloMatch, toBrowser, ui, unexpectedErrors, type ConsoleLog } from './support/game';
+import { game, joinByCode, lockPointer, newPlayer, openTitle, SHOTS, soloMatch, toBrowser, ui, unexpectedErrors, type ConsoleLog, zeroLoot } from './support/game';
 import { Observer } from './support/observer';
 import { startStack, type Stack } from './support/stack';
 
 const NAME = 'QA First';
-const ZERO_ALL = {
-  pistol: 0, smg: 0, shotgun: 0, lmg: 0, dmr: 0, sniper: 0, bandage: 0, medkit: 0, vest_1: 0, vest_2: 0, vest_3: 0,
-  helmet_1: 0, helmet_2: 0, helmet_3: 0, ammo_light: 0, ammo_heavy: 0, ammo_shell: 0, ammo_sniper: 0, grenade: 0,
-};
+const ZERO_ALL = zeroLoot(); // every loot id (M2c included)
 const RIFLES = { ...ZERO_ALL, rifle: 1 };
 const deg = (r: number): number => (r * 180) / Math.PI;
 const rad = (d: number): number => (d * Math.PI) / 180;
@@ -41,7 +38,7 @@ test.describe.configure({ mode: 'serial' });
 test.beforeAll(async ({ browser }) => {
   test.setTimeout(150_000);
   stack = await startStack({
-    label: 'm2b-fp',
+    label: 'm2b-fp', layoutSeed: 'baseline', // M2c: pinned layout (seed 0 = the M2b props and loot) so paths are reproducible
     seed: 9090,
     balance: {
       match: { countdownSeconds: 4, resultsSeconds: 5, targetPlayers: 3 },
@@ -117,9 +114,14 @@ test('carrier drop: carrier view aboard; Space -> freefall -> chute -> on foot; 
     }
     if (ph === 'chute' && !shotChute) {
       shotChute = true;
-      // Look up: the canopy is visible overhead in the chute (camera.md QA 12).
-      await page.evaluate(() => document.dispatchEvent(new MouseEvent('mousemove', { movementX: 0, movementY: -400, bubbles: true })));
-      await page.waitForTimeout(300);
+      // Look straight up (pitch clamps at +80 deg): the canopy is visible overhead in the chute (camera.md QA 12).
+      // Three 300 px moves (one large event would be clipped by the BUG-002 spike filter).
+      for (let i = 0; i < 3; i++) {
+        await page.evaluate(() => document.dispatchEvent(new MouseEvent('mousemove', { movementX: 0, movementY: -300, bubbles: true })));
+        await page.waitForTimeout(60);
+      }
+      await page.waitForTimeout(250);
+      notes.push(`chute look-up pitch ${(((await game(page, (g) => g.localPitch)) * 180) / Math.PI).toFixed(1)} deg, phase ${await game(page, (g) => g.dropPhase)}`);
       await shot('chute-look-up');
     }
     if (ph === null && !(await game(page, (g) => g.aboard))) break;

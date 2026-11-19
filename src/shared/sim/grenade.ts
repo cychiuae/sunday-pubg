@@ -2,12 +2,13 @@
  * Frag grenade physics and blast math (docs/design/systems/grenades.md, ADR 0004 §3-4). Pure and RNG-free: the same
  * launch state gives the same path on the server (World), in ClientGame extrapolation and in the arc preview.
  */
-import type { Balance } from '../balance';
+import type { Balance, ThrowableBalance } from '../balance';
 import type { GrenadeArcView } from '../contracts';
 import { aimDirection, clamp, DEG2RAD, forwardFromYaw, RAD2DEG } from '../math';
 import { isIndoor } from '../maps';
-import type { GrenadeContactSurface, Vec3 } from '../types';
+import type { GrenadeContactSurface, M2cThrowableId, Vec3 } from '../types';
 import { platformHeightAt, raycastColliders, raycastStatic, type Collider } from './colliders';
+import { blastDamage } from './blast';
 import type { MovementContext } from './movement';
 import { heightAt, raycastTerrain } from './terrain';
 
@@ -50,6 +51,10 @@ const SUPPORT_FACTOR = 2;
 const REST_MIN_NORMAL_Y = 0.7;
 /** grenades.md "Throw": the launch pitch (aim pitch + throwLiftDeg) is capped at this many degrees (REVIEW-M2a L4). */
 const LAUNCH_PITCH_MAX_DEG = 89;
+
+/** M2c (smoke.md): throw and flight keys of a throwable kind (items.grenade or items.smoke). */
+export const throwableBalance = (b: Balance, kind: M2cThrowableId = 'grenade'): ThrowableBalance =>
+  kind === 'smoke' ? b.items.smoke : b.items.grenade;
 
 const len3 = (v: Vec3): number => Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
 const isZero = (v: Vec3): boolean => v.x === 0 && v.y === 0 && v.z === 0;
@@ -100,8 +105,8 @@ function supportBelow(ctx: MovementContext, x: number, y: number, z: number): nu
  * world-edge wall, at most one bounce per tick (rest of the motion dropped), rest detection, and the one-off water
  * damping. Players are not colliders. A body at rest (zero velocity with support under it) does not move.
  */
-export function stepGrenade(body: GrenadeBody, dt: number, ctx: MovementContext): GrenadeStepResult {
-  const g = ctx.balance.items.grenade;
+export function stepGrenade(body: GrenadeBody, dt: number, ctx: MovementContext, kind: M2cThrowableId = 'grenade'): GrenadeStepResult {
+  const g = throwableBalance(ctx.balance, kind);
   const r = g.collisionRadius;
   const pos = body.pos;
   const step = dt > 0 && Number.isFinite(dt) ? dt : 0;
@@ -215,8 +220,8 @@ export function stepGrenade(body: GrenadeBody, dt: number, ctx: MovementContext)
 }
 
 /** Throw speed for an aim pitch (radians), before the prone multiplier (grenades.md "Throw"). */
-export function throwSpeedFor(pitch: number, b: Balance): number {
-  const g = b.items.grenade;
+export function throwSpeedFor(pitch: number, b: Balance, kind: M2cThrowableId = 'grenade'): number {
+  const g = throwableBalance(b, kind);
   const span = g.throwPitchMaxDeg - g.throwPitchMinDeg;
   const t = span > 0 ? clamp((pitch * RAD2DEG - g.throwPitchMinDeg) / span, 0, 1) : 1;
   return g.throwSpeedMin + (g.throwSpeedMax - g.throwSpeedMin) * t;
@@ -233,9 +238,10 @@ export function throwLaunch(
   pitch: number,
   proneSettled: boolean,
   ctx: MovementContext,
+  kind: M2cThrowableId = 'grenade',
 ): { pos: Vec3; vel: Vec3 } {
-  const g = ctx.balance.items.grenade;
-  const speed = throwSpeedFor(pitch, ctx.balance) * (proneSettled ? g.throwSpeedProneMultiplier : 1);
+  const g = throwableBalance(ctx.balance, kind);
+  const speed = throwSpeedFor(pitch, ctx.balance, kind) * (proneSettled ? g.throwSpeedProneMultiplier : 1);
   const launchPitch = Math.min(LAUNCH_PITCH_MAX_DEG, pitch * RAD2DEG + g.throwLiftDeg) * DEG2RAD;
   const ld = aimDirection(yaw, launchPitch);
   const aim = aimDirection(yaw, pitch);
@@ -249,9 +255,9 @@ export function throwLaunch(
 }
 
 /** Short drop when switching away while cooking: origin = eye, velocity = horizontal look x dropOnSwitchSpeed. */
-export function dropLaunch(eye: Vec3, yaw: number, ctx: MovementContext): { pos: Vec3; vel: Vec3 } {
+export function dropLaunch(eye: Vec3, yaw: number, ctx: MovementContext, kind: M2cThrowableId = 'grenade'): { pos: Vec3; vel: Vec3 } {
   const f = forwardFromYaw(yaw);
-  const s = ctx.balance.items.grenade.dropOnSwitchSpeed;
+  const s = throwableBalance(ctx.balance, kind).dropOnSwitchSpeed;
   return { pos: { ...eye }, vel: { x: f.x * s, y: 0, z: f.z * s } };
 }
 
@@ -267,6 +273,7 @@ export function predictGrenadeArc(
   ctx: MovementContext,
   maxSeconds: number,
   out?: { points: Vec3[] },
+  kind: M2cThrowableId = 'grenade',
 ): Omit<GrenadeArcView, 'radius'> {
   const dt = 1 / ctx.balance.net.simHz;
   let body: GrenadeBody = { pos: { ...launch.pos }, vel: { ...launch.vel }, inWater: false };
@@ -289,7 +296,7 @@ export function predictGrenadeArc(
   let fuse = fuseRemainingMs;
   const maxTicks = Math.max(0, Math.ceil((maxSeconds * 1000) / (dt * 1000) - 1e-9));
   for (let i = 0; i < maxTicks; i++) {
-    body = stepGrenade(body, dt, ctx).body;
+    body = stepGrenade(body, dt, ctx, kind).body;
     put(body.pos);
     fuse -= dt * 1000;
     if (fuse <= 1e-6) return done('fuse');
@@ -303,10 +310,5 @@ export function predictGrenadeArc(
  * innerRadius, linear to maxDamage x minDamageFactor at radius, 0 beyond.
  */
 export function explosionDamage(dist: number, b: Balance): number {
-  const g = b.items.grenade;
-  if (!(dist <= g.radius)) return 0;
-  if (dist <= g.innerRadius) return g.maxDamage;
-  const span = g.radius - g.innerRadius;
-  const t = span > 0 ? (dist - g.innerRadius) / span : 1;
-  return g.maxDamage * (1 + (g.minDamageFactor - 1) * t);
+  return blastDamage(dist, b.items.grenade);
 }

@@ -2,10 +2,28 @@
  * Pure event -> cue mapping helpers. Owner: audio-designer. Full table in docs/audio/AUDIO.md section 4.
  */
 import type { ZoneTheme } from '../shared/balance';
-import type { ArmorHit, ArmorSlot, GlassSurface, ImpactSurface, ItemId, ShotImpact, Stance, Vec3, WeaponId } from '../shared/types';
+import type {
+  ArmorHit,
+  ArmorSlot,
+  GlassSurface,
+  ImpactSurface,
+  ItemLevel,
+  LookId,
+  M2cItemId,
+  M2cSightType,
+  M2cWeaponId,
+  MeleeId,
+  ShotImpact,
+  Stance,
+  Vec3,
+} from '../shared/types';
 import { AUDIO_TUNING, type CueId } from './cues';
 
-export function shotCue(weapon: WeaponId, isLocal: boolean): CueId {
+/**
+ * Shot cue per weapon. M2c: melee swings are voiced by meleeSwing and the rpg launch by rocketFired, so a `shotFired`
+ * for those (if a producer ever sends one) maps to null and stays silent (never voiced twice).
+ */
+export function shotCue(weapon: M2cWeaponId, isLocal: boolean): CueId | null {
   const side = isLocal ? 'local' : 'remote';
   switch (weapon) {
     case 'fists':
@@ -24,6 +42,15 @@ export function shotCue(weapon: WeaponId, isLocal: boolean): CueId {
       return `shot.dmr.${side}`;
     case 'sniper':
       return `shot.sniper.${side}`;
+    case 'dbshotgun':
+      return `shot.dbshotgun.${side}`;
+    case 'revolver':
+      return `shot.revolver.${side}`;
+    case 'knife':
+    case 'machete':
+    case 'paddle':
+    case 'rpg':
+      return null;
   }
 }
 
@@ -66,10 +93,16 @@ export function selectImpacts(impacts: readonly ShotImpact[], max: number = AUDI
   return out;
 }
 
-export type ItemSoundClass = 'weapon' | 'ammo' | 'heal' | 'vest' | 'helmet' | 'grenade';
+export type ItemSoundClass = 'weapon' | 'ammo' | 'heal' | 'vest' | 'helmet' | 'grenade' | 'scope';
 
-export function itemClass(item: ItemId): ItemSoundClass {
+export function itemClass(item: M2cItemId): ItemSoundClass {
   switch (item) {
+    case 'knife':
+    case 'machete':
+    case 'paddle':
+    case 'dbshotgun':
+    case 'revolver':
+    case 'rpg':
     case 'pistol':
     case 'smg':
     case 'shotgun':
@@ -82,6 +115,7 @@ export function itemClass(item: ItemId): ItemSoundClass {
     case 'ammo_heavy':
     case 'ammo_shell':
     case 'ammo_sniper':
+    case 'ammo_rocket':
       return 'ammo';
     case 'bandage':
     case 'medkit':
@@ -89,19 +123,29 @@ export function itemClass(item: ItemId): ItemSoundClass {
     case 'vest_1':
     case 'vest_2':
     case 'vest_3':
+    case 'vest_4':
       return 'vest';
     case 'helmet_1':
     case 'helmet_2':
     case 'helmet_3':
+    case 'helmet_4':
       return 'helmet';
     case 'grenade':
+    case 'smoke':
       return 'grenade';
+    case 'scope_red_dot':
+    case 'scope_2x':
+    case 'scope_4x':
+    case 'scope_8x':
+      return 'scope';
   }
 }
 
 /** Pickup / equip cue: velcro for vests, strap click for helmets, a metal clink for grenades. */
-export function pickupCue(item: ItemId): CueId {
+export function pickupCue(item: M2cItemId): CueId {
   switch (itemClass(item)) {
+    case 'scope':
+      return 'pickup.scope';
     case 'weapon':
       return 'pickup.weapon';
     case 'ammo':
@@ -237,4 +281,250 @@ export function zoneThemeCues(theme: ZoneTheme): ZoneThemeCues {
     case 'lightsOut':
       return LIGHTS_OUT_CUES;
   }
+}
+
+// --- M2c: item levels (docs/audio/M2c.md §6, §7) ------------------------------------------------------------------
+
+/**
+ * Level of a picked-up item for the sparkle: the event's `level` (weapons and melee), else the armor tier from the id
+ * (`vest_4` -> 4). null = no sparkle (ammo, heals, throwables, scopes, missing level).
+ */
+export function pickupLevel(item: M2cItemId, level: ItemLevel | null | undefined): ItemLevel | null {
+  const cls = itemClass(item);
+  if (cls === 'vest' || cls === 'helmet') {
+    const n = Number(item.slice(-1));
+    return n === 1 || n === 2 || n === 3 || n === 4 ? n : null;
+  }
+  if (cls !== 'weapon') return null;
+  return level === 1 || level === 2 || level === 3 || level === 4 ? level : null;
+}
+
+// --- M2c: melee (§2) ----------------------------------------------------------------------------------------------
+
+export type MeleeMaterial = 'body' | 'head' | 'vest' | 'helmet' | 'glass' | 'wall' | 'ground' | 'water';
+
+/** Contact material for a non-player meleeHit surface (null = nothing to voice). */
+export function meleeSurfaceMaterial(surface: ImpactSurface | GlassSurface): MeleeMaterial | null {
+  switch (surface) {
+    case 'terrain':
+      return 'ground';
+    case 'prop':
+      return 'wall';
+    case 'water':
+      return 'water';
+    case 'glass':
+      return 'glass';
+    case 'player':
+    case 'none':
+      return null;
+  }
+}
+
+/** Contact material on a player: armor beats bare (helmet only on head hits), head beats body. */
+export function meleePlayerMaterial(e: { headshot: boolean; vest: ArmorHit | null; helmet: ArmorHit | null }): MeleeMaterial {
+  if (e.helmet) return 'helmet';
+  if (e.vest) return 'vest';
+  return e.headshot ? 'head' : 'body';
+}
+
+/** `melee.hit` recipe variant. */
+export const meleeHitVariant = (weapon: MeleeId, material: MeleeMaterial): string => `${weapon}.${material}`;
+
+/** Whoosh peak time (s) from the event's windupMs, clamped (M2c §2.2). */
+export function meleePeakS(windupMs: number): number {
+  const s = Number.isFinite(windupMs) ? windupMs / 1000 : AUDIO_TUNING.meleePeakMinS;
+  return Math.min(AUDIO_TUNING.meleePeakMaxS, Math.max(AUDIO_TUNING.meleePeakMinS, s));
+}
+
+/** Remote swing range per melee weapon (m): the knife is the quietest, the paddle's wind-up carries farthest. */
+export const MELEE_SWING_RANGE_M: Readonly<Record<MeleeId, number>> = { knife: 14, machete: 16, paddle: 20 };
+
+/** 1 inside 80 % of the weapon's swing range, then a linear fade to 0 at the range (remote swings). */
+export function meleeRangeFade(weapon: string, d: number): number {
+  const r = isMeleeWeapon(weapon) ? MELEE_SWING_RANGE_M[weapon] : MELEE_SWING_RANGE_M.machete;
+  if (!(d > r * 0.8)) return 1;
+  return Math.max(0, 1 - (d - r * 0.8) / (r * 0.2));
+}
+
+/** Is this held id a melee weapon (typed wide so it accepts pre- and post-gate unions). */
+export const isMeleeWeapon = (w: string | null | undefined): w is MeleeId => w === 'knife' || w === 'machete' || w === 'paddle';
+
+// --- M2c: rockets (§4) ----------------------------------------------------------------------------------------------
+
+/**
+ * Doppler-ish pitch ratio for a source at `src` moving with `vel` heard at `listener` (listener motion ignored).
+ * > 1 approaching, < 1 receding, clamped to AUDIO_TUNING.rocketDoppler{Min,Max}.
+ */
+export function dopplerRatio(src: Vec3, vel: Vec3, listener: Vec3): number {
+  const T = AUDIO_TUNING;
+  const dx = listener.x - src.x;
+  const dy = listener.y - src.y;
+  const dz = listener.z - src.z;
+  const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  if (!(d > 1e-6)) return 1;
+  const vr = (vel.x * dx + vel.y * dy + vel.z * dz) / d;
+  const denom = T.rocketSoundSpeed - vr;
+  const r = denom > 1e-6 ? T.rocketSoundSpeed / denom : T.rocketDopplerMax;
+  return r < T.rocketDopplerMin ? T.rocketDopplerMin : r > T.rocketDopplerMax ? T.rocketDopplerMax : r;
+}
+
+/** Rocket blast size factor from its radius (6 m = the frag): longer, not louder (§4.3). */
+export function blastSize(radius: number): number {
+  const s = Number.isFinite(radius) ? radius / 6 : 1;
+  return Math.min(1.5, Math.max(0.8, s));
+}
+
+// --- M2c: smoke (§5) ------------------------------------------------------------------------------------------------
+
+/** Hiss envelope (seconds) for one cloud: grow, hold, fade, and how far into it we start (late joiner). */
+export interface SmokeShape {
+  growS: number;
+  holdS: number;
+  fadeS: number;
+  offsetS: number;
+}
+
+/**
+ * Hiss shape from the cloud record (server ms) and the balance cloud timings (ms; null = audio fallbacks).
+ * `now` = server ms when the loop starts (deployedAt for a fresh deploy).
+ */
+export function smokeShape(
+  cloud: { deployedAt: number; fadeAt: number },
+  now: number,
+  cfg: { growMs: number; fadeMs: number } | null,
+): SmokeShape {
+  const T = AUDIO_TUNING;
+  const growS = cfg ? Math.max(0, cfg.growMs) / 1000 : T.smokeFallbackGrowS;
+  const fadeS = cfg ? Math.max(0, cfg.fadeMs) / 1000 : T.smokeFallbackFadeS;
+  const untilFadeS = Math.max(0, (cloud.fadeAt - cloud.deployedAt) / 1000);
+  const g = Math.min(growS, untilFadeS);
+  const holdS = Math.max(0, untilFadeS - g);
+  const offsetS = Number.isFinite(now) ? Math.max(0, (now - cloud.deployedAt) / 1000) : 0;
+  return { growS: g, holdS, fadeS, offsetS };
+}
+
+/** Seconds left in the hiss (0 = over). */
+export const smokeRemainingS = (s: SmokeShape): number => Math.max(0, s.growS + s.holdS + s.fadeS - s.offsetS);
+
+// --- M2c: scopes (§7a) ----------------------------------------------------------------------------------------------
+
+/** ADS sweep length (s) by sight: 0 for iron / red dot, then 2x < 4x < 8x. */
+export function adsSweepS(sight: M2cSightType | string): number {
+  switch (sight) {
+    case 'scope_2x':
+      return 0.14;
+    case 'scope_4x':
+      return 0.2;
+    case 'scope_8x':
+      return 0.3;
+    default:
+      return 0;
+  }
+}
+
+// --- M2c: look presets (§8) -----------------------------------------------------------------------------------------
+
+/** A detail one-shot scheduled by the engine while a look is active. Distances in metres around the listener. */
+export interface LookDetail {
+  cue: CueId;
+  minS: number;
+  maxS: number;
+  minR: number;
+  maxR: number;
+  /** Height above the listener (negative = below), random in [minUp, maxUp]. */
+  minUp: number;
+  maxUp: number;
+}
+
+/** Island bed parameters (multipliers on the M2b bed; noon = all 1 / baseline). */
+export interface IslandLook {
+  scene: 'island';
+  wave: number;
+  waveLpHz: number;
+  swellRate: number;
+  wind: number;
+  windHz: number;
+  windQ: number;
+  windGust: number;
+  /** Gull call interval (s). */
+  gullMinS: number;
+  gullMaxS: number;
+  details: readonly LookDetail[];
+}
+
+/** Office bed parameters (day = baseline). */
+export interface OfficeLook {
+  scene: 'indoor';
+  hvac: number;
+  buzz: number;
+  /** Flicker depth multiplier, plus an extra slow stutter (0 = none). */
+  flicker: number;
+  stutter: number;
+  /** Server fan whir bed level (0 = none). */
+  fan: number;
+  keysMinS: number;
+  keysMaxS: number;
+  details: readonly LookDetail[];
+}
+
+export type AmbienceLook = IslandLook | OfficeLook;
+
+const T0 = AUDIO_TUNING;
+const ISLAND_LOOKS: Readonly<Record<'morning' | 'noon' | 'golden' | 'overcast', IslandLook>> = {
+  morning: {
+    scene: 'island', wave: 0.8, waveLpHz: 380, swellRate: 0.85, wind: 0.7, windHz: 550, windQ: 0.6, windGust: 1,
+    gullMinS: 5, gullMaxS: 12,
+    details: [{ cue: 'amb.bird', minS: 6, maxS: 14, minR: 20, maxR: 50, minUp: 8, maxUp: 15 }],
+  },
+  noon: {
+    scene: 'island', wave: 1, waveLpHz: 420, swellRate: 1, wind: 1, windHz: 550, windQ: 0.6, windGust: 1,
+    gullMinS: T0.gullMinIntervalS, gullMaxS: T0.gullMaxIntervalS, details: [],
+  },
+  golden: {
+    scene: 'island', wave: 0.9, waveLpHz: 360, swellRate: 0.9, wind: 1.1, windHz: 450, windQ: 0.6, windGust: 1,
+    gullMinS: 12, gullMaxS: 25,
+    details: [
+      { cue: 'amb.crickets', minS: 4, maxS: 9, minR: 15, maxR: 40, minUp: -1, maxUp: 0 },
+      { cue: 'amb.chime', minS: 18, maxS: 35, minR: 30, maxR: 60, minUp: 1, maxUp: 3 },
+    ],
+  },
+  overcast: {
+    scene: 'island', wave: 1.2, waveLpHz: 520, swellRate: 1.25, wind: 1.8, windHz: 550, windQ: 0.5, windGust: 2,
+    gullMinS: 20, gullMaxS: 40,
+    details: [{ cue: 'amb.palms', minS: 5, maxS: 12, minR: 15, maxR: 40, minUp: 4, maxUp: 9 }],
+  },
+};
+const OFFICE_LOOKS: Readonly<Record<'day' | 'evening' | 'afterHours', OfficeLook>> = {
+  day: { scene: 'indoor', hvac: 1, buzz: 1, flicker: 1, stutter: 0, fan: 0, keysMinS: T0.keysMinIntervalS, keysMaxS: T0.keysMaxIntervalS, details: [] },
+  evening: {
+    scene: 'indoor', hvac: 0.85, buzz: 0.9, flicker: 1, stutter: 0, fan: 0, keysMinS: 8, keysMaxS: 18,
+    details: [{ cue: 'amb.copier', minS: 25, maxS: 50, minR: 20, maxR: 45, minUp: -1, maxUp: 0 }],
+  },
+  afterHours: {
+    scene: 'indoor', hvac: 0.7, buzz: 0.5, flicker: 2, stutter: 1, fan: 0.06, keysMinS: 30, keysMaxS: 60,
+    details: [
+      { cue: 'amb.cooler', minS: 20, maxS: 40, minR: 15, maxR: 35, minUp: -1, maxUp: 0 },
+      { cue: 'amb.hvacCycle', minS: 30, maxS: 60, minR: 10, maxR: 30, minUp: 4, maxUp: 8 },
+    ],
+  },
+};
+
+/** The default look of a scene (the M2b bed). */
+export const defaultLookId = (scene: AmbienceScene): LookId => (scene === 'indoor' ? 'day' : 'noon');
+
+/**
+ * Bed parameters for a scene and look id. An unknown id, a missing id, or an id from the other map kind falls back
+ * to the scene's default (noon / day).
+ */
+export function lookOf(scene: AmbienceScene, look: LookId | string | null | undefined): AmbienceLook {
+  if (scene === 'indoor') {
+    return (look && Object.prototype.hasOwnProperty.call(OFFICE_LOOKS, look) ? OFFICE_LOOKS[look as keyof typeof OFFICE_LOOKS] : OFFICE_LOOKS.day);
+  }
+  return look && Object.prototype.hasOwnProperty.call(ISLAND_LOOKS, look) ? ISLAND_LOOKS[look as keyof typeof ISLAND_LOOKS] : ISLAND_LOOKS.noon;
+}
+
+/** The resolved look id (for change detection): the given id when it belongs to the scene, else the default. */
+export function resolveLookId(scene: AmbienceScene, look: LookId | string | null | undefined): string {
+  const table = scene === 'indoor' ? OFFICE_LOOKS : ISLAND_LOOKS;
+  return look && Object.prototype.hasOwnProperty.call(table, look) ? look : defaultLookId(scene);
 }

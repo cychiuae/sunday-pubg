@@ -12,6 +12,8 @@ import { isIndoor, validateIndoorMap } from '../src/shared/maps';
 import { MAX_CLIENT_FRAME_BYTES_HARD } from '../src/shared/protocol/messages';
 import { resolveMapChoice } from '../src/shared/sim/mapVote';
 import { prepareMap } from '../src/shared/sim/movement';
+import { applyLayout, buildMatchLayout, pickVariants } from '../src/game/levels/layout';
+import type { LayoutGenerator } from './layoutLock';
 import type { Logger, WorldFactory } from './common';
 import { getMap } from '../src/game/levels';
 import { levelIds, mapVoteLockSeconds, roomsBalance } from './config';
@@ -39,6 +41,10 @@ export interface StartOptions {
   maxConnections?: number;
   /** MAP pin (already validated by readConfig; an unknown id here throws). */
   mapPin?: string | null;
+  /** M2c LAYOUT_SEED pin (already parsed by readConfig; 0 = baseline). Absent/null = a fresh layout per match. */
+  layoutSeed?: number | null;
+  /** M2c per-match layouts. Default true (the level generator); false = every match on the base map (tests). */
+  layouts?: boolean;
   /** WorldOptions.drop (tests: false = the M1 spawn, no carrier flight). */
   worldDrop?: boolean;
   /** Tests: fixed event-loop delay reading (server_busy). */
@@ -63,6 +69,13 @@ export interface RunningServer {
 }
 
 const HEARTBEAT_MS = 10_000;
+
+/** The level-designer's generator (ADR 0007 §1.2), server side: no decor. */
+export const LEVEL_LAYOUTS: LayoutGenerator = {
+  build: (base, seed) => buildMatchLayout(base, seed, { decor: false }),
+  apply: (base, layout) => applyLayout(base, layout),
+  picks: (base, seed) => pickVariants(base, seed),
+};
 
 function remoteAddress(req: IncomingMessage, trustProxy: boolean): string {
   if (trustProxy) {
@@ -117,6 +130,8 @@ export async function startServer(opts: StartOptions): Promise<RunningServer> {
     resolveMapChoice,
     botNames: keysWithPrefix('bot.name').map((k) => t(k)),
     ...(opts.worldDrop !== undefined ? { worldDrop: opts.worldDrop } : {}),
+    layoutPin: opts.layoutSeed ?? null,
+    ...(opts.layouts !== false ? { layouts: LEVEL_LAYOUTS } : {}),
     maxRooms,
     maxConnections: opts.maxConnections ?? maxRooms * opts.balance.match.maxPlayers + 32,
     simHz: opts.simHz ?? SIM_HZ,

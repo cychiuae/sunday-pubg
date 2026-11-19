@@ -1,11 +1,24 @@
 /**
  * Kill feed (top-left) plus the two timed message slots: announcer banner and one-time hints.
+ * M2c (docs/ui/M2c.md §8): rocket / melee routing (logic.killFeedPrefix), the rocket glyph on rocket lines, and the
+ * killer's weapon icon + level badge after the sentence (none for fists, frags, smoke, zone, fall, self-kills).
  * Owner: ui-ux-designer.
  */
 import { t, type StringVars } from '../content/strings';
 import { h, retrigger } from './dom';
-import { icon } from './icons';
-import { isGrenadeFeedPrefix, killFeedPrefix, MessageQueue, pickVariantKey, splitTemplate, type KillInfo } from './logic';
+import type { ItemLevel } from '../shared/types';
+import { icon, levelBadge, setLevelBadge } from './icons';
+import {
+  isGrenadeFeedPrefix,
+  isRocketFeedPrefix,
+  killFeedPrefix,
+  killWeaponTag,
+  levelLabel,
+  MessageQueue,
+  pickVariantKey,
+  splitTemplate,
+  type KillInfo,
+} from './logic';
 
 const FEED_MAX = 5;
 const FEED_MS = 6000;
@@ -17,6 +30,8 @@ interface FeedEntry {
 
 export interface FeedKill extends KillInfo {
   headshot: boolean;
+  /** M2c: the kill weapon's level (playerKilled.weaponLevel). */
+  weaponLevel?: ItemLevel | null;
   isLocalKiller: boolean;
   isLocalVictim: boolean;
 }
@@ -40,13 +55,18 @@ export class KillFeed {
     const li = h('li', 'ui-feed__item');
     if (k.isLocalKiller) li.classList.add('is-mine');
     if (k.isLocalVictim) li.classList.add('is-me');
-    if (k.headshot && prefix === 'feed.headshot') {
+    if (k.headshot && (prefix === 'feed.headshot' || prefix === 'feed.meleeHeadshot')) {
       li.appendChild(h('span', 'ui-glyph ui-glyph--target', { 'aria-hidden': 'true' }));
     }
     // M2a: grenade / explosion kills (and self-grenade lines) lead with the pineapple icon (STYLE.md §18).
     if (isGrenadeFeedPrefix(prefix)) {
       li.classList.add('is-grenade');
       li.appendChild(icon('grenade', 'ui-feed__icon'));
+    }
+    // M2c: rocket lines lead with the rocket glyph (like the pineapple).
+    if (isRocketFeedPrefix(prefix)) {
+      li.classList.add('is-rocket');
+      li.appendChild(icon('ammo_rocket', 'ui-feed__icon'));
     }
     for (const part of splitTemplate(t(key), vars)) {
       if (part.varName === 'killer' || part.varName === 'victim') {
@@ -56,6 +76,14 @@ export class KillFeed {
       } else {
         li.appendChild(document.createTextNode(part.text));
       }
+    }
+    // M2c: weapon icon + level badge after the line (the numeral is the non-colour tell).
+    const tag = killWeaponTag(k, k.weaponLevel);
+    if (tag) {
+      const badge = levelBadge('ui-feed__badge');
+      setLevelBadge(badge, tag.level);
+      const sr = tag.level !== null ? h('span', 'ui-sr', null, ` ${levelLabel(tag.level)}`) : null;
+      li.appendChild(h('span', 'ui-feed__tag', null, icon(tag.weapon, 'ui-feed__icon'), badge, sr));
     }
     this.el.appendChild(li);
     this.entries.push({ el: li, until: nowMs + FEED_MS });

@@ -5,27 +5,50 @@
  * so the whole mapping is unit-tested. Owner: audio-designer. The AudioEngine executes the commands.
  */
 import type { Balance, ZoneTheme } from '../shared/balance';
+import type { SmokeCloudView } from '../shared/contracts';
 import type { GameEvents } from '../shared/events';
-import { stanceTransitionKey, type GrenadeId, type PlayerId, type Stance, type Vec3 } from '../shared/types';
+import {
+  stanceTransitionKey,
+  type GrenadeId,
+  type M2cDeathCause,
+  type M2cItemId,
+  type M2cThrowableId,
+  type PlayerId,
+  type RocketState,
+  type SmokeCloudState,
+  type SmokeId,
+  type Stance,
+  type Vec3,
+} from '../shared/types';
 import { AUDIO_TUNING, type BusId, type CueId } from './cues';
 import { DropTracker } from './drop';
 import {
   armorPieces,
   blastCloseness,
+  blastSize,
   bounceIntensity,
   confirmArmorCue,
   countdownIntensity,
   damageArmorCue,
   footCue,
   impactCue,
+  isMeleeWeapon,
   isWaterBlast,
   itemClass,
   landIntensity,
+  meleeHitVariant,
+  meleePeakS,
+  meleePlayerMaterial,
+  meleeSurfaceMaterial,
   pickupCue,
+  pickupLevel,
   remoteHitVariant,
+  resolveLookId,
   sceneOf,
   selectImpacts,
   shotCue,
+  smokeRemainingS,
+  smokeShape,
   zoneThemeCues,
   type AmbienceScene,
 } from './soundMap';
@@ -45,6 +68,10 @@ export interface PlayCommand {
   loopKey?: string;
   /** Length for loops / timed voices, seconds. */
   durationS?: number;
+  /** M2c: extra numeric recipe parameters (smoke hiss shape, reload rounds, rocket blast size). */
+  params?: readonly number[];
+  /** M2c: start this many seconds later (an auto-mounted scope's click after the pickup). */
+  delayS?: number;
 }
 
 export type AudioCommand =
@@ -55,8 +82,15 @@ export type AudioCommand =
   | { kind: 'lowHealth'; active: boolean }
   /** Local player outside the safe zone: surf (island), spray (sprinklers) or dark (lights out) in the ambience. */
   | { kind: 'outside'; active: boolean }
-  /** M2b: switch the ambience scene (and the indoor reverb) for a new map; `theme` picks the zone layers. */
-  | { kind: 'map'; scene: AmbienceScene; theme: ZoneTheme }
+  /**
+   * M2b: switch the ambience scene (and the indoor reverb) for a new map; `theme` picks the zone layers. M2c: `look` =
+   * the resolved look preset id (mood of the bed and its detail one-shots).
+   */
+  | { kind: 'map'; scene: AmbienceScene; theme: ZoneTheme; look: string }
+  /** M2c: a rocket launched (the engine dead-reckons it while main.ts does not call setRockets). */
+  | { kind: 'rocketFired'; rocket: RocketState; gravity: number; maxFlightMs: number | null }
+  /** M2c: a rocket ended (explosion or dud): its whistle cuts now. */
+  | { kind: 'rocketGone'; id: number }
   /** M2b: the persistent zone bed (indoor sprinkler rain once the first shrink has started). */
   | { kind: 'zoneBed'; active: boolean }
   /**
@@ -74,6 +108,10 @@ export const LOOP_KEY = {
   cook: 'cook',
   /** The theme's zone loop while the zone shrinks (tide or sprinkler rain). */
   zone: 'zone',
+  /** M2c: one canister hiss per cloud. */
+  smoke: (id: SmokeId): string => `smoke:${id}`,
+  /** M2c: paddle knockback per victim (a second knockback restarts it). */
+  knockback: (id: PlayerId): string => `kb:${id}`,
 } as const;
 
 /** Ducking presets (dB, hold seconds). */
@@ -88,6 +126,8 @@ export const DUCKS = {
   explosionNear: { bus: 'ambience', db: -6, holdS: 0.8 },
   /** Blast inside the radius (with the muffle and the ear ring). */
   explosionClose: { bus: 'ambience', db: -14, holdS: 2 },
+  /** M2c: knocked back by a paddle (same as weapon damage, a little longer). */
+  knockback: { bus: 'ambience', db: -9, holdS: 0.4 },
 } as const satisfies Record<string, { bus: BusId; db: number; holdS: number }>;
 
 export interface AudioDirectorOptions {
@@ -102,6 +142,8 @@ export interface AudioDirectorOptions {
 
 /** Cap on remembered grenade contacts (explosion events normally clear them). */
 const MAX_TRACKED_GRENADES = 64;
+/** M2c: cap on remembered smoke clouds (match resets clear them). */
+const MAX_TRACKED_SMOKES = 32;
 
 export class AudioDirector {
   /** Last stance per player from stanceChanged (target stance). Absent = standing. */
@@ -120,6 +162,17 @@ export class AudioDirector {
   private lowHealthHp: number;
   private boltCycleS: number | null = null;
   private fuseS: number | null = null;
+
+  // M2c
+  /** Throwable kind per live grenade id (from grenadeThrown; fallback when a bounce omits `kind`). */
+  private readonly grenadeKind = new Map<GrenadeId, M2cThrowableId>();
+  /** Smoke clouds with a running hiss: id -> the fadeAt it was started with (a forced early fade restarts it). */
+  private readonly smokes = new Map<SmokeId, number>();
+  private smokeCfg: { growMs: number; fadeMs: number } | null = null;
+  private rocketGravity = 0;
+  private rocketMaxFlightMs: number | null = null;
+  /** True once any playerDamaged carried `weapon`: melee contacts on players are then voiced from damage events. */
+  private damageCarriesWeapon = false;
 
   /** M2b: carrier and local drop state; the engine reads its per-frame mix. */
   readonly drop = new DropTracker();
@@ -142,6 +195,12 @@ export class AudioDirector {
     // Heartbeat threshold follows the per-map balance when it sets one (the injected value stays otherwise).
     const low = b.player.lowHpThreshold;
     if (low !== undefined && Number.isFinite(low) && low > 0) this.lowHealthHp = low;
+    // M2c (optional until the C-gate): smoke cloud timings and the rocket flight model for the fallback.
+    const cloud = b.items.smoke?.cloud;
+    this.smokeCfg = cloud ? { growMs: cloud.growMs, fadeMs: cloud.fadeMs } : null;
+    const rpg = b.weapons.rpg;
+    this.rocketGravity = rpg && Number.isFinite(rpg.rocket.gravity) ? rpg.rocket.gravity : 0;
+    this.rocketMaxFlightMs = rpg && rpg.rocket.speed > 0 && rpg.range > 0 ? (rpg.range / rpg.rocket.speed) * 1000 : null;
   }
 
   /** Grenade fuse in ms from the current balance, or null before any balance (FuseTicker). */
@@ -164,7 +223,8 @@ export class AudioDirector {
     this.theme = e.zoneTheme;
     const indoor = e.map.kind === 'indoor';
     this.drop.setModel(e.map.carrier ?? (indoor ? 'drone' : 'seaplane'));
-    this.sink({ kind: 'map', scene: sceneOf(e.map.kind), theme: e.zoneTheme });
+    const scene = sceneOf(e.map.kind);
+    this.sink({ kind: 'map', scene, theme: e.zoneTheme, look: resolveLookId(scene, e.look) });
   }
 
   // --- carrier drop (M2b) -----------------------------------------------------------------
@@ -215,7 +275,9 @@ export class AudioDirector {
 
   // --- combat -----------------------------------------------------------------------------
   shotFired(e: GameEvents['shotFired']): void {
-    this.play(shotCue(e.weapon, e.isLocal), e.isLocal ? null : e.origin, { variant: e.weapon });
+    const cue = shotCue(e.weapon, e.isLocal);
+    if (cue === null) return; // melee swings and rpg launches have their own events
+    this.play(cue, e.isLocal ? null : e.origin, { variant: e.weapon });
     for (const imp of selectImpacts(e.impacts)) {
       const cue = impactCue(imp.surface);
       if (cue) this.play(cue, imp.point, { variant: e.weapon });
@@ -237,6 +299,17 @@ export class AudioDirector {
   playerDamaged(e: GameEvents['playerDamaged']): void {
     const intensity = Math.min(1, e.amount / 40);
     const pieces = armorPieces(e);
+    const cause = e.cause as M2cDeathCause; // widened: melee and rocket arrive at the C-gate
+    // M2c: melee hits are voiced as a weapon-flavoured contact (replacing hit.remote; layered on the local cues).
+    if (e.weapon !== undefined) this.damageCarriesWeapon = true;
+    const melee = isMeleeWeapon(e.weapon) ? e.weapon : null;
+    if (melee) {
+      const tier = e.helmet?.tier ?? e.vest?.tier;
+      const material = meleePlayerMaterial(e);
+      const variant = meleeHitVariant(melee, material) + (material === 'vest' || material === 'helmet' ? String(tier ?? 1) : '');
+      const local = e.isLocalVictim || e.isLocalAttacker;
+      this.play('melee.hit', local ? null : e.victimPos, { variant, intensity, gain: e.isLocalVictim ? 0.7 : 1 });
+    }
 
     if (e.isLocalVictim) {
       if (e.cause === 'zone') {
@@ -256,9 +329,10 @@ export class AudioDirector {
     }
     if (e.isLocalAttacker && !e.isLocalVictim) return; // voiced by localHitConfirmed
     if (e.isLocalVictim) return;
+    if (melee) return; // the melee contact above is the remote hit sound
     // Remote-on-remote: weapon hits thwack at the victim; blasts are loud enough already, except an armor break.
     const broke = e.vest?.broken === true || e.helmet?.broken === true;
-    if (e.cause === 'weapon' || (e.cause === 'explosion' && broke)) {
+    if (cause === 'weapon' || cause === 'melee' || ((cause === 'explosion' || cause === 'rocket') && broke)) {
       this.play('hit.remote', e.victimPos, { variant: remoteHitVariant(e), intensity });
     }
   }
@@ -270,6 +344,8 @@ export class AudioDirector {
       if (e.headshot) this.play('hitConfirm.head', null, { gain: 0.7 });
       return;
     }
+    // M2c: a target hidden by smoke gets no hit tick (the Ui hides the marker too); the kill confirm above stays.
+    if (e.obscured === true) return;
     const pieces = armorPieces(e);
     if (pieces.length > 0) {
       // Helmet "tonk" / vest clink (pitched by tier), or the per-piece break crack.
@@ -304,7 +380,12 @@ export class AudioDirector {
   // --- items ------------------------------------------------------------------------------
   /** Armor: velcro for vests, strap click for helmets (variant = item id, pitched by tier). */
   itemPickedUp(e: GameEvents['itemPickedUp']): void {
-    this.play(pickupCue(e.item), e.isLocal ? null : e.pos, { variant: e.item });
+    const item = e.item as M2cItemId; // widened: melee, scopes and tier-4 armor arrive at the C-gate
+    this.play(pickupCue(item), e.isLocal ? null : e.pos, { variant: item });
+    // M2c: the local level sparkle (1 to 4 rising notes; weapons, melee and armor only).
+    if (!e.isLocal) return;
+    const level = pickupLevel(item, e.level);
+    if (level !== null) this.play('pickup.level', null, { variant: String(level) });
   }
 
   reloadStarted(e: GameEvents['reloadStarted']): void {
@@ -314,6 +395,8 @@ export class AudioDirector {
       loopKey: LOOP_KEY.reload(e.playerId),
       // Shotgun shells are scheduled across this; stopped early on cancel.
       durationS: e.durationMs / 1000,
+      // M2c: rounds this reload loads (dbshotgun shells, revolver rounds); absent = a full load.
+      ...(e.rounds !== undefined ? { params: [e.rounds] } : {}),
     });
   }
 
@@ -421,6 +504,11 @@ export class AudioDirector {
 
   // --- grenades ---------------------------------------------------------------------------
   grenadeCooked(e: GameEvents['grenadeCooked']): void {
+    if (e.kind === 'smoke') {
+      // A smoke's fuse is no threat: a cap twist, and no cook tick (it would read as a frag).
+      this.play('smoke.pin', e.isLocal ? null : e.pos);
+      return;
+    }
     if (!e.isLocal) {
       this.play('grenade.pin', e.pos);
       return;
@@ -432,21 +520,39 @@ export class AudioDirector {
   }
 
   grenadeThrown(e: GameEvents['grenadeThrown']): void {
-    if (e.isLocal) this.stop(LOOP_KEY.cook);
-    if (!e.dropped) this.play('grenade.throw', e.isLocal ? null : e.pos);
+    const kind: M2cThrowableId = e.kind ?? 'grenade';
+    if (this.grenadeKind.size >= MAX_TRACKED_GRENADES && !this.grenadeKind.has(e.id)) this.grenadeKind.clear();
+    this.grenadeKind.set(e.id, kind);
+    if (e.isLocal && kind === 'grenade') this.stop(LOOP_KEY.cook);
+    if (e.dropped) return;
+    // Smoke: the cap twist, a lower whoosh and a can rattle (variant 'smoke').
+    this.play('grenade.throw', e.isLocal ? null : e.pos, kind === 'smoke' ? { variant: 'smoke' } : undefined);
   }
 
   grenadeBounced(e: GameEvents['grenadeBounced']): void {
+    const kind = e.kind ?? this.grenadeKind.get(e.id) ?? 'grenade';
+    if (kind === 'smoke') {
+      this.play('smoke.bounce', e.pos, { variant: e.surface, intensity: bounceIntensity(e.speed) });
+      return;
+    }
     if (this.grenadeContact.size >= MAX_TRACKED_GRENADES && !this.grenadeContact.has(e.id)) this.grenadeContact.clear();
     this.grenadeContact.set(e.id, e.surface);
     this.play('grenade.bounce', e.pos, { variant: e.surface, intensity: bounceIntensity(e.speed) });
   }
 
   explosion(e: GameEvents['explosion']): void {
-    const water = isWaterBlast(e.pos, this.grenadeContact.get(e.id));
-    this.grenadeContact.delete(e.id);
-    if (e.isLocalOwner && e.inHand) this.stop(LOOP_KEY.cook);
-    this.play('explosion', e.pos, { variant: water ? 'water' : 'ground', intensity: e.inHand ? 1 : 0 });
+    if (e.source === 'rocket') {
+      // M2c: the rocket's whistle cuts with the bang; same ring, muffle and ducks as a frag (below).
+      this.sink({ kind: 'rocketGone', id: e.id });
+      const water = isWaterBlast(e.pos, undefined);
+      this.play('explosion.rocket', e.pos, { variant: water ? 'water' : 'ground', params: [blastSize(e.radius)] });
+    } else {
+      const water = isWaterBlast(e.pos, this.grenadeContact.get(e.id));
+      this.grenadeContact.delete(e.id);
+      this.grenadeKind.delete(e.id);
+      if (e.isLocalOwner && e.inHand) this.stop(LOOP_KEY.cook);
+      this.play('explosion', e.pos, { variant: water ? 'water' : 'ground', intensity: e.inHand ? 1 : 0 });
+    }
 
     const close = blastCloseness(e.localDistance, e.radius);
     if (close !== null) {
@@ -481,6 +587,85 @@ export class AudioDirector {
     this.play('land.remote', e.pos, { variant: e.surface, intensity: landIntensity(e.fallSpeed) });
   }
 
+  // --- M2c: melee, rockets, smoke, glass, scopes (docs/audio/M2c.md) ------------------------
+  /** Whoosh whose peak lands on the hit frame. Local from prediction (2D), remotes positional. */
+  meleeSwing(e: GameEvents['meleeSwing']): void {
+    this.play(e.isLocal ? 'melee.swing.local' : 'melee.swing.remote', e.isLocal ? null : e.pos, {
+      variant: e.weapon,
+      durationS: meleePeakS(e.windupMs),
+    });
+  }
+
+  /**
+   * The hit frame found something. Surfaces get their contact here; a player contact comes from playerDamaged (with
+   * its armor) once the producer fills `weapon`, else from here (body / head). Paddle knockback adds the shove + thud.
+   */
+  meleeHit(e: GameEvents['meleeHit']): void {
+    const local = e.isLocalAttacker || e.isLocalVictim;
+    const pos = local ? null : e.pos;
+    if (e.surface === 'player') {
+      if (!this.damageCarriesWeapon) {
+        this.play('melee.hit', pos, { variant: meleeHitVariant(e.weapon, e.headshot ? 'head' : 'body'), gain: e.isLocalVictim ? 0.7 : 1 });
+      }
+    } else {
+      const material = meleeSurfaceMaterial(e.surface);
+      if (material) this.play('melee.hit', e.isLocalAttacker ? null : e.pos, { variant: meleeHitVariant(e.weapon, material) });
+    }
+    if (e.knockback && e.victimId !== null) {
+      this.play('melee.knockback', e.isLocalVictim ? null : e.pos, {
+        loopKey: LOOP_KEY.knockback(e.victimId),
+        durationS: AUDIO_TUNING.knockbackThudS,
+      });
+      if (e.isLocalVictim) this.duck(DUCKS.knockback);
+    }
+  }
+
+  /** Launch whoomp + back-blast; the whistle in flight is a RocketLayers bed (setRockets, or dead-reckoned). */
+  rocketFired(e: GameEvents['rocketFired']): void {
+    this.play(e.isLocal ? 'rocket.launch.local' : 'rocket.launch.remote', e.isLocal ? null : e.pos);
+    const rocket: RocketState = { id: e.id, ownerId: e.ownerId, level: e.level, pos: e.pos, vel: e.vel, firedAt: e.firedAt };
+    this.sink({ kind: 'rocketFired', rocket, gravity: this.rocketGravity, maxFlightMs: this.rocketMaxFlightMs });
+  }
+
+  /** No blast: a hollow clunk and a small puff; the whistle stops. */
+  rocketDud(e: GameEvents['rocketDud']): void {
+    this.sink({ kind: 'rocketGone', id: e.id });
+    this.play('rocket.dud', e.pos);
+  }
+
+  /** Deploy pop, then the canister hiss shaped by the cloud's grow / hold / fade. */
+  smokeDeployed(e: GameEvents['smokeDeployed']): void {
+    this.startSmoke(e, e.deployedAt);
+  }
+
+  /**
+   * IAudio.setSmokes (per frame): starts the hiss of clouds this client never saw deploy (late joiners, spectators),
+   * and restarts one whose fade was forced early (maxActive). Allocation-free when nothing changed.
+   */
+  smokesSeen(clouds: readonly SmokeCloudView[], serverTime: number): void {
+    for (const c of clouds) {
+      const fadeAt = this.smokes.get(c.id);
+      if (fadeAt === c.fadeAt) continue;
+      this.startSmoke(c, serverTime);
+    }
+  }
+
+  glassBroken(e: GameEvents['glassBroken']): void {
+    this.play('glass.shatter', e.pos);
+  }
+
+  /** Mount (also a swap: one sound) or unmount click; an auto-mount follows the pickup sound. */
+  scopeChanged(e: GameEvents['scopeChanged']): void {
+    const pos = e.isLocal ? null : e.pos;
+    if (e.to !== null) this.play('scope.mount', pos, { variant: e.to, delayS: e.auto ? AUDIO_TUNING.scopeAutoMountDelayS : 0 });
+    else if (e.from !== null) this.play('scope.unmount', pos, { variant: e.from });
+  }
+
+  /** 4 / G cycles frag <-> smoke: the switch sound of the new throwable. */
+  throwableCycled(e: GameEvents['throwableCycled']): void {
+    this.play('weapon.switch', null, { variant: e.to });
+  }
+
   // --- UI-ish -----------------------------------------------------------------------------
   interactPromptChanged(e: GameEvents['interactPromptChanged']): void {
     if (e.lootId !== null && e.lootId !== this.lastPromptLoot && e.item !== null) {
@@ -511,6 +696,8 @@ export class AudioDirector {
   private resetMatchState(): void {
     this.stances.clear();
     this.grenadeContact.clear();
+    this.grenadeKind.clear();
+    this.smokes.clear();
     this.localHp = null;
     this.setLowHealth(false);
     this.setOutside(false);
@@ -545,6 +732,25 @@ export class AudioDirector {
     if (active === this.outside) return;
     this.outside = active;
     this.sink({ kind: 'outside', active });
+  }
+
+  /** Starts (or restarts) one cloud's hiss at server time `now`; the pop only near the deploy itself. */
+  private startSmoke(c: SmokeCloudState, now: number): void {
+    if (this.smokes.size >= MAX_TRACKED_SMOKES && !this.smokes.has(c.id)) this.smokes.clear();
+    const fresh = !this.smokes.has(c.id);
+    this.smokes.set(c.id, c.fadeAt);
+    const shape = smokeShape(c, now, this.smokeCfg);
+    const left = smokeRemainingS(shape);
+    if (left <= 0) {
+      this.stop(LOOP_KEY.smoke(c.id));
+      return;
+    }
+    if (fresh && shape.offsetS <= AUDIO_TUNING.smokePopSkipS) this.play('smoke.pop', c.pos);
+    this.play('smoke.hiss', c.pos, {
+      loopKey: LOOP_KEY.smoke(c.id),
+      durationS: left,
+      params: [shape.growS, shape.holdS, shape.fadeS, shape.offsetS],
+    });
   }
 
   private play(cue: CueId, pos: Vec3 | null, opts?: Omit<PlayCommand, 'kind' | 'cue' | 'pos'>): void {

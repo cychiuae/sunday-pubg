@@ -5,12 +5,12 @@
  */
 import { expect, test } from '@playwright/test';
 import { calibrateLook, fetchLoot, hook, me } from './support/drive';
-import { jumpAndLand, lockPointer, newPlayer, openTitle, soloMatch, unexpectedErrors } from './support/game';
+import { jumpAndLand, lockPointer, newPlayer, openTitle, soloMatch, unexpectedErrors, zeroLoot } from './support/game';
 import { Observer } from './support/observer';
 import { startStack, type Stack } from './support/stack';
 
 const NAME = 'QA Lag';
-const ZERO = { pistol: 0, smg: 0, shotgun: 0, rifle: 0, lmg: 0, dmr: 0, bandage: 0, medkit: 0, vest_1: 0, vest_2: 0, vest_3: 0, helmet_1: 0, helmet_2: 0, helmet_3: 0, grenade: 0, ammo_light: 0, ammo_heavy: 0, ammo_shell: 0, ammo_sniper: 0 };
+const ZERO = zeroLoot(); // every loot id (M2c included)
 const ONLY_SNIPERS = { ...ZERO, sniper: 1 };
 // Same bar as M1 B6 (netcode.spec.ts): plain walking at 100 ms + 20 ms jitter already shows corrections of
 // 0.28-0.33 m (M1-test-report.md), so stance and ADS must not push them past 0.5 m.
@@ -20,7 +20,7 @@ let stack: Stack;
 
 test.beforeAll(async () => {
   stack = await startStack({
-    label: 'm2a-latency',
+    label: 'm2a-latency', layoutSeed: 'baseline', // M2c: pinned layout (seed 0 = the M2b props and loot) so paths are reproducible
     seed: 31337,
     latencyMs: 100,
     jitterMs: 20,

@@ -17,8 +17,9 @@ export const WS_PATH = '/ws';
  * M2a (ADR 0004 §6): 2. New PlayerInput fields (ads, stanceToggle, selectSlot 3), PlayerState stance/armor tiers,
  * grenades in snapshots and new SimEvents. Client and server must match; mismatches get `error bad_version`.
  * M2b (ADR 0006 §6, C-gate): 3. `hello` replaces `join`, room messages, drop fields, 'glass' surfaces.
+ * M2c (ADR 0007 §6, §10): becomes 4 at the M2c C-gate (compact rows, M2c fields and events, welcome.layout).
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 export const PING_INTERVAL_MS = 1000;
 
 /** Server keeps at most this many queued inputs per player; older ones are dropped. */

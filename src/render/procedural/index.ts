@@ -17,6 +17,13 @@ export * from './wearables';
 export * from './office';
 export * from './carrier';
 export * from './viewmodel';
+// M2c
+export * from './levelCollar';
+export * from './scopes';
+export * from './rocket';
+export * from './smokeCan';
+export * from './decor';
+export * from './icons';
 export { buildMerged, countTris, type Merged, type Piece } from './builder';
 
 export interface CharacterModel {

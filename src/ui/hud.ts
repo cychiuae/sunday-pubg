@@ -6,18 +6,36 @@
  * M2b: first-person layout (UI.md §13.2: slots above the ammo panel, hints above the vitals), the centre reticle by
  * camera case (logic.reticleMode), the aboard / freefall HUD (drop.ts), zone strings by HudView.zoneTheme, the
  * spectate view chip ([V] first person / chase), the ADS-blocked hint and the danger blink by fuse time.
+ * M2c (docs/ui/M2c.md): level badges (slots, prompt, armor 4 pips), the melee slot, the throwable slot (selected type +
+ * mini chip + cycle hint), sight chips and the spare-scope pouch (tap / click = T), level / swap / scope prompts, the
+ * melee recovery ring, hidden hit markers through smoke, the in-smoke crosshair outline, smoke's cook ring and the
+ * "Sight: …" chip on a T switch. Every M2c field is optional until the C-gate; absent = M2b behaviour.
  * Every per-frame write goes through a diffing helper (TextSlot / Flags / Shown / StyleVar).
  * Owner: ui-ux-designer.
  */
 import { t } from '../content/strings';
-import type { ZoneTheme } from '../shared/balance';
-import type { HudArmorView, HudLocalView, HudView } from '../shared/contracts';
+import { scopeFits, type Balance, type ZoneTheme } from '../shared/balance';
+import type { HudArmorView, HudLocalView, HudSlotView, HudView } from '../shared/contracts';
 import type { GameEvents } from '../shared/events';
-import type { ActionFailReason, ArmorSlot, ArmorTier, HealId, ItemId, SlotIndex, Vec3 } from '../shared/types';
+import {
+  isMeleeId,
+  M2C_GUN_IDS,
+  type ArmorSlot,
+  type HealId,
+  type ItemLevel,
+  type M2cActionFailReason,
+  type M2cArmorTier,
+  type M2cHeldId,
+  type M2cItemId,
+  type M2cThrowableId,
+  type ScopeId,
+  type SlotIndex,
+  type Vec3,
+} from '../shared/types';
 import { SightReticle } from './ads';
 import { DataSlot, Flags, h, Shown, StyleVar, svg, TextSlot, retrigger } from './dom';
 import { DropHud } from './drop';
-import { icon, setIcon, type IconId } from './icons';
+import { icon, levelBadge, setIcon, setLevelBadge, type IconId } from './icons';
 import {
   adsReticle,
   armorPromptDetail,
@@ -26,13 +44,17 @@ import {
   dangerPlacement,
   dangerScale,
   gearView,
-  hitVariant,
   hitVignetteStrength,
   isHeavyHit,
   isLowHp,
   lowHpThresholdOf,
-  pickupPromptChoice,
+  levelLabel,
+  pickupPromptModel,
+  pouchModel,
   ratio,
+  scopeSight,
+  sightChipModel,
+  throwableSlotModel,
   relativeBearingDeg,
   reticleMode,
   spreadToPx,
@@ -42,6 +64,7 @@ import {
   zoneKey,
   type AdsReticle,
   type HitVariant,
+  type PromptInput,
 } from './logic';
 import { Minimap, type CoastlineFn } from './minimap';
 
@@ -52,6 +75,13 @@ const FAIL_TOAST_MS = 1600;
 const MAX_TOASTS = 3;
 const RING_R = 22;
 const RING_C = 2 * Math.PI * RING_R;
+/** M2c melee swing-recovery ring (inside the reload ring, UI M2c §4). */
+const MELEE_R = 14;
+const MELEE_C = 2 * Math.PI * MELEE_R;
+/** M2c: "Sight: 2x scope" chip after a T switch (UI M2c §16.4). */
+const SIGHT_NOW_MS = 1200;
+/** M2c: spare-scope chips drawn at most (UI M2c §16.2). */
+const MAX_POUCH = 4;
 /** Cook ring sits just outside the reload/heal ring radius. */
 const COOK_R = 26;
 const COOK_C = 2 * Math.PI * COOK_R;
@@ -77,10 +107,36 @@ interface Bar {
 }
 
 interface SlotUi {
+  el: HTMLElement;
   flags: Flags;
   icon: HTMLSpanElement;
   name: TextSlot;
   mag: TextSlot;
+  /** M2c level badge (guns, melee). */
+  badge: HTMLSpanElement;
+  /** M2c sight chip (guns): tap / click = T. */
+  sight: HTMLButtonElement;
+  sightFlags: Flags;
+  sightText: TextSlot;
+  sightShown: Shown;
+  /** M2c throwable slot: the other type (mini chip). */
+  mini: HTMLSpanElement;
+  miniIcon: HTMLSpanElement;
+  miniCount: TextSlot;
+  miniShown: Shown;
+  /** M2c throwable slot: "[4] Swap" while active with both types. */
+  cycle: Shown;
+  sr: TextSlot;
+  /** Last weapon + sight seen (pop on change). */
+  lastKey: string;
+  lastSight: string;
+}
+
+interface PouchChipUi {
+  el: HTMLElement;
+  icon: HTMLSpanElement;
+  flags: Flags;
+  shown: Shown;
 }
 
 interface DamageArc {
@@ -108,7 +164,7 @@ interface GearUi {
   text: TextSlot;
   sr: TextSlot;
   /** Tier that broke, shown crossed out until brokenUntil. */
-  brokenTier: 0 | ArmorTier;
+  brokenTier: 0 | M2cArmorTier;
   brokenUntil: number;
   /** Last durability seen (a drop retriggers the hit flash). */
   last: number;
@@ -130,6 +186,7 @@ function makeGear(slot: ArmorSlot): { el: HTMLElement; ui: GearUi } {
     'span',
     'ui-gear__pips',
     { 'aria-hidden': 'true' },
+    h('span', 'ui-gear__pip'),
     h('span', 'ui-gear__pip'),
     h('span', 'ui-gear__pip'),
     h('span', 'ui-gear__pip'),
@@ -161,6 +218,14 @@ function makeGear(slot: ArmorSlot): { el: HTMLElement; ui: GearUi } {
       last: -1,
     },
   };
+}
+
+/** "DMR, Sniper": gun types (item.<id>.type) that take this scope (balance scopes.compatible, via mapChanged). */
+function fitNames(balance: Balance | null, scope: ScopeId): string {
+  if (!balance) return '';
+  return M2C_GUN_IDS.filter((gun) => scopeFits(balance, gun, scope))
+    .map((gun) => t(`item.${gun}.type`))
+    .join(', ');
 }
 
 function makeBar(kind: 'hp', labelKey: string): Bar {
@@ -233,8 +298,15 @@ export class Hud {
   private readonly stanceSr: TextSlot;
   private readonly stanceEl: HTMLElement;
   private readonly slots: SlotUi[];
+  /** M2c spare-scope pouch (UI M2c §16.2). */
+  private readonly pouchShown: Shown;
+  private readonly pouchChips: PouchChipUi[] = [];
+  private readonly pouchCount: TextSlot;
+  private readonly pouchFlags: Flags;
+  /** M2c: screen-reader announcement of the throwable cycle ("Smoke ready"). */
+  private readonly liveText: TextSlot;
   /** items.<id>.durability learned from worn pieces (the prompt's "31/55" until the event carries the max). */
-  private readonly maxDurability = new Map<ItemId, number>();
+  private readonly maxDurability = new Map<M2cItemId, number>();
   private readonly ammo: TextSlot;
   private readonly ammoNote: TextSlot;
   private readonly ammoFlags: Flags;
@@ -262,6 +334,13 @@ export class Hud {
   private readonly ringOffset: StyleVar;
   private readonly ringLabel: TextSlot;
   private readonly ringHint: TextSlot;
+  /** M2c melee swing-recovery ring. */
+  private readonly meleeRing: Shown;
+  private readonly meleeOffset: StyleVar;
+  /** M2c "Sight: …" chip after a T switch. */
+  private readonly sightNow: Shown;
+  private readonly sightNowText: TextSlot;
+  private sightNowUntil = 0;
   private readonly hitmarker: HTMLDivElement;
   private readonly arcs: DamageArc[] = [];
   private nextArc = 0;
@@ -284,11 +363,27 @@ export class Hud {
   private readonly promptPips: DataSlot;
   private readonly promptTier: TextSlot;
   private readonly promptDur: TextSlot;
-  private promptItem: ItemId | null = null;
-  private promptQty = 0;
+  /** M2c prompt parts: level badge + "Lv.3 Hot", the compare tag + old badge, the scope target, a note. */
+  private readonly promptLevel: Shown;
+  private readonly promptBadge: HTMLSpanElement;
+  private readonly promptLevelText: TextSlot;
+  private readonly promptCompare: Shown;
+  private readonly promptCompareFlags: Flags;
+  private readonly promptCompareText: TextSlot;
+  private readonly promptOldBadge: HTMLSpanElement;
+  private readonly promptExtra: Shown;
+  private readonly promptExtraText: TextSlot;
+  private readonly promptChip: Shown;
+  private readonly promptChipText: TextSlot;
+  private readonly promptChipFlags: Flags;
+  private readonly promptChipEl: HTMLSpanElement;
+  private promptInput: PromptInput | null = null;
   private promptDurability: number | null = null;
   private promptMaxDurability: number | null = null;
-  private promptRefusal: ActionFailReason | null = null;
+  /** M2c: sight-chip tap / click (UiCallbacks.onCycleScope through Ui). */
+  onCycleScope: (() => void) | null = null;
+  /** M2c: the effective per-map balance from mapChanged (scope compatibility for "Fits: …"). */
+  balance: Balance | null = null;
   private readonly toastBox: HTMLDivElement;
   private readonly toasts: Toast[] = [];
 
@@ -301,6 +396,10 @@ export class Hud {
   private readonly spectateView: Shown;
   private readonly spectateViewFlags: Flags;
   private readonly spectateViewText: TextSlot;
+  /** M2c (P2): the target's held weapon icon + level badge. */
+  private readonly spectateWeapon: Shown;
+  private readonly spectateWeaponIcon: HTMLSpanElement;
+  private readonly spectateWeaponBadge: HTMLSpanElement;
 
   /** Suppresses the persistent drop prompt while the one-time drop hint is up. */
   dropHintActive = false;
@@ -430,6 +529,21 @@ export class Hud {
     this.ringLabel = new TextSlot(ringLabel);
     this.ringHint = new TextSlot(ringHint);
 
+    // M2c: melee swing-recovery ring (thin, inside the reload ring) and the "Sight: …" chip.
+    const meleeCircle = svg('circle', { class: 'ui-melee__fg', cx: 20, cy: 20, r: MELEE_R, 'stroke-dasharray': MELEE_C.toFixed(2) });
+    const meleeEl = h(
+      'div',
+      'ui-melee',
+      { 'aria-hidden': 'true' },
+      svg('svg', { class: 'ui-melee__svg', viewBox: '0 0 40 40' }, svg('circle', { class: 'ui-melee__bg', cx: 20, cy: 20, r: MELEE_R }), meleeCircle),
+    );
+    this.meleeRing = new Shown(meleeEl);
+    this.meleeOffset = new StyleVar(meleeEl, '--melee-offset');
+    const sightNowText = h('span', null);
+    const sightNowEl = h('div', 'ui-sightnow ui-chip', { role: 'status' }, sightNowText);
+    this.sightNow = new Shown(sightNowEl);
+    this.sightNowText = new TextSlot(sightNowText);
+
     this.hitmarker = h(
       'div',
       'ui-hitmarker',
@@ -481,7 +595,39 @@ export class Hud {
     const promptTier = h('span', 'ui-prompt__tier');
     const promptDur = h('span', 'ui-prompt__dur ui-num');
     const promptDetail = h('span', 'ui-prompt__detail', null, promptPips, promptTier, promptDur);
-    this.prompt = h('div', 'ui-prompt ui-chip', { role: 'status' }, this.promptIcon, promptText, promptDetail);
+    // M2c (UI M2c §3, §16.3)
+    this.promptBadge = levelBadge('ui-prompt__badge');
+    const promptLevelText = h('span', 'ui-prompt__lvtext');
+    this.promptOldBadge = levelBadge('ui-prompt__badge');
+    const promptCompareText = h('span', null);
+    const promptCompare = h('span', 'ui-prompt__compare', null, promptCompareText, this.promptOldBadge);
+    const promptLevel = h('span', 'ui-prompt__detail ui-prompt__level', null, this.promptBadge, promptLevelText, promptCompare);
+    const promptChipText = h('span', 'ui-sightchip__text');
+    const promptChip = h('span', 'ui-sightchip ui-prompt__chip', { 'aria-hidden': 'true' }, promptChipText);
+    const promptExtraText = h('span', null);
+    const promptExtra = h('span', 'ui-prompt__detail ui-prompt__extra', null, promptExtraText);
+    this.prompt = h(
+      'div',
+      'ui-prompt ui-chip',
+      { role: 'status' },
+      this.promptIcon,
+      promptText,
+      promptChip,
+      promptLevel,
+      promptDetail,
+      promptExtra,
+    );
+    this.promptLevel = new Shown(promptLevel);
+    this.promptLevelText = new TextSlot(promptLevelText);
+    this.promptCompare = new Shown(promptCompare);
+    this.promptCompareFlags = new Flags(promptCompare);
+    this.promptCompareText = new TextSlot(promptCompareText);
+    this.promptExtra = new Shown(promptExtra);
+    this.promptExtraText = new TextSlot(promptExtraText);
+    this.promptChip = new Shown(promptChip);
+    this.promptChipText = new TextSlot(promptChipText);
+    this.promptChipFlags = new Flags(promptChip);
+    this.promptChipEl = promptChip;
     this.promptShown = new Shown(this.prompt);
     this.promptDetail = new Shown(promptDetail);
     this.promptPips = new DataSlot(promptPips, 'tier');
@@ -520,13 +666,102 @@ export class Hud {
       const ic = icon(null, 'ui-slot__icon');
       const name = h('span', 'ui-slot__name');
       const mag = h('span', 'ui-slot__mag ui-num');
-      const el = h('div', 'ui-slot', null, h('span', 'ui-slot__key ui-keycap', null, String(i + 1)), ic, name, mag);
+      const badge = levelBadge('ui-slot__badge');
+      // M2c sight chip: a real button so touch (tap) and the paused mouse (click) can do what T does.
+      const sightText = h('span', 'ui-sightchip__text');
+      const sight = h('button', 'ui-sightchip ui-slot__sight', { type: 'button', tabindex: '-1' }, sightText) as HTMLButtonElement;
+      // Touch: a long press shows the tooltip instead of switching (UI M2c §16.4).
+      let pressTimer: ReturnType<typeof setTimeout> | null = null;
+      let longPressed = false;
+      sight.addEventListener('pointerdown', (ev) => {
+        if (ev.pointerType !== 'touch') return;
+        longPressed = false;
+        pressTimer = setTimeout(() => {
+          longPressed = true;
+          sight.classList.add('is-tip');
+          setTimeout(() => sight.classList.remove('is-tip'), 2000);
+        }, 450);
+      });
+      const cancelPress = (): void => {
+        if (pressTimer !== null) clearTimeout(pressTimer);
+        pressTimer = null;
+      };
+      sight.addEventListener('pointerup', cancelPress);
+      sight.addEventListener('pointercancel', cancelPress);
+      sight.addEventListener('pointerleave', cancelPress);
+      sight.addEventListener('contextmenu', (ev) => ev.preventDefault());
+      sight.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        if (longPressed) {
+          longPressed = false;
+          return;
+        }
+        this.onCycleScope?.();
+      });
+      // M2c throwable slot: the other type as a mini chip, and the "[4] Swap" hint while active.
+      const miniIcon = icon(null, 'ui-slot__miniicon');
+      const miniCount = h('span', 'ui-num');
+      const mini = h('span', 'ui-slot__mini', { 'aria-hidden': 'true' }, miniIcon, miniCount);
+      const cycle = h('span', 'ui-slot__cycle', { 'aria-hidden': 'true' }, t('hud.throwable.swap'));
+      const sr = h('span', 'ui-sr');
+      const el = h(
+        'div',
+        'ui-slot',
+        null,
+        h('span', 'ui-slot__key ui-keycap', { 'aria-hidden': 'true' }, String(i + 1)),
+        h('span', 'ui-slot__iconbox', null, ic, badge),
+        name,
+        mag,
+        sight,
+        mini,
+        cycle,
+        sr,
+      );
       slotEls.push(el);
-      this.slots.push({ flags: new Flags(el), icon: ic, name: new TextSlot(name), mag: new TextSlot(mag) });
+      this.slots.push({
+        el,
+        flags: new Flags(el),
+        icon: ic,
+        name: new TextSlot(name),
+        mag: new TextSlot(mag),
+        badge,
+        sight,
+        sightFlags: new Flags(sight),
+        sightText: new TextSlot(sightText),
+        sightShown: new Shown(sight),
+        mini,
+        miniIcon,
+        miniCount: new TextSlot(miniCount),
+        miniShown: new Shown(mini),
+        cycle: new Shown(cycle),
+        sr: new TextSlot(sr),
+        lastKey: '',
+        lastSight: '',
+      });
     }
+    // M2c spare-scope pouch: a lens glyph, then one chip per spare (hidden when empty).
+    const pouchCount = h('span', 'ui-pouch__count ui-num');
+    const pouchEl = h(
+      'div',
+      'ui-pouch',
+      { role: 'group', 'aria-label': t('hud.scope.stash') },
+      h('span', 'ui-glyph ui-pouch__glyph', { 'aria-hidden': 'true' }),
+      pouchCount,
+    );
+    for (let i = 0; i < MAX_POUCH; i++) {
+      const chipIcon = icon(null, 'ui-pouch__icon');
+      const chip = h('span', 'ui-pouch__chip', null, chipIcon);
+      pouchEl.appendChild(chip);
+      this.pouchChips.push({ el: chip, icon: chipIcon, flags: new Flags(chip), shown: new Shown(chip) });
+    }
+    this.pouchShown = new Shown(pouchEl);
+    this.pouchFlags = new Flags(pouchEl);
+    this.pouchCount = new TextSlot(pouchCount);
+    const live = h('span', 'ui-sr', { 'aria-live': 'polite' });
+    this.liveText = new TextSlot(live);
     // M2b (UI.md §13.2): the viewmodel owns the lower right quadrant's middle, so the slots sit as a compact row in the
     // bottom-right column, directly above the ammo panel (name only on the active slot).
-    const slotsBox = h('div', 'ui-hud__slots', null, ...slotEls);
+    const slotsBox = h('div', 'ui-hud__slots', null, pouchEl, ...slotEls, live);
 
     // --- bottom right: ammo + heals
     const ammoEl = h('span', 'ui-ammo__count ui-num');
@@ -580,6 +815,11 @@ export class Hud {
       specViewText,
     );
     specEl.insertBefore(specView, specEl.lastChild);
+    this.spectateWeaponIcon = icon(null, 'ui-spectate__weaponicon');
+    this.spectateWeaponBadge = levelBadge('ui-spectate__badge');
+    const specWeapon = h('span', 'ui-spectate__weapon', { 'aria-hidden': 'true' }, this.spectateWeaponIcon, this.spectateWeaponBadge);
+    specEl.insertBefore(specWeapon, specView);
+    this.spectateWeapon = new Shown(specWeapon);
     this.spectateView = new Shown(specView);
     this.spectateViewFlags = new Flags(specView);
     this.spectateViewText = new TextSlot(specViewText);
@@ -604,8 +844,10 @@ export class Hud {
       this.sight.el,
       this.hitmarker,
       this.ring,
+      meleeEl,
       this.cook,
       adsBlockedEl,
+      sightNowEl,
     );
     this.drop = new DropHud();
 
@@ -636,6 +878,9 @@ export class Hud {
     this.vignetteTide.set(false);
     this.spectate.set(false);
     this.adsBlocked.set(false);
+    this.meleeRing.set(false);
+    this.sightNow.set(false);
+    this.pouchShown.set(false);
   }
 
   // ------------------------------------------------------------------------------------------
@@ -646,7 +891,10 @@ export class Hud {
     if (this.pendingDamage.length < 8) this.pendingDamage.push(e);
   }
 
-  /** M2a variants: vest (dashed ring), helmet (cap arc), break (shards); see logic.hitVariant. */
+  /**
+   * M2a variants: vest (dashed ring), helmet (cap arc), break (shards); see logic.hitVariant. M2c: the caller drops
+   * obscured non-kill hits (logic.hitMarkerVisible) before calling.
+   */
   hitConfirmed(v: HitVariant): void {
     const f = this.hitmarker.classList;
     f.toggle('is-head', v.head);
@@ -662,26 +910,32 @@ export class Hud {
    * `maxDurability` from the event ("31/55" for any armor); without it the Ui falls back to maxima learned from worn pieces.
    */
   setPrompt(
-    item: ItemId | null,
+    item: M2cItemId | null,
     qty: number,
     durability: number | null = null,
-    refusal: ActionFailReason | null = null,
+    refusal: M2cActionFailReason | null = null,
     maxDurability: number | null = null,
+    m2c: Pick<PromptInput, 'level' | 'scope' | 'replacesSlot' | 'scopeTarget'> = {},
   ): void {
-    this.promptItem = item;
-    this.promptQty = qty;
+    this.promptInput = item === null ? null : { item, qty, refusal, ...m2c };
     this.promptDurability = durability;
-    this.promptRefusal = refusal;
     this.promptMaxDurability = maxDurability;
   }
 
   /** The item the pickup prompt points at (chooses the vest/helmet/grenade refusal strings). */
-  get currentPromptItem(): ItemId | null {
-    return this.promptItem;
+  get currentPromptItem(): M2cItemId | null {
+    return this.promptInput?.item ?? null;
+  }
+
+  /** M2c: a 4 / G cycle (throwableCycled, predicted): pulse the slot and announce "Smoke ready" to screen readers. */
+  throwableCycled(to: M2cThrowableId): void {
+    const ui = this.slots[3];
+    if (ui) retrigger(ui.el, 'is-cycled');
+    this.liveText.set(t('hud.throwable.selected', { item: t(`item.${to}.type`) }));
   }
 
   /** M2a: the local player's vest or helmet broke: crossed-out icon for a moment plus a warning toast. */
-  armorBroken(slot: ArmorSlot, tier: ArmorTier, nowMs: number): void {
+  armorBroken(slot: ArmorSlot, tier: M2cArmorTier, nowMs: number): void {
     const g = this.gear[slot];
     g.brokenTier = tier;
     g.brokenUntil = nowMs + BROKEN_SHOW_MS;
@@ -704,16 +958,24 @@ export class Hud {
     this.pushToast({ el, until: nowMs + TOAST_MS, failKey: key });
   }
 
-  pickupToast(item: ItemId, qty: number, nowMs: number): void {
+  /** M2c: an info toast with an icon and a ready-made line ("Sea Glass 2x Scope on Longshore Rifle"). */
+  infoToast(text: string, iconId: IconId | null, nowMs: number): void {
+    const el = h('div', 'ui-toast ui-chip', null, iconId ? icon(iconId) : null, h('span', null, null, text));
+    this.pushToast({ el, until: nowMs + TOAST_MS, failKey: null });
+  }
+
+  pickupToast(item: M2cItemId, qty: number, nowMs: number, level: ItemLevel | null = null): void {
+    const badge = levelBadge('ui-toast__badge');
+    setLevelBadge(badge, level);
     const el = h(
       'div',
       'ui-toast ui-chip',
       null,
       icon(item),
       h('span', null, null, t(`item.${item}.name`)),
+      level !== null ? badge : null,
       qty > 1 ? h('span', 'ui-toast__qty ui-num', null, String(qty)) : null,
     );
-    this.toastBox.appendChild(el);
     this.pushToast({ el, until: nowMs + TOAST_MS, failKey: null });
   }
 
@@ -733,6 +995,8 @@ export class Hud {
     if (
       key === 'hud.inventory.full' ||
       key === 'hud.grenade.full' ||
+      key === 'hud.smoke.full' ||
+      key === 'hud.scope.pouchFull' ||
       key === 'hud.armor.better' ||
       key === 'hud.vest.better' ||
       key === 'hud.helmet.better'
@@ -755,10 +1019,14 @@ export class Hud {
     }
     for (const toast of this.toasts) toast.el.remove();
     this.toasts.length = 0;
-    this.promptItem = null;
+    this.promptInput = null;
     this.promptDurability = null;
     this.promptMaxDurability = null;
-    this.promptRefusal = null;
+    this.sightNowUntil = 0;
+    for (const ui of this.slots) {
+      ui.lastKey = '';
+      ui.lastSight = '';
+    }
     this.hp.last = -1;
     for (const g of Object.values(this.gear)) {
       g.brokenTier = 0;
@@ -779,6 +1047,9 @@ export class Hud {
     this.rootFlags.set('is-aboard', drop?.stage === 'aboard');
     this.rootFlags.set('is-dropping', alive && (local.dropping || (drop !== null && drop.stage !== 'aboard')));
     this.rootFlags.set('is-fp', hud.cameraView === 'firstPerson');
+    // M2c: thicker crosshair outline inside smoke (UI M2c §6.1); the paused mouse can reach the sight chips (§16.4).
+    this.rootFlags.set('is-in-smoke', alive && hud.inSmoke === true);
+    this.rootFlags.set('is-free', !hud.pointerLocked);
 
     // Top right
     this.alive.set(t('hud.alive', { count: hud.aliveCount }));
@@ -796,6 +1067,8 @@ export class Hud {
       this.sight.update({ ...this.reticle, dot: null });
       this.ringShown.set(false);
       this.cookShown.set(false);
+      this.meleeRing.set(false);
+      this.sightNow.set(false);
       for (const d of this.dangers) d.shown.set(false);
       this.promptShown.set(false);
       this.outside.set(false);
@@ -813,6 +1086,13 @@ export class Hud {
       const max = spec.targetMaxHp ?? 0;
       this.spectateFlags.set('is-hp-unknown', !(max > 0));
       if (max > 0) this.spectateHp.set(ratio(spec.targetHp, max).toFixed(3));
+      // M2c (P2): the target's held weapon + level (only when ClientGame sends it).
+      const sw = (spec.weapon ?? null) as M2cHeldId | null;
+      this.spectateWeapon.set(sw !== null);
+      if (sw !== null) {
+        setIcon(this.spectateWeaponIcon, sw);
+        setLevelBadge(this.spectateWeaponBadge, spec.weaponLevel ?? null);
+      }
       // M2b: the [V] view chip (only once ClientGame reports the view).
       this.spectateView.set(spec.view !== undefined);
       if (spec.view) {
@@ -852,26 +1132,76 @@ export class Hud {
     this.updateGear(this.gear.helmet, local.helmet ?? null, nowMs);
     this.updateStance(local);
 
-    // Slots (M2a: four; slot 4 = grenades with a count, dimmed at 0)
-    const grenadeHeld = local.weapon === 'grenade';
+    // Slots (M2a: four; M2c: index 2 = fists or the melee weapon, index 3 = the selected throwable + the other type)
+    const held = local.weapon as M2cHeldId;
+    const throwHeld = held === 'grenade' || held === 'smoke';
+    const throwable = throwableSlotModel(local);
     for (let i = 0; i < SLOT_COUNT; i++) {
-      const s = local.slots[i as SlotIndex] as HudLocalView['slots'][number] | undefined;
+      const s = local.slots[i as SlotIndex] as HudSlotView | undefined;
       const ui = this.slots[i];
       if (!ui) continue;
-      const isGrenade = i === 3;
-      const weapon = s?.weapon ?? (isGrenade ? 'grenade' : null);
-      const count = isGrenade ? (s?.count ?? local.grenades ?? 0) : null;
-      ui.flags.set('is-active', local.activeSlot === i);
-      ui.flags.set('is-grenade', isGrenade);
-      ui.flags.set('is-empty', weapon === null || (isGrenade && count === 0));
+      const isThrow = i === 3;
+      const weapon: M2cHeldId | null = isThrow ? throwable.main : ((s?.weapon as M2cHeldId | null | undefined) ?? null);
+      const level = isThrow ? null : (s?.level ?? null);
+      const active = local.activeSlot === i;
+      ui.flags.set('is-active', active);
+      ui.flags.set('is-grenade', isThrow);
+      ui.flags.set('is-empty', weapon === null || (isThrow && throwable.empty));
       setIcon(ui.icon, weapon);
-      ui.name.set(weapon ? t(`item.${weapon}.type`) : t('hud.slot.empty'));
-      ui.mag.set(isGrenade ? t('hud.grenade.count', { count: count ?? 0 }) : s && s.mag !== null ? String(s.mag) : '');
+      setLevelBadge(ui.badge, weapon === null || weapon === 'fists' ? null : level);
+      const nameText = weapon ? t(`item.${weapon}.type`) : t('hud.slot.empty');
+      ui.name.set(isThrow && weapon ? t(`item.${weapon}.name`) : nameText);
+      ui.mag.set(isThrow ? t('hud.grenade.count', { count: throwable.mainCount }) : s && s.mag !== null ? String(s.mag) : '');
+      // Throwable: the other type as a mini chip; the cycle hint only while active with both types.
+      ui.miniShown.set(isThrow && throwable.other !== null);
+      if (isThrow && throwable.other !== null) {
+        setIcon(ui.miniIcon, throwable.other);
+        ui.miniCount.set(String(throwable.otherCount));
+      }
+      ui.cycle.set(isThrow && throwable.cycleHint);
+      // Gun slots: the sight chip (mounted = filled, built-in optic = outline; none for iron sights).
+      const chip = isThrow || i === 2 ? null : sightChipModel(s);
+      const showChip = chip !== null && chip.kind !== 'none';
+      ui.sightShown.set(showChip);
+      if (chip && showChip) {
+        ui.sightFlags.set('is-builtin', chip.kind === 'builtIn');
+        ui.sightFlags.set('is-reddot', chip.label === null);
+        ui.sightText.set(chip.label ?? '');
+        ui.sight.dataset['sight'] = chip.sight;
+        const scopeName = s?.scope ? t(`item.${s.scope}.name`) : t(`sight.${chip.sight}`);
+        const tip = chip.kind === 'builtIn' ? `${scopeName} · ${t('hud.scope.builtIn')}` : `${scopeName} · ${t('hud.scope.cycle')}`;
+        if (ui.sight.title !== tip) {
+          ui.sight.title = tip;
+          ui.sight.setAttribute('aria-label', tip);
+          ui.sight.dataset['tip'] = tip;
+        }
+      }
+      // Pop the chip and show "Sight: …" when the same gun's sight changes (T switch or auto-mount; predicted).
+      const key = `${weapon ?? ''}`;
+      const sightNow = chip?.sight ?? 'none';
+      if (ui.lastKey === key && ui.lastSight !== '' && ui.lastSight !== sightNow && weapon !== null && !isThrow) {
+        retrigger(ui.sight, 'is-pop');
+        if (active && sightNow !== 'none') {
+          this.sightNowText.set(t('hud.scope.now', { sight: t(`sight.${sightNow}`) }));
+          this.sightNowUntil = nowMs + SIGHT_NOW_MS;
+        }
+      }
+      ui.lastKey = key;
+      ui.lastSight = sightNow;
+      // Screen readers: "Slot 1: Longshore Rifle, Lv.3 Hot" / "Slot 4: Smoke, 1 left".
+      if (isThrow && weapon) {
+        ui.sr.set(t('hud.throwable.sr', { key: i + 1, item: t(`item.${weapon}.name`), count: throwable.mainCount }));
+      } else if (weapon) {
+        const scope = s?.scope ? `, ${t('hud.scope.sr', { scope: t(`item.${s.scope}.name`) })}` : '';
+        ui.sr.set(level !== null ? `${t('hud.slot.sr', { key: i + 1, item: t(`item.${weapon}.name`), level: levelLabel(level) })}${scope}` : t(`item.${weapon}.name`));
+      } else ui.sr.set(t('hud.slot.empty'));
     }
+    this.sightNow.set(local.alive && nowMs < this.sightNowUntil);
+    this.updatePouch(local);
 
-    // Ammo (the grenade shows its carried count instead of "∞")
-    if (grenadeHeld) {
-      this.ammo.set(t('hud.grenade.count', { count: local.grenades ?? 0 }));
+    // Ammo (throwables show their carried count instead of "∞"; melee shows "∞" like fists)
+    if (throwHeld) {
+      this.ammo.set(t('hud.grenade.count', { count: throwable.mainCount }));
       this.ammoNote.set('');
       this.ammoFlags.set('is-low', false);
       this.ammoFlags.set('is-out', false);
@@ -884,10 +1214,13 @@ export class Hud {
       const reserve = local.reserve ?? 0;
       this.ammo.set(t('hud.ammo', { mag: local.mag, reserve }));
       const out = local.mag === 0 && reserve === 0;
-      this.ammoNote.set(out ? t('hud.ammo.empty') : '');
+      // M2c: the RPG says "No rockets".
+      this.ammoNote.set(out ? t(held === 'rpg' ? 'hud.rocket.none' : 'hud.ammo.empty') : '');
       this.ammoFlags.set('is-out', out);
       this.ammoFlags.set('is-low', !out && local.magSize !== null && local.mag <= Math.ceil(local.magSize * LOW_MAG));
     }
+    // M2c: the RPG's hip dot is hollow while the tube is empty (UI M2c §5).
+    this.crosshairFlags.set('is-unloaded', held === 'rpg' && local.mag === 0);
     const reloading = local.reloadProgress !== null;
     this.ammoFlags.set('is-reloading', reloading);
     this.reloadBar.set(reloading ? (local.reloadProgress ?? 0).toFixed(2) : '0');
@@ -922,18 +1255,25 @@ export class Hud {
     this.adsBlocked.set(blocked !== null);
     if (blocked) this.adsBlockedText.set(t(`hud.ads.${blocked}`));
 
-    // Progress ring: reload or heal
-    const p = local.healProgress ?? local.reloadProgress;
+    // Progress ring: reload, heal or (M2c) a timed sight switch
+    const scopeSwap = local.scopeSwapProgress ?? null;
+    const p = local.healProgress ?? local.reloadProgress ?? scopeSwap;
     this.ringShown.set(local.alive && p !== null);
     if (p !== null) {
       this.ringOffset.set((RING_C * (1 - Math.min(1, Math.max(0, p)))).toFixed(1));
       const healing = local.healProgress !== null;
-      this.ringLabel.set(healing ? t('hud.healing') : t('hud.reloading'));
+      const mounting = !healing && local.reloadProgress === null;
+      this.ringLabel.set(healing ? t('hud.healing') : mounting ? t('hud.scope.mounting') : t('hud.reloading'));
       this.ringHint.set(healing ? t('hud.heal.cancel') : '');
     }
 
-    // Cook ring (M2a)
-    this.updateCook(local, live && grenadeHeld);
+    // M2c: melee swing recovery (predicted)
+    const rec = live && (held === 'fists' || isMeleeId(held)) ? (local.meleeRecovery ?? null) : null;
+    this.meleeRing.set(rec !== null);
+    if (rec !== null) this.meleeOffset.set((MELEE_C * Math.min(1, Math.max(0, rec))).toFixed(1));
+
+    // Cook ring (M2a; M2c smoke: cream, never urgent)
+    this.updateCook(local, live && throwHeld, held === 'smoke' ? 'smoke' : 'grenade', throwable.mainCount);
 
     // Danger icons (M2a)
     this.updateDangers(hud, local.alive, viewportW, viewportH);
@@ -961,7 +1301,7 @@ export class Hud {
     }
 
     // Prompt: loot in range, or the drop steering reminder
-    this.updatePrompt(local, hud.drop != null);
+    this.updatePrompt(local, hud.drop != null, hud.inSmoke === true ? null : (hud.lootPeek ?? null));
   }
 
   /** M2b: full reticle, dot only (fists / grenade), the dim FP spectate dot, or nothing (logic.reticleMode). */
@@ -1015,19 +1355,46 @@ export class Hud {
     this.stanceSr.set(t(v.labelKey));
   }
 
-  private updateCook(local: HudLocalView, holdingGrenade: boolean): void {
-    const c = holdingGrenade ? cookView(local.cook ?? null) : null;
-    const ready = holdingGrenade && c === null && (local.grenades ?? 0) > 0;
+  private updateCook(local: HudLocalView, holding: boolean, kind: M2cThrowableId, count: number): void {
+    const cook = local.cook ?? null;
+    const smoke = (cook?.throwable ?? kind) === 'smoke';
+    const c = holding ? cookView(cook) : null;
+    const ready = holding && c === null && count > 0;
     this.cookShown.set(c !== null || ready);
     this.cookFlags.set('is-cooking', c !== null);
-    this.cookFlags.set('is-urgent', c?.urgent === true);
+    this.cookFlags.set('is-smoke', smoke);
+    // Smoke cannot hurt you: no red, no pulse.
+    this.cookFlags.set('is-urgent', c?.urgent === true && !smoke);
     if (c) {
       this.cookOffset.set((COOK_C * (1 - c.ratio)).toFixed(1));
       this.cookSecs.set(decimal1.format(c.seconds));
       this.cookLabel.set(t('hud.grenade.throw'));
     } else if (ready) {
       this.cookSecs.set('');
-      this.cookLabel.set(t('hud.grenade.cook'));
+      this.cookLabel.set(t(smoke ? 'hud.smoke.throw' : 'hud.grenade.cook'));
+    }
+  }
+
+  /** M2c spare-scope pouch: chips that fit the active gun are full; others faded and slashed (UI M2c §16.2). */
+  private updatePouch(local: HudLocalView): void {
+    const active = local.activeSlot <= 1 ? (local.slots[local.activeSlot] as HudSlotView | undefined) : undefined;
+    const chips = pouchModel(local.scopeStash, active ?? null);
+    this.pouchShown.set(local.alive && chips.length > 0);
+    this.pouchCount.set(`×${chips.length}`);
+    this.pouchFlags.set('is-single', chips.length <= 1);
+    for (let i = 0; i < this.pouchChips.length; i++) {
+      const ui = this.pouchChips[i];
+      const c = chips[i];
+      if (!ui) continue;
+      ui.shown.set(c !== undefined);
+      if (!c) continue;
+      setIcon(ui.icon, c.scope);
+      ui.flags.set('is-nofit', !c.fits);
+      const tip = `${t(`item.${c.scope}.name`)} · ${t('hud.scope.inPouch')}`;
+      if (ui.el.title !== tip) {
+        ui.el.title = tip;
+        ui.el.setAttribute('aria-label', tip);
+      }
     }
   }
 
@@ -1066,7 +1433,8 @@ export class Hud {
     retrigger(this.vignetteHit, 'is-on');
   }
 
-  private updatePrompt(local: HudLocalView, dropView: boolean): void {
+  private updatePrompt(local: HudLocalView, dropView: boolean, peek: HudView['lootPeek'] = null): void {
+    this.promptFlags.set('is-peek', false);
     if (dropView) {
       // M2b: the drop HUD shows its own prompts.
       this.promptShown.set(false);
@@ -1080,14 +1448,55 @@ export class Hud {
       this.promptDetail.set(false);
       return;
     }
-    const item = this.promptItem;
-    this.promptShown.set(local.alive && item !== null);
-    if (!item || !local.alive) return;
-    const choice = pickupPromptChoice(item, this.promptQty, local, this.promptRefusal);
-    const name = t(`item.${item}.name`);
+    const input = this.promptInput;
+    // M2c (P2) loot peek: the item the crosshair is on, out of reach: dimmed, no key, no verb (UI M2c §3.1).
+    if (!input && peek && local.alive) {
+      this.promptShown.set(true);
+      this.promptFlags.set('is-peek', true);
+      this.promptFlags.set('is-blocked', false);
+      setIcon(this.promptIcon, peek.item);
+      this.promptText.set(peek.qty > 1 ? `${t(`item.${peek.item}.name`)} ×${peek.qty}` : t(`item.${peek.item}.name`));
+      this.promptChip.set(false);
+      this.promptLevel.set(peek.level !== null);
+      setLevelBadge(this.promptBadge, peek.level);
+      this.promptLevelText.set('');
+      this.promptCompare.set(false);
+      this.promptExtra.set(false);
+      this.promptDetail.set(false);
+      return;
+    }
+    this.promptShown.set(local.alive && input !== null);
+    if (!input || !local.alive) return;
+    const item = input.item;
+    const m = pickupPromptModel(input, local);
     setIcon(this.promptIcon, item);
-    this.promptText.set(choice.usesCount ? t(choice.key, { count: this.promptQty, item: name }) : t(choice.key, { item: name }));
-    this.promptFlags.set('is-blocked', choice.blocked);
+    this.promptText.set(t(m.key, m.vars));
+    this.promptFlags.set('is-blocked', m.blocked);
+    // M2c: the gun's mounted scope as a sight chip (UI M2c §16.3).
+    const groundSight = m.groundScope ? scopeSight(m.groundScope) : null;
+    this.promptChip.set(!m.blocked && groundSight !== null);
+    if (groundSight) {
+      this.promptChipFlags.set('is-reddot', groundSight === 'red_dot');
+      if (this.promptChipEl.dataset['sight'] !== groundSight) this.promptChipEl.dataset['sight'] = groundSight;
+      this.promptChipText.set(groundSight === 'red_dot' ? '' : groundSight.replace('scope_', '').replace('x', '×'));
+    }
+    // M2c: level badge + "Lv.3 Hot", and on a same-id swap the ▲ / ▼ / = tag with the old level's badge.
+    const showLevel = !m.blocked && m.level !== null;
+    this.promptLevel.set(showLevel);
+    if (showLevel) {
+      setLevelBadge(this.promptBadge, m.level);
+      this.promptLevelText.set(levelLabel(m.level));
+      this.promptCompare.set(m.compare !== null);
+      if (m.compare) {
+        this.promptCompareFlags.set('is-down', m.compare === 'down');
+        this.promptCompareText.set(t(`hud.level.${m.compare}`));
+        setLevelBadge(this.promptOldBadge, m.replaced?.level ?? null);
+      }
+    }
+    // M2c extra line: the melee note, or a scope pickup's target ("→ Longshore Rifle" / "→ Pouch" / "Fits: …").
+    const extra = m.blocked ? '' : this.promptExtraLine(m);
+    this.promptExtra.set(extra !== '');
+    this.promptExtraText.set(extra);
     // M2a: armor names its tier (pips + "Lv.2") and the piece's durability ("31/55").
     const detail = armorPromptDetail(item, this.promptDurability, this.promptMaxDurability ?? this.maxDurability.get(item) ?? null);
     this.promptDetail.set(detail !== null);
@@ -1096,6 +1505,21 @@ export class Hud {
       this.promptTier.set(t(detail.tierKey));
       this.promptDur.set(detail.durability ?? '');
     }
+  }
+
+  private promptExtraLine(m: ReturnType<typeof pickupPromptModel>): string {
+    if (m.noteKey) return t(m.noteKey);
+    const parts: string[] = [];
+    if (m.scopeTarget === 'pouch') parts.push(t('hud.scope.toPouch'));
+    else if (m.scopeTarget !== null && m.scopeTarget.weapon !== null) {
+      parts.push(t('hud.scope.mountsOn', { weapon: t(`item.${m.scopeTarget.weapon}.name`) }));
+    }
+    if (m.fitsKey && this.promptInput) {
+      const scope = this.promptInput.item as ScopeId;
+      const names = fitNames(this.balance, scope);
+      if (names !== '') parts.push(t('hud.scope.fits', { weapons: names }));
+    }
+    return parts.join(' · ');
   }
 
   dispose(): void {

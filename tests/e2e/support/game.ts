@@ -6,9 +6,26 @@
  * waiting room (host Start) -> countdown -> carrier (aboard) -> jump -> freefall -> chute -> on foot -> results ->
  * the same waiting room.
  */
+import { readFileSync } from 'node:fs';
+import { dirname, join as pathJoin, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
 
+const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+
 export const SHOTS = 'test-results/shots';
+
+/**
+ * Every loot item id in balance.json's loot tables (M2c set). Loot overrides in specs start from `zeroLoot()` so an
+ * "only snipers" table really holds only snipers when new item ids are added (read from the file, not hard-coded).
+ */
+export const LOOT_ITEMS: string[] = (() => {
+  const b = JSON.parse(readFileSync(pathJoin(ROOT_DIR, 'docs/design/balance.json'), 'utf8')) as { loot: { tiers: Record<string, Record<string, number>> } };
+  const ids = new Set<string>();
+  for (const t of Object.values(b.loot.tiers)) for (const k of Object.keys(t)) if (!k.startsWith('_')) ids.add(k);
+  return [...ids].sort();
+})();
+export const zeroLoot = (): Record<string, number> => Object.fromEntries(LOOT_ITEMS.map((i) => [i, 0]));
 
 export interface ConsoleLog {
   errors: string[];
@@ -112,7 +129,7 @@ export async function joinByCode(page: Page, code: string): Promise<void> {
   await page.locator('#ui-room-code').fill(code);
   await ui.browser(page).getByRole('button', { name: /^join$/i }).click();
   // A room mid-match shows the match (spectating) instead of the waiting room.
-  await expect(ui.room(page).or(ui.hud(page))).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator('.ui-screen--room:visible, .ui-hud:visible').first()).toBeVisible({ timeout: 10_000 });
 }
 
 /** Host: press Start match in the waiting room. */
@@ -143,7 +160,10 @@ export async function game<T>(page: Page, f: (g: NonNullable<Window['__game']>) 
  */
 export async function jumpAndLand(page: Page, timeoutMs = 45_000): Promise<void> {
   const until = Date.now() + timeoutMs;
-  await expect.poll(() => game(page, (g) => g.aboard), { timeout: 20_000 }).toBe(true);
+  // Aboard, or already off the carrier (a slow page can miss the short office flight: auto-eject).
+  await expect
+    .poll(() => game(page, (g) => g.aboard || g.dropPhase !== null || (g.localAlive && g.phase === 'playing')), { timeout: 20_000 })
+    .toBe(true);
   while (Date.now() < until && (await game(page, (g) => g.aboard))) {
     await page.keyboard.press('Space');
     await page.waitForTimeout(250);

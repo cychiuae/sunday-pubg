@@ -59,7 +59,8 @@ can be switched in data alone. Outside the safe circle the ceiling sprinklers ra
 - Centre of the first circle = the floor centre (0, 0). `startRadius` 140 covers the whole floor (half-diagonal sqrt(117^2 + 72^2) = 137.4 m),
   so nobody takes damage at match start.
 - Schedule (waits, shrinks, dps, final collapse) is **identical to the island**, so the pacing model and bot eagerness ramp still line up.
-  Phases end at 2:00 / 3:45 / 5:20 / 6:30 / 7:20 / 8:00; the collapse closes at 8:40.
+  Phases end at 2:00 / 3:45 / 5:20 / 6:30 / 7:20 / 8:00; the collapse closes at 8:40. (M2c v8: both maps now end phases at 2:00 / 3:55 /
+  5:40 / 6:55 / 7:45 / 8:25, collapse closed at 9:05; `zone.md`.)
 - Radii are slightly larger than the island's in the middle phases, because walls and desks lengthen rotations and shorten sightlines:
 
 | Phase | Radius after | radiusFraction (of 140) | Island radius | Note |
@@ -139,6 +140,11 @@ can be switched in data alone. Outside the safe circle the ceiling sprinklers ra
 Same item set. Rooms and desk mazes favour close fights and grenades; the long main aisle would otherwise make the sniper too strong.
 Overrides (only these weights change): common grenade 5 -> 7, rare grenade 6 -> 8, epic sniper 9 -> 6, epic shotgun 9 -> 12.
 Fire extinguisher spots and room interiors are good loot spawns (level-designer).
+**M2c** (`loot.md` "M2c", live): the base tables changed, so the office overrides become common pistol 4, revolver 3, smg 3, shotgun 2,
+knife 9, grenade 6; rare grenade 7; epic sniper 5, shotgun 10, scope_8x 2; guaranteed weapons pistol 45 / revolver 20 / smg 15 / shotgun 20.
+M2c tuning round 2 (office-only bot overrides against landing brawls; reasons in `combat.md`): `bots.drop.maxBotsPerTarget` 1,
+`bots.dropSpreadRange` 20, `bots.lootPhaseEngageRange` 3. Office layout: 50 / 20 / 8 activated loot points per match from candidate
+pools (`layout.md`). Glass panes break to melee and rockets (`melee.md`).
 
 ## 3. Per-map overrides in balance.json (proposal for Phase B)
 - New top-level block `maps.<mapId>`. Each contains **only keys that differ** from the base sections.
@@ -268,7 +274,8 @@ Office rules (sim tests on the merged balance and a test indoor map):
 11. Walking off a 6.7 m plateau: 0 damage. Jumping off it: 0 damage. Falling 9 m: 5.8 HP (+- 0.3). On the island, falling 6.7 m still deals
     20.2 HP (+- 0.5).
 12. At t = 0 every floor corner is inside the circle (radius 140 >= 137.4). Phase end radii are 95 / 70 / 50 / 30 / 15 / 5 (+- 0.1) and the
-    phase end times match the island (120 / 225 / 320 / 390 / 440 / 480 s, closed at 520 s).
+    phase end times match the island (M2c v8: 120 / 235 / 340 / 415 / 465 / 505 s, closed at 545 s; was 120 / 225 / 320 / 390 / 440 /
+    480, 520).
 13. Over 1000 seeds every office zone centre lies inside the floor rectangle inset 15 m, and every circle lies inside the previous one.
 14. Outside the circle on the office: HP loss per phase dps, no speed change, and prone is allowed (no water depth).
 15. Glass: a shot at a player behind glass stops at the glass (impact surface `glass`, no damage); players cannot walk through it; a grenade

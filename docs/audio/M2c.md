@@ -1,8 +1,9 @@
 # Audio spec: M2c "Fresh Every Match & Bigger Arsenal"
 
-Owner: audio-designer. Status: **design spec (round 1)**. Implementation follows once the tech-lead's M2c contract
-(ADR 0007, ARCHITECTURE §16) is in place. Event and field names in §11 are **requests**. The tech-lead may rename
-or reshape them, and audio will follow the contract.
+Owner: audio-designer. Status: **built (phase 1, 2026-11-18)** against the optional M2c contract (ADR 0007,
+ARCHITECTURE §16). Every handler works without the optional fields and uses the fallbacks in §11, and `src/audio`
+compiles and passes its tests both before and after the C-gate flip. §13 lists where the build differs from the
+round-1 requests (the tech-lead's names).
 
 Base system: [AUDIO.md](AUDIO.md). M2c adds no audio files. Every sound below is synthesised in
 `src/audio/recipes.ts` from the existing primitives (`tone`, `noise`, `click`, `bell`, `pluck`, `loopNoise`, `lfo`,
@@ -83,7 +84,7 @@ outranks remote footsteps.
 | **machete** | **thwack**: sine 180 to 90 Hz, 70 ms, plus band-pass noise 1.2 kHz, 60 ms | plus a bigger tok (700 Hz) | padded **thud** plus a plate **clank** (`vestClink` at tier, gain x1.2) | **clang-tonk**: `helmetTonk` plus a bell 2.2 kHz (partials 1, 2.4), 0.25 s | **chok**: a woody chop (triangle 260 Hz, 60 ms, plus a 2.4 kHz click) | sand chop (brown noise 800 Hz, 70 ms) | splash 0.6 | dull glassy **thunk** plus a ring (as `impact.glass`, gain x1.3) |
 | **paddle** | beach-ball **WHAP**: sine 140 to 60 Hz, 120 ms, plus pink noise 900 Hz, 90 ms, gain 0.9 | cartoon **BONK**: hollow wood (band-pass noise 500 Hz, Q 6, 120 ms) plus a sine 320 to 180 Hz with an 18 Hz pitch wobble (the toy "boing"), 0.3 s | heavy padded **WHUMP** plus `vestClink` at tier, low | big **TONK**: `helmetTonk` at 0.8 pitch, long ring (0.4 s) | **THOCK**: wood on wood (triangle 190 Hz plus band-pass noise 1.1 kHz, Q 3, 100 ms) | sand **fwump** (brown noise 400 Hz, 120 ms, plus crackle grains) | big oar slap: `splash` 0.9, 0.35 s | heavy dull thunk |
 
-`glass` is the contact only. The pane breaking is a separate cue from `glassShattered` (§2.5), so a melee strike
+`glass` is the contact only. The pane breaking is a separate cue from `glassBroken` (§2.5), so a melee strike
 on glass plays both.
 
 **Who hears what for player hits.** The existing confirms stay, and the melee contact is layered on top:
@@ -101,7 +102,8 @@ When `meleeHit.knockback` is true, two layers are scheduled in one voice:
 
 1. **Shove:** at `0`, a short brown noise "huff" (low-pass 500 Hz, 80 ms) and a cloth whoosh (band-pass 600 to
    1400 Hz, 0.18 s), on top of the paddle WHAP.
-2. **Thud:** at `knockbackMs / 1000` (from `balance.weapons.paddle.knockbackMs`; 0.3 s if absent), a body **thud** on
+2. **Thud:** at `AUDIO_TUNING.knockbackThudS` (0.3 s; the balance has no knockback duration, so this is a feel
+   number owned by audio), a body **thud** on
    the ground: sine 90 to 45 Hz, 0.15 s, plus a surface scuff that matches the victim's footstep surface (sand drag,
    wood knock, carpet pad or tile squeak, reusing `surfaceStep` at gain 0.6).
 
@@ -129,6 +131,9 @@ The base layers for **one barrel** (`barrels = 1` or absent):
   0.3 s, gain 0.18 each. It sounds like blowing across two bottles. The pump shotgun has no ring, so this is how you
   tell the two apart.
 - Remote: plus `distantTail(v, 0.5)`.
+
+**Built:** one barrel per click (the contract has no both-barrels input, so `shotFired` has no `barrels`). The
+paragraph below is kept for a future both-barrels input.
 
 **Both barrels** (`barrels = 2`): the whole stack plays twice, 16 ms apart (a flam). The second copy is pitched
 -1 semitone and the body decay is longer (0.4 s). There is an extra sub thump (sine 55 to 30 Hz, decay 0.35, gain 0.6),
@@ -311,7 +316,8 @@ sound to the listener crosses a cloud. The reasons:
 
 **Instead, a light "cocoon" on ambience only.** While the listener's ear is inside an active cloud (distance to
 centre < current radius), the ambience bus gets a dedicated low-pass at 2.5 kHz (τ 0.25 s) and a -6 dB duck, and the
-nearest smoke's hiss gets +3 dB. Gameplay sounds stay full-band, so footsteps and reloads stand out **more** in smoke.
+nearest smoke's hiss gets +3 dB (**not built**: the cocoon alone already makes the hiss the loudest thing in the
+cloud). Gameplay sounds stay full-band, so footsteps and reloads stand out **more** in smoke.
 The cocoon is one extra BiquadFilter on the ambience path (separate from the shared world muffle) and costs nothing
 when open.
 
@@ -323,7 +329,7 @@ of -4 dB above 3 kHz, for sounds whose source-to-listener segment crosses a clou
 The UI hides hit markers on targets you cannot see through smoke. A crisp `hitConfirm.*` would give away the same
 information, so audio mirrors the UI:
 
-- When `localHitConfirmed.hiddenBySmoke` is true (§11.1), the body, head and armor confirms are **skipped**. The kill
+- When `localHitConfirmed.obscured` is true (§11.1), the body, head and armor confirms are **skipped**. The kill
   confirm still plays (the kill feed shows it anyway).
 - The shooter still hears their own shot and the world impacts. The victim's experience is unchanged.
 
@@ -356,6 +362,31 @@ same run in every map and for every item class. This is "one level system" in so
 - **Remote pickups get no sparkle.** It is a personal reward, and a 3D sparkle would add clutter for little intel.
 - A **swap** (the existing swap prompt) is a pickup of the new item, so the sparkle plays for the new item's level.
 - The sparkle is original (a 4-note pentatonic run). It does not imitate any game's rarity jingle.
+
+## 7a. Scope attachments (Addendum 1)
+
+Kept light. All scope sounds are short, local-first mechanical clicks in the "items" class (AUDIO.md §3).
+
+| Cue | When | Sound | Space |
+|---|---|---|---|
+| `pickup.scope` (variant scope id) | `itemPickedUp` of a `scope_*`, whether it goes to the stash or straight onto a gun | a lens-cap **pop** (triangle 900 Hz, 25 ms) plus a small glass **tink** (bell, pitched by magnification: red dot 3.0, 2x 3.3, 4x 3.6, 8x 4.0 kHz, 0.12 s). No level sparkle (scopes have no level) | 2D local, 3D remote 10 m |
+| `scope.mount` (variant scope id) | a scope goes onto a gun (auto-mount on pickup, or a manual swap from the stash) | a rail **slide** (band-pass noise 1.6 to 2.6 kHz, Q 4, 0.1 s), then a firm two-step **click-clack** (2.8 kHz, then 1.9 kHz 45 ms later). The bigger the scope, the lower and heavier the clack (x1.0 red dot down to x0.8 for 8x) | 2D local, 3D remote 8 m |
+| `scope.unmount` | a scope is taken off a gun (manual remove, or swapped out) | the reverse: a single release **clack** (1.9 kHz), then a rail slide falling 2.6 to 1.6 kHz | 2D local, 3D remote 8 m |
+
+- **A swap is one sound.** When a swap replaces scope A with scope B, play `scope.mount` for B only. Its slide covers
+  the removal, so two click pairs never pile up.
+- **Auto-mount plays one sound.** An auto-mount on pickup plays `scope.mount` 90 ms after `pickup.scope`, so the
+  player hears "picked up, then fitted". A scope that goes to the stash plays `pickup.scope` alone, and that
+  difference tells the player where it went.
+- **Picking up a gun that already has a scope** plays only the normal `pickup.weapon` (plus the level sparkle). There
+  is no mount click, because nothing was fitted.
+- **ADS-in by scope: yes, lightly, and it is mostly built already.** `ads.in` and `ads.out` already vary by sight
+  variant (`red_dot` emitter tick, a lens zoom sweep for 4x/8x that is longer for 8x). M2c adds `scope_2x`: the same
+  zoom sweep, shorter (0.14 s, up to 2.0 kHz) and quieter (gain x0.7). That gives four audible steps: iron < red
+  dot < 2x < 4x < 8x. Audio needs the **mounted** sight in `localAdsChanged.sight`, which it already carries if
+  ClientGame fills it from the mounted scope.
+- **Priorities.** `pickup.scope` 58, `scope.mount` and `scope.unmount` 56 (local 2D), each with 1 instance and a
+  0.05 s cooldown, pitch jitter 0.3, gain 0.5. These are items class: they never steal from combat sounds.
 
 ## 8. Look presets and ambience
 
@@ -541,10 +572,27 @@ meleeHit: {
   while players are aboard. Fallback: the default mood (`noon` or `day`). Audio does not compute the layout itself:
   it is a client-side view consumer and should not run the layout function.
 
+### 11.6 Scopes (Addendum 1)
+
+- **`scopeChanged { playerId; slot; gun: GunId; from: ScopeId | null; to: ScopeId | null; auto: boolean; pos: Vec3;
+  isLocal: boolean }`**: one event per mount, unmount or swap (`to = null` means removed; `auto = true` on an
+  auto-mount from a pickup). The name is the tech-lead's choice (`scopeMounted` and `scopeRemoved` work too). Fallback:
+  no mount or unmount clicks, and only `pickup.scope` plays.
+- `itemPickedUp.item` must accept `ScopeId`, so `pickup.scope` plays.
+- `SightType` gains `'scope_2x'`. `localAdsChanged.sight` must be the **mounted** sight, not the gun's default.
+
 ## 12. Acceptance criteria
 
 The tests run in node against the structural fake context (`npx vitest run src/audio`) unless marked **(ear)**, which
 the user checks in a playtest.
+
+**Scopes**
+- AC-SC1: `itemPickedUp` with a `scope_*` plays `pickup.scope` (no level sparkle). `scopeChanged` with `to` set plays
+  `scope.mount`. With `to = null`, it plays `scope.unmount`. A swap (both set) plays only `scope.mount`. An auto-mount
+  plays the mount 90 ms after the pickup sound.
+- AC-SC2: `ads.in` with `scope_2x` builds a shorter sweep than `scope_4x`, which builds shorter than `scope_8x`.
+- AC-SC3 **(ear)**: mounting a scope is clearly heard by the local player and never masks a remote footstep.
+
 
 **Melee**
 - AC-M1: `meleeSwing` plays `melee.swing.local` (2D) or `.remote` (3D at `pos`) with variant = weapon. The whoosh's
@@ -612,3 +660,29 @@ the user checks in a playtest.
   listed in §11.
 - AC-X3: no audio files are added. `npx tsc --noEmit -p .` and `npx vitest run src/audio` pass.
 - AC-X4: audio imports nothing from `src/game/` or `src/render/`, and nothing in `src/shared/sim/` imports audio.
+
+## 13. Build notes (phase 1)
+
+**Files:** `src/audio/cues.ts` (29 new cues, M2c tuning), `soundMap.ts` (M2c helpers: melee materials and range,
+doppler, blast size, smoke shape, pickup level, ADS sweep, look tables), `recipes.ts` (every new recipe plus the
+variants), `AudioDirector.ts` (handlers for `meleeSwing`, `meleeHit`, `rocketFired`, `rocketDud`, `smokeDeployed`,
+`glassBroken`, `scopeChanged` and `throwableCycled`, `smokesSeen` for `setSmokes`, and `kind`/`source`/`weapon`/
+`obscured`/`level`/`rounds`/`look` routing), `RocketLayers.ts` (new), `Ambience.ts` (look parameters), `AudioEngine.ts`
+(`setRockets`, `setSmokes`, the cocoon filter, the rocket fallback and the look detail timers), `fuseTicks.ts` (smoke
+skipped), `DropLayers.ts` (`Group` exported). Tests: `m2c.test.ts` (new), plus updated fixtures in the existing tests.
+
+**Differences from the round-1 requests (contract names win):**
+- `glassBroken { paneId, pos, byId, cause: 'melee' | 'rocket', isLocal }` instead of `glassShattered`.
+- `localHitConfirmed.obscured` instead of `hiddenBySmoke`.
+- `explosion.source` (`'grenade' | 'rocket'`); `rocketDud` (new: a clunk and puff, `rocket.dud`, and the whistle stops).
+- No `shotFired.barrels`: one barrel per click (§3.1).
+- No knockback duration in balance: the thud timing is `AUDIO_TUNING.knockbackThudS`.
+- Fallback rocket flight time = `weapons.rpg.range / weapons.rpg.rocket.speed`; gravity = `weapons.rpg.rocket.gravity`.
+- `meleeHit.surface` is an `ImpactSurface`; `'player'` contacts come from `playerDamaged.weapon` once a producer fills
+  it (armor tier included), else from `meleeHit` (body or head).
+- The look arrives on `mapChanged.look` (unknown or cross-map ids fall back to `noon` / `day`).
+
+**Needs from others (unchanged contract, just wiring):** main.ts calls `audio.setRockets?.(view.rockets, view.serverTime)`
+and `audio.setSmokes?.(view.smokes, view.serverTime)` each frame after `setGrenades` (ARCHITECTURE §16.5). Until then
+rockets are dead-reckoned from `rocketFired` with the shared `rocketPosAt`, and only clouds seen through `smokeDeployed`
+hiss (no cocoon).

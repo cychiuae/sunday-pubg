@@ -27,8 +27,21 @@ import type {
   GunId,
   HealId,
   HeldId,
+  ImpactSurface,
   ItemId,
+  ItemLevel,
+  LookId,
   LootId,
+  M2cGunId,
+  M2cHeldId,
+  M2cThrowableId,
+  MatchLayout,
+  MeleeId,
+  PaneId,
+  RocketContactSurface,
+  RocketState,
+  ScopeId,
+  SmokeCloudState,
   MatchPhase,
   PlayerId,
   ShotImpact,
@@ -72,6 +85,9 @@ export interface GameEvents {
     helmet: ArmorHit | null;
     isLocalVictim: boolean;
     isLocalAttacker: boolean;
+    /** M2c (copied from SimEvent damage): the attacker's weapon ('rpg' for rockets, 'grenade' for frags); null zone/fall. */
+    weapon?: M2cHeldId | null;
+    weaponLevel?: ItemLevel | null;
   };
   /**
    * The local player damaged someone (hit marker / hit sound). Emitted after the matching playerDamaged.
@@ -86,6 +102,15 @@ export interface GameEvents {
     vest: ArmorHit | null;
     helmet: ArmorHit | null;
     cause: DeathCause;
+    /** M2c: the weapon that did it (audio melee contact flavour). */
+    weapon?: M2cHeldId | null;
+    weaponLevel?: ItemLevel | null;
+    /**
+     * M2c (smoke.md, UI M2c §6.2; producer ClientGame with segmentBlockedBySmoke at receipt time): the camera's line to
+     * the victim's chest crosses an opaque cloud. Ui hides body/head/armor/break markers and audio the hit tick; the
+     * KILL marker and kill sound still show (`killed`). Absent = false. (Audio's `hiddenBySmoke` = this field.)
+     */
+    obscured?: boolean;
   };
   playerKilled: {
     killerId: PlayerId | null;
@@ -101,11 +126,28 @@ export interface GameEvents {
     headshot?: boolean;
     isLocalVictim: boolean;
     isLocalKiller: boolean;
+    /** M2c (gate: required): the kill weapon's level (feed and death-card badge); null for fists, frags, zone, fall. */
+    weaponLevel: ItemLevel | null;
+    /** M2c: a rocket kill by a direct hit (feed.rocketDirect.*). Absent = false. */
+    direct?: boolean;
+    /** M2c (P2): the local camera's line to the victim crossed smoke at the kill (feed.smoke.*). Absent = false. */
+    throughSmoke?: boolean;
   };
 
   /** M2a: `durability` for armor pickups (the worn piece's durability after equipping). */
-  itemPickedUp: { playerId: PlayerId; item: ItemId; qty: number; pos: Vec3; isLocal: boolean; durability?: number };
-  reloadStarted: { playerId: PlayerId; weapon: GunId; durationMs: number; pos: Vec3; isLocal: boolean };
+  /** M2c: `level` for weapons (pickup sparkle), `scope` mounted on a picked gun. `item` widens to M2cItemId at the gate. */
+  itemPickedUp: {
+    playerId: PlayerId;
+    item: ItemId;
+    qty: number;
+    pos: Vec3;
+    isLocal: boolean;
+    durability?: number;
+    level?: ItemLevel;
+    scope?: ScopeId | null;
+  };
+  /** M2c: `rounds` = rounds this reload loads (audio shell count). */
+  reloadStarted: { playerId: PlayerId; weapon: GunId; durationMs: number; pos: Vec3; isLocal: boolean; rounds?: number };
   /** completed = false when cancelled (switch weapon, death). */
   reloadFinished: { playerId: PlayerId; weapon: GunId; completed: boolean; pos: Vec3; isLocal: boolean };
   healStarted: { playerId: PlayerId; item: HealId; durationMs: number; pos: Vec3; isLocal: boolean };
@@ -113,7 +155,7 @@ export interface GameEvents {
   healCancelled: { playerId: PlayerId; item: HealId; pos: Vec3; isLocal: boolean };
   /** M1-fix: `pos` (producer: ClientGame) = the player's current view position, like reload/heal events. */
   /** M2a: weapon 'grenade' with slot 3. */
-  weaponSwitched: { playerId: PlayerId; weapon: HeldId; slot: SlotIndex; isLocal: boolean; pos?: Vec3 };
+  weaponSwitched: { playerId: PlayerId; weapon: HeldId; slot: SlotIndex; isLocal: boolean; pos?: Vec3; /** M2c. */ level?: ItemLevel | null };
   /**
    * M1-fix (producer: ClientGame, from SimEvent actionFailed; emitted only when isLocal in M1). Ui shows the
    * string from ARCHITECTURE.md §12 "Contract revision 1"; audio plays a refusal cue. Not emitted for `fire`
@@ -139,9 +181,10 @@ export interface GameEvents {
    * M2a, local only, client-derived from prediction: ADS engaged (adsMs went 0 -> > 0) or ended (-> 0).
    * Audio: ADS rustle, scope-in lens sound when `sight` is a scope.
    */
+  /** M2c: `sight` is the EFFECTIVE sight (mounted scope, else built-in; effectiveSight in balance.ts). */
   localAdsChanged: { engaged: boolean; weapon: WeaponId; sight: SightType };
   /** M2a: pin pulled (SimEvent grenadeCook). Audio: positional click (~10 m). */
-  grenadeCooked: { playerId: PlayerId; pos: Vec3; explodesAt: number; isLocal: boolean };
+  grenadeCooked: { playerId: PlayerId; pos: Vec3; explodesAt: number; isLocal: boolean; /** M2c (gate: required). */ kind: M2cThrowableId };
   /** M2a: grenade entity created (SimEvent grenadeThrown). `dropped` = no throw whoosh. isLocal = local owner. */
   grenadeThrown: {
     id: GrenadeId;
@@ -151,9 +194,11 @@ export interface GameEvents {
     explodesAt: number;
     dropped: boolean;
     isLocal: boolean;
+    /** M2c (gate: required; audio: REQUIRED to tell smoke from frags). */
+    kind: M2cThrowableId;
   };
   /** M2a: SimEvent grenadeBounce. Audio clink pitched by speed; water plop when surface 'water'; render splash. */
-  grenadeBounced: { id: GrenadeId; pos: Vec3; surface: GrenadeContactSurface; speed: number };
+  grenadeBounced: { id: GrenadeId; pos: Vec3; surface: GrenadeContactSurface; speed: number; /** M2c (gate: required). */ kind: M2cThrowableId };
   /**
    * M2a: SimEvent explosion (emitted on the bus BEFORE the playerDamaged events of the same blast).
    * `localDistance`: 3D distance from the local player's predicted eye to `pos` (null when no live local player);
@@ -167,7 +212,54 @@ export interface GameEvents {
     inHand: boolean;
     isLocalOwner: boolean;
     localDistance: number | null;
+    /** M2c (gate: required): frag or rocket blast (`id` is then the RocketId; one id space). */
+    source: 'grenade' | 'rocket';
+    /** M2c: rocket struck a player (VFX star flash). */
+    direct?: boolean;
+    /** M2c: rocket reached max range (no ground ring). */
+    airburst?: boolean;
   };
+
+  // ---- M2c (ADR 0007). Producer: ClientGame (SimEvent translation, or prediction where noted). ----
+  /**
+   * A melee swing started. Local: from PREDICTION on the click (the server echo is ignored); remotes: SimEvent
+   * meleeSwing. windupMs = ms from now to the hit frame (audio lands the whoosh peak there; render the wind-up pose).
+   */
+  meleeSwing: { playerId: PlayerId; weapon: MeleeId; level: ItemLevel; pos: Vec3; windupMs: number; cycleMs: number; isLocal: boolean };
+  /** SimEvent meleeHit: the hit check found something (not emitted on a clean miss). */
+  meleeHit: {
+    attackerId: PlayerId;
+    weapon: MeleeId;
+    level: ItemLevel;
+    pos: Vec3;
+    surface: ImpactSurface;
+    victimId: PlayerId | null;
+    headshot: boolean;
+    knockback: boolean;
+    isLocalAttacker: boolean;
+    isLocalVictim: boolean;
+  };
+  /** SimEvent rocketFired (launch whoomp, backblast puff). Rendering of the flight uses FrameView.rockets. */
+  rocketFired: RocketState & { isLocal: boolean };
+  /** SimEvent rocketDud (clunk, small puff; no blast). */
+  rocketDud: { id: RocketState['id']; ownerId: PlayerId; pos: Vec3; surface: RocketContactSurface; victimId: PlayerId | null; isLocalOwner: boolean };
+  /** SimEvent smokeDeployed (deploy puffs, hiss start). The cloud itself is in FrameView.smokes. */
+  smokeDeployed: SmokeCloudState & { isLocalOwner: boolean };
+  /** SimEvent glassBroken (shatter VFX and sound; audio asked for `glassShattered`, this is it). */
+  glassBroken: { paneId: PaneId; pos: Vec3; byId: PlayerId | null; cause: 'melee' | 'rocket'; isLocal: boolean };
+  /** SimEvent scopeChanged (mount/unmount snap, positional ~10 m). */
+  scopeChanged: {
+    playerId: PlayerId;
+    slot: 0 | 1;
+    gun: M2cGunId;
+    from: ScopeId | null;
+    to: ScopeId | null;
+    auto: boolean;
+    pos: Vec3;
+    isLocal: boolean;
+  };
+  /** Local only, from PREDICTION: the throwable slot's selection changed by a 4 / G cycle (click, chip slide). */
+  throwableCycled: { from: M2cThrowableId; to: M2cThrowableId };
 
   /** Derived from snapshots: first zone, phaseIndex change, or shrinking flag change. */
   zoneChanged: { zone: ZoneState };
@@ -217,6 +309,17 @@ export interface GameEvents {
      */
     maxDurability?: number | null;
     refusal: ActionFailReason | null;
+    /** M2c (gate: required): the pickup's level (weapons), else null. */
+    level: ItemLevel | null;
+    /** M2c: scope mounted on a ground gun, else null. */
+    scope?: ScopeId | null;
+    /**
+     * M2c (levels.md "Upgrade swap", melee and gun swaps): the slot E would replace (the swap prompt shows what you give
+     * up), else null (free slot, stackables, armor).
+     */
+    replacesSlot?: SlotIndex | null;
+    /** M2c (scopes.md pickup rules): where a SCOPE pickup would go: gun slot 0/1 or the pouch; null if refused or not a scope. */
+    scopeTarget?: 0 | 1 | 'pouch' | null;
   };
   // ---- M2b (ADR 0005 / 0006). Producer: ClientGame. ----
   /**
@@ -225,7 +328,12 @@ export interface GameEvents {
    * their constructor balance for per-match numbers. Renderer rebuilds its scene (terrain or indoor floor, walls,
    * props, water or rain curtain); Ui rebuilds the minimap; audio switches ambience, reverb and zone loops by theme.
    */
-  mapChanged: { mapId: MapId; map: AnyMapData; balance: Balance; zoneTheme: ZoneTheme };
+  /**
+   * M2c (ADR 0007 §1.5): emitted on EVERY welcome whose (mapId, layout seed) differs from the current one (that is,
+   * every match). `map` is the LAYOUT-APPLIED map; `layout` the full MatchLayout (decor, lightsOn, picks) or null
+   * (no layout: title screen, tests); `look` the preset (baselineLook without a layout).
+   */
+  mapChanged: { mapId: MapId; map: AnyMapData; balance: Balance; zoneTheme: ZoneTheme; layout: MatchLayout | null; look: LookId };
   /** The carrier left its entry point (client-derived when serverNow passes route.startsAt). Engine loop, announcer. */
   carrierDeparted: { route: DropRoute };
   /** A player left the carrier (SimEvent dropJump; local from prediction). Hatch whoosh, announcer. */

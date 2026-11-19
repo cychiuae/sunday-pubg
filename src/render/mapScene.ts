@@ -49,6 +49,8 @@ export interface MapScene {
   /** Zone phase change pulse (tide wall / rain curtain). */
   pulseZone(): void;
   setQuality(q: QualitySettings): void;
+  /** M2c: FrameView.brokenPanes (indoor only; the island has no glass). */
+  setBrokenPanes?(ids: readonly number[]): void;
   /** Frees every GPU resource this scene created (shared procedural caches are left alone). */
   dispose(): void;
 }

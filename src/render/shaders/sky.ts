@@ -17,6 +17,8 @@ uniform vec3 uTop;
 uniform vec3 uHorizon;
 uniform vec3 uSun;
 uniform vec3 uSunDir;
+uniform float uDiscCos;
+uniform float uHaloCos;
 varying vec3 vDir;
 
 void main() {
@@ -25,8 +27,8 @@ void main() {
   vec3 col = mix(uHorizon, uTop, pow(smoothstep(0.0, 0.55, h), 0.75));
   float s = dot(d, normalize(uSunDir));
   float aa = fwidth(s) * 1.5;
-  float halo = smoothstep(0.9965 - aa, 0.9965 + aa, s);
-  float disc = smoothstep(0.99935 - aa, 0.99935 + aa, s);
+  float halo = smoothstep(uHaloCos - aa, uHaloCos + aa, s);
+  float disc = smoothstep(uDiscCos - aa, uDiscCos + aa, s);
   col = mix(col, mix(col, uSun, 0.35), halo);
   col = mix(col, uSun, disc);
   gl_FragColor = vec4(col, 1.0);

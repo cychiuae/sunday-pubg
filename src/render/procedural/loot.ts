@@ -7,17 +7,23 @@
  *   └─ 'glow'  tier marker on the ground (unlit, no shadows):
  *        disc + ring + ink rim (all tiers), short beam (rare), double ring + tall beam + 'sparkles' (epic)
  *        'sparkles' is a Group of 4 diamonds the renderer may rotate.
+ * M2c: createLootModel(item, tier, { level, scope, marker }) draws the per-level weapon model, a mounted scope and the
+ * level marker (or the cream supply marker); createLootMarker(level | 'supply') builds a marker on its own.
  * Item ids are plain strings with a safe fallback (mini crate), so M2a ids (dmr, sniper, lmg, ammo_sniper,
  * vest_1..3, helmet_1..3, grenade) work before and after `ItemId` grows; legacy 'vest' draws vest_1.
  * Tier is shape-coded as well as colour-coded (colour-blind safe):
  *   common = 1 ring, no beam | rare = 1 ring + 1.2 m beam | epic = 2 rings + 2.4 m beam + sparkles.
  */
 import * as THREE from 'three';
-import type { ItemId, LootTier } from '../../shared/types';
+import type { ItemId, ItemLevel, LootTier, ScopeId } from '../../shared/types';
 import { buildMerged, xf, type Merged, type Piece } from './builder';
 import { addOutline, OUTLINE, palette, vertexColorToon } from './materials';
 import { getPropParts } from './props';
 import { getGrenadeGeometry } from './grenade';
+import { clampLevel, LEVEL_COLORS, LEVEL_GLOW_COLORS, LEVEL_NUMERAL_COLOR, SUPPLY_MARKER_COLOR } from './levelCollar';
+import { ammoRocketPieces } from './rocket';
+import { getScopeGeometry, SCOPE_GEOMETRY } from './scopes';
+import { getSmokeCanGeometry } from './smokeCan';
 import { getWeaponGeometry } from './weapons';
 import { armorFromItemId, getWearableGeometry } from './wearables';
 
@@ -102,16 +108,25 @@ function medkitPieces(): Piece[] {
 }
 
 /** Ground scale per gun: shown side-on and enlarged so they read at range; the long guns less so. */
-const GUN_LOOT_SCALE: Record<string, number> = { pistol: 1.9, dmr: 1.2, lmg: 1.2, sniper: 1.05 };
+const GUN_LOOT_SCALE: Record<string, number> = {
+  pistol: 1.9, dmr: 1.2, lmg: 1.2, sniper: 1.05,
+  // M2c (docs/art/M2c.md §2): small items bigger, long items smaller, so all read at a similar size
+  knife: 2.0, machete: 1.3, paddle: 0.95, dbshotgun: 1.3, revolver: 1.8, rpg: 1.0,
+};
 
 const itemCache = new Map<string, Merged>();
 /** Shared geometry of a loot item mesh (also used for held heal items in the first-person viewmodel). */
-export function getLootItemGeometry(item: string): { merged: Merged; scale: number; rotY: number } | null {
-  return itemGeometry(item);
+export function getLootItemGeometry(item: string, opts: LootModelOptions = {}): { merged: Merged; scale: number; rotY: number } | null {
+  return itemGeometry(item, opts);
 }
-function itemGeometry(item: string): { merged: Merged; scale: number; rotY: number } | null {
-  const gun = getWeaponGeometry(item);
+function itemGeometry(item: string, opts: LootModelOptions = {}): { merged: Merged; scale: number; rotY: number } | null {
+  const gun = getWeaponGeometry(item, { level: opts.level ?? null, scope: opts.scope ?? null });
   if (gun) return { merged: gun.merged, scale: GUN_LOOT_SCALE[item] ?? 1.35, rotY: Math.PI / 2 };
+  if (Object.prototype.hasOwnProperty.call(SCOPE_GEOMETRY, item)) {
+    const sc = item as ScopeId;
+    return { merged: getScopeGeometry(sc).merged, scale: SCOPE_GEOMETRY[sc].lootScale, rotY: Math.PI / 2 };
+  }
+  if (item === 'smoke') return { merged: getSmokeCanGeometry(true), scale: 2.4, rotY: 0.4 };
   // Armor: 'vest_1'..'vest_3', 'helmet_1'..'helmet_3' and legacy 'vest' (= vest_1). Same geometry as the wearable.
   const armor = armorFromItemId(item);
   if (armor) return { merged: getWearableGeometry(armor.kind, armor.tier), scale: armor.kind === 'vest' ? 1.15 : 0.95, rotY: 0.5 };
@@ -122,6 +137,7 @@ function itemGeometry(item: string): { merged: Merged; scale: number; rotY: numb
     if (item === 'ammo_light' || item === 'ammo_heavy' || item === 'ammo_shell' || item === 'ammo_sniper') pieces = ammoPieces(item);
     else if (item === 'bandage') pieces = bandagePieces();
     else if (item === 'medkit') pieces = medkitPieces();
+    else if (item === 'ammo_rocket') pieces = ammoRocketPieces();
     if (!pieces) return null;
     m = buildMerged(pieces, `loot:${item}`);
     itemCache.set(item, m);
@@ -221,6 +237,91 @@ function createGlow(tier: LootTier): THREE.Group {
 }
 const mixWhite = (c: number) => new THREE.Color(c).lerp(new THREE.Color(0xffffff), 0.45).getHex();
 
+
+// -------------------------------------------------------------------------------------------------
+// M2c ground markers: item level (levelled weapons and armor) and the cream supply marker (docs/art/M2c.md §1.3)
+// -------------------------------------------------------------------------------------------------
+const pipGeo = new THREE.OctahedronGeometry(0.05, 0);
+/** Beam height per level (L1 none). */
+export const LEVEL_BEAM_HEIGHT: Readonly<Record<ItemLevel, number>> = { 1: 0, 2: 1.2, 3: 2.4, 4: 3.6 };
+
+/**
+ * Ground marker by item level: disc + ring + ink rim in the level colour, N ink pips standing on the ring ('pips'
+ * group), a second ring from L3, a beam from L2 (1.2 / 2.4 / 3.6 m), and 4 'sparkles' at L4 (the renderer may orbit
+ * them and pulse the ring; reduced motion: no pulse). `'supply'` = the cream marker for non-levelled items: disc,
+ * white ring and ink rim, no pips and no beam (never mistaken for L1, which is ice blue with one pip).
+ */
+export function createLootMarker(kind: ItemLevel | 'supply'): THREE.Group {
+  const g = new THREE.Group();
+  g.name = 'glow';
+  if (kind === 'supply') {
+    g.add(glowMesh('disc', glowGeo.disc, glowMat('disc|supply', () => flat(SUPPLY_MARKER_COLOR, 0.2)), 0.02, 1));
+    g.add(glowMesh('rim', glowGeo.rim, glowMat('rim', () => flat(palette.ink, 0.55)), 0.025, 2));
+    g.add(glowMesh('ring', glowGeo.ring, glowMat('ring|supply', () => flat(0xffffff, 0.9)), 0.025, 2));
+    g.userData.marker = 'supply';
+    return g;
+  }
+  const lv = clampLevel(kind);
+  const c = LEVEL_COLORS[lv];
+  g.userData.marker = lv;
+  g.add(glowMesh('disc', glowGeo.disc, glowMat(`disc|L${lv}`, () => flat(c, 0.28)), 0.02, 1));
+  g.add(glowMesh('rim', glowGeo.rim, glowMat('rim', () => flat(palette.ink, 0.55)), 0.025, 2));
+  g.add(glowMesh('ring', glowGeo.ring, glowMat(`ring|L${lv}`, () => flat(c, 0.95)), 0.025, 2));
+  if (lv >= 3) g.add(glowMesh('ring2', glowGeo.ring2, glowMat(`ring|L${lv}`, () => flat(c, 0.95)), 0.025, 2));
+  const pips = new THREE.Group();
+  pips.name = 'pips';
+  const pipMat = glowMat('pip', () => new THREE.MeshBasicMaterial({ color: LEVEL_NUMERAL_COLOR, toneMapped: false }));
+  for (let i = 0; i < lv; i++) {
+    const a = (i / lv) * Math.PI * 2 + Math.PI / 2;
+    const p = glowMesh('pip', pipGeo, pipMat, 0.06, 2);
+    p.position.x = Math.cos(a) * 0.52;
+    p.position.z = Math.sin(a) * 0.52;
+    pips.add(p);
+  }
+  g.add(pips);
+  if (LEVEL_BEAM_HEIGHT[lv] > 0) {
+    const gc = LEVEL_GLOW_COLORS[lv];
+    const beamMat = glowMat(`beam|L${lv}`, () =>
+      new THREE.MeshBasicMaterial({
+        color: gc, vertexColors: true, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending,
+        depthWrite: false, side: THREE.DoubleSide, toneMapped: false,
+      }),
+    );
+    g.add(glowMesh('beam', beamGeo(LEVEL_BEAM_HEIGHT[lv]), beamMat, 0.02, 3));
+  }
+  if (lv === 4) {
+    const sp = new THREE.Group();
+    sp.name = 'sparkles';
+    const mat = glowMat('sparkle|L4', () => new THREE.MeshBasicMaterial({ color: LEVEL_GLOW_COLORS[4], toneMapped: false }));
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2;
+      const s = glowMesh('sparkle', glowGeo.sparkle, mat, 0.35 + (i % 2) * 0.35, 0);
+      s.position.x = Math.cos(a) * 0.5;
+      s.position.z = Math.sin(a) * 0.5;
+      sp.add(s);
+    }
+    g.add(sp);
+  }
+  return g;
+}
+
+/** Levelled items (Addendum 2 weapons + armor): the ground marker shows their level. */
+const LEVELLED = new Set([
+  'pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper', 'revolver', 'dbshotgun', 'rpg', 'knife', 'machete', 'paddle',
+]);
+export function isLevelledLootItem(item: string): boolean {
+  return LEVELLED.has(item) || armorFromItemId(item) !== null;
+}
+
+export interface LootModelOptions {
+  /** Item level (weapons; armor uses its id's tier). Selects the per-level model and the level marker. */
+  level?: ItemLevel | number | null;
+  /** Scope mounted on a ground gun. */
+  scope?: ScopeId | null;
+  /** Marker override: 'level' (needs a level, or armor), 'supply', or 'tier' (the M2b tier glow). */
+  marker?: 'level' | 'supply' | 'tier';
+}
+
 // -------------------------------------------------------------------------------------------------
 // Public API
 // -------------------------------------------------------------------------------------------------
@@ -228,18 +329,20 @@ const mixWhite = (c: number) => new THREE.Color(c).lerp(new THREE.Color(0xffffff
  * Pickup model for a ground item. Unknown items fall back to a mini crate.
  * Renderer: bob/spin the child named 'spin'; optionally rotate 'glow/sparkles'.
  */
-export function createLootModel(item: ItemId | string, tier: LootTier = 'common'): THREE.Object3D {
+export function createLootModel(item: ItemId | string, tier: LootTier = 'common', opts: LootModelOptions = {}): THREE.Object3D {
   const root = new THREE.Group();
   root.name = `loot:${item}`;
   root.userData.item = item;
   root.userData.tier = tier;
+  root.userData.level = opts.level ?? null;
+  root.userData.scope = opts.scope ?? null;
 
   const spin = new THREE.Group();
   spin.name = 'spin';
   spin.position.y = LOOT_HOVER_Y;
   root.add(spin);
 
-  const geo = itemGeometry(item);
+  const geo = itemGeometry(item, opts);
   if (geo) {
     const mesh = new THREE.Mesh(geo.merged.geometry, vertexColorToon());
     mesh.name = 'item';
@@ -263,6 +366,11 @@ export function createLootModel(item: ItemId | string, tier: LootTier = 'common'
     }
   }
 
-  root.add(createGlow(tier));
+  // Marker: M2c level / supply when asked for (or when a level is given); else the M2b tier glow.
+  const armor = armorFromItemId(item);
+  const marker = opts.marker ?? (opts.level != null ? 'level' : 'tier');
+  if (marker === 'level' && (opts.level != null || armor)) root.add(createLootMarker(opts.level != null ? clampLevel(opts.level) : (armor!.tier as ItemLevel)));
+  else if (marker === 'supply' || marker === 'level') root.add(createLootMarker('supply'));
+  else root.add(createGlow(tier));
   return root;
 }

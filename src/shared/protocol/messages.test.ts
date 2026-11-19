@@ -13,7 +13,7 @@ import {
   type ClientMessage,
   type ServerMessage,
 } from './messages';
-import { makeInput, makeLocal, makePlayer, makeSnapshot } from './testing';
+import { makeInput, makeLocal, makePlayer, makeSnapshot, makeWelcome } from './testing';
 
 const v3 = { x: 1, y: 2, z: 3 };
 
@@ -122,7 +122,7 @@ describe('server messages', () => {
   const { loot: _loot, ...snapNoLoot } = snapWithLocal;
 
   const samples: ServerMessage[] = [
-    { t: 'welcome', welcome: { playerId: 3, mapId: 'island01', serverTime: 100, matchId: 1, roomId: 'r1' } },
+    { t: 'welcome', welcome: makeWelcome({ playerId: 3, mapId: 'island01', serverTime: 100, matchId: 1, roomId: 'r1' }) },
     { t: 'snapshot', snap: snapWithLocal },
     { t: 'snapshot', snap: snapNoLoot },
     { t: 'events', tick: 5, serverTime: 166.6, events },

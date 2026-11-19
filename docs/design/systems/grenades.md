@@ -1,4 +1,7 @@
-# System: Frag Grenades (M2a)
+# System: Frag Grenades (M2a; throwable slot updated in M2c)
+
+M2c: slot 3 is the throwable slot for frags and smoke (section "Throwable slot"; smoke rules in `smoke.md`). The blast model in
+"Explosion" is reused by RPG rockets with their own numbers (`rpg.md`).
 
 Numbers: `balance.json` `items.grenade`, loot weights in `loot.tiers`, bot keys in `bots.grenade` and `bots.personalities.*.grenadeChanceMultiplier`.
 Server-authoritative and deterministic (the World's seeded RNG only; no `Math.random`). Grenade entities are **not** predicted; the
@@ -16,6 +19,24 @@ run when one lands near you (a readable blinking fuse gives you 1-3 s).
 - **Key 4 or G** selects the grenade slot (slot index 3). It costs `combat.swapMs` like any swap. With 0 grenades it is refused with
   `actionFailed { action: 'swap', reason: 'noGrenades' }` (new action and reason). The mouse wheel skips slot 3 when you have none.
 - RMB does nothing with the grenade slot (sight `none`).
+
+### Throwable slot (M2c: frag and smoke)
+Slot 3 is now the **throwable slot**. It holds two separate stacks: `grenade` (frag, `items.grenade.maxCarry` 3) and `smoke`
+(`items.smoke.maxCarry` 2, `smoke.md`), plus a **selected type**.
+- **Selecting** (key 4 or G from another slot, or the mouse wheel landing on slot 3): costs `combat.swapMs`. You get the selected type if
+  you carry it, else the other type. With no throwables at all it is refused (`actionFailed { action: 'swap', reason: 'noGrenades' }`,
+  reason id kept for compatibility; text "No throwables"). The wheel skips slot 3 when both stacks are 0.
+- **Cycling**: pressing 4 or G while the throwable slot is already held and `Ready` switches to the next type you carry (frag <-> smoke),
+  taking `combat.throwableCycleMs` (250 ms; no throw during it). With only one type carried it does nothing (no cost, no toast).
+  4 / G is **ignored while cooking a frag or holding a smoke throw** (no accidental drop; keys 1-3 and the wheel still follow the
+  switch-away rule below).
+- **Selection persists**: the selected type stays selected across slot changes, until you run out of it. It is reset to frag at match
+  start. Picking up a throwable while carrying none sets the selected type to what you picked up.
+- **Running out**: when the last throwable of the selected type is thrown, you auto-switch to the last gun slot used (or the melee slot)
+  with `combat.swapMs`, as today, and the selected type becomes the other type if you carry it. You are never auto-cycled into the other
+  throwable while still on slot 3 (so a second click never throws a smoke you did not mean to throw).
+- Death drops each type as its own stack.
+- Each type keeps its own rules: frags cook (below); smoke does not (`smoke.md`).
 
 ### Cooking and throwing
 1. **Pull the pin**: press LMB with the grenade slot ready (not swapping, not in `throwRecoveryMs`, not in a stance transition, not
@@ -178,3 +199,12 @@ All in `items.grenade` (see its `_note`) plus `bots.grenade.*`. **Expected to ne
 18. While cooking, Q, R and E have no effect; a stance toggle works.
 19. Bot (seeded): target at 20 m disappears behind a rock; with chance forced to 1 the bot throws within one decision tick, and its grenade
     lands within `aimErrorMetres` + 3 m of the last-known position on flat ground.
+
+M2c throwable slot:
+20. Carrying 2 frags and 1 smoke, holding the rifle: G -> after 350 ms holding frag. G -> after 250 ms holding smoke. G -> frag.
+21. Carrying only smoke: G selects smoke; G again does nothing (no delay, no `actionFailed`).
+22. G while cooking a frag: ignored, the cook continues. Key 1 while cooking: the M2a drop rule (grenade drops at the feet).
+23. Selected smoke, switch to the rifle, then press 4: smoke is selected again (persistence).
+24. Throw the last smoke while carrying frags: auto-switch to the last gun after `swapMs`; pressing 4 later selects frag.
+25. Carrying 3 frags: a frag stack is refused `inventoryFull`, a smoke stack is accepted (separate stacks).
+26. No throwables: 4 is refused with reason `noGrenades`; the wheel skips slot 3.

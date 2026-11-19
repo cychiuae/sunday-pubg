@@ -1690,3 +1690,283 @@
 @media (max-height: 820px) {
   .ui-panel--room .ui-controls { display: none; }
 }
+
+/* ============================================================================================
+ * M2c "Fresh Every Match & Bigger Arsenal" (docs/ui/M2c.md; colours docs/art/M2c.md §1.1, §14)
+ * ========================================================================================== */
+.ui {
+  --lv1: #b8e7ff;
+  --lv2: #fff14d;
+  --lv3: #f2590d;
+  --lv4: #b963e3;
+  /* Text variants on dark panels (art §1.1). */
+  --lv3-text: #ff7a3d;
+  --lv4-text: #d08bf0;
+}
+
+/* ---- Level badge: rounded square, ink outline, level fill, ink numeral (>= 4.5:1 on every fill). */
+.ui-lv {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  min-width: 1.15em;
+  height: 1.15em;
+  padding: 0 0.12em;
+  border: 0.12em solid var(--ink);
+  border-radius: 0.3em;
+  background: var(--lv-fill, var(--lv1));
+  color: var(--ink);
+  font: 900 0.8em/1 var(--font-display);
+  font-variant-numeric: tabular-nums;
+  box-sizing: border-box;
+}
+.ui-lv[hidden] { display: none; }
+.ui-lv[data-level='1'] { --lv-fill: var(--lv1); }
+.ui-lv[data-level='2'] { --lv-fill: var(--lv2); }
+.ui-lv[data-level='3'] { --lv-fill: var(--lv3); }
+.ui-lv[data-level='4'] { --lv-fill: var(--lv4); }
+/* L4 sparkle corner: a 4-point star (shape cue on top of the numeral). */
+.ui-lv[data-level='4']::after {
+  content: '';
+  position: absolute;
+  right: -0.42em;
+  top: -0.42em;
+  width: 0.62em;
+  height: 0.62em;
+  background: var(--cream);
+  clip-path: polygon(50% 0, 62% 38%, 100% 50%, 62% 62%, 50% 100%, 38% 62%, 0 50%, 38% 38%);
+  filter: drop-shadow(0 0 0.06em var(--ink)) drop-shadow(0 0 0.04em var(--ink));
+}
+
+/* ---- M2c item shapes (clip-path fallbacks; docs/art/M2c.md §12, §14.6). */
+.ui-icon[data-shape='blade'] { --clip: polygon(0 100%, 12% 72%, 82% 0, 100% 16%, 30% 86%); }
+.ui-icon[data-shape='blade']::after { inset: 0.14em; }
+.ui-icon[data-shape='machete'] { --clip: polygon(0 100%, 12% 70%, 68% 0, 100% 0, 100% 34%, 30% 88%); }
+.ui-icon[data-shape='paddle'] {
+  --clip: polygon(42% 0, 58% 0, 72% 14%, 72% 46%, 57% 58%, 57% 100%, 43% 100%, 43% 58%, 28% 46%, 28% 14%);
+}
+.ui-icon[data-shape='paddle']::after { inset: 0.12em 0.2em; }
+.ui-icon[data-shape='barrels'] { --clip: polygon(0 6%, 100% 6%, 100% 44%, 0 44%, 0 56%, 100% 56%, 100% 94%, 0 94%); }
+.ui-icon[data-shape='barrels']::after { inset: 0.14em 0.12em; }
+.ui-icon[data-shape='pentagon'] { --clip: polygon(50% 0, 100% 38%, 82% 100%, 18% 100%, 0 38%); }
+.ui-icon[data-shape='rocket'] { --clip: polygon(0 22%, 58% 22%, 58% 0, 100% 50%, 58% 100%, 58% 78%, 0 78%); }
+.ui-icon[data-shape='rocket']::after { inset: 0.16em 0.2em 0.16em 0.12em; }
+.ui-icon[data-shape='cloud'] { --clip: polygon(8% 62%, 14% 40%, 30% 34%, 38% 16%, 58% 13%, 70% 28%, 86% 30%, 96% 50%, 90% 74%, 70% 84%, 26% 84%, 6% 76%); }
+.ui-icon[data-shape='capsule'] { --clip: inset(22% 0 round 50%); }
+
+/* ---- Slots: badge on the icon, sight chip, throwable mini chip + cycle hint. */
+.ui-slot__iconbox { position: relative; grid-row: 1 / span 2; display: inline-grid; place-items: center; }
+.ui-slot__iconbox .ui-slot__icon { grid-row: auto; }
+.ui-slot__iconbox { margin-right: 0.35em; }
+.ui-slot__badge { position: absolute; right: -0.6em; bottom: -0.45em; font-size: 0.82em; }
+.ui-sightchip {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.7em;
+  height: 1.1em;
+  padding: 0 0.25em;
+  border: 0.1em solid var(--ink);
+  border-radius: 0.55em;
+  background: var(--sight-c, var(--cream));
+  color: var(--ink);
+  font: 900 0.7em/1 var(--font-display);
+  pointer-events: none;
+}
+.ui-sightchip[hidden] { display: none; }
+.ui-sightchip[data-sight='red_dot'] { --sight-c: #fff3d6; }
+.ui-sightchip[data-sight='scope_2x'] { --sight-c: #ff7a5c; }
+.ui-sightchip[data-sight='scope_4x'] { --sight-c: #5b8def; }
+.ui-sightchip[data-sight='scope_8x'] { --sight-c: #ff6fa8; }
+/* Built-in optic: outline only (shape cue, not colour). */
+.ui-sightchip.is-builtin { background: transparent; border-style: dashed; }
+/* Red dot: a dot in a ring instead of text. */
+.ui-sightchip.is-reddot .ui-sightchip__text::before {
+  display: block;
+  content: '';
+  width: 0.55em;
+  height: 0.55em;
+  border-radius: 50%;
+  background: #ff3b5c;
+  box-shadow: 0 0 0 0.1em var(--ink), 0 0 0 0.22em #fff3d6, 0 0 0 0.3em var(--ink);
+}
+.ui-slot__sight { grid-column: 2; justify-self: start; margin-top: 0.1em; }
+.ui-sightchip.is-pop { animation: ui-chip-pop 200ms ease-out; }
+@keyframes ui-chip-pop { 0% { transform: scale(1); } 50% { transform: scale(1.25); } 100% { transform: scale(1); } }
+.ui-slot__mini {
+  position: absolute;
+  right: -0.5em;
+  top: -0.55em;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1em;
+  padding: 0.05em 0.25em 0.05em 0.1em;
+  background: var(--sand);
+  border: 0.1em solid var(--ink);
+  border-radius: 0.6em;
+  font: 900 0.62em var(--font-display);
+}
+.ui-slot__mini[hidden], .ui-slot__cycle[hidden] { display: none; }
+.ui-slot__miniicon { width: 1em; height: 1em; }
+.ui-slot__cycle { grid-column: 2; font: 800 0.7em var(--font-display); color: var(--ink); white-space: nowrap; }
+.ui-slot.is-cycled .ui-slot__mini,
+.ui-slot.is-cycled .ui-slot__iconbox { animation: ui-cycle 120ms ease-out; }
+@keyframes ui-cycle { from { transform: translateX(-0.35em); opacity: 0.3; } to { transform: none; opacity: 1; } }
+
+/* ---- Spare-scope pouch (left of the slot row; hidden when empty). */
+.ui-pouch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2em;
+  align-self: center;
+  padding: 0.2em 0.35em;
+  background: var(--ink-glass);
+  color: var(--cream);
+  border: 0.12em solid var(--ink);
+  border-radius: 0.7em;
+}
+.ui-pouch[hidden] { display: none; }
+.ui-pouch__glyph {
+  width: 0.9em;
+  height: 0.9em;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 0.14em var(--cream);
+  background: radial-gradient(circle, var(--cream) 0 18%, transparent 20%);
+}
+.ui-pouch__count { font: 800 0.75em var(--font-display); }
+.ui-pouch.is-single .ui-pouch__count { display: none; }
+.ui-pouch__chip { position: relative; display: inline-grid; }
+.ui-pouch__chip[hidden] { display: none; }
+.ui-pouch__chip.is-nofit { opacity: 0.45; }
+/* Does not fit the held gun: faded AND slashed (never fading alone). */
+.ui-pouch__chip.is-nofit::after {
+  content: '';
+  position: absolute;
+  left: -0.1em;
+  right: -0.1em;
+  top: 50%;
+  height: 0.14em;
+  background: var(--cream);
+  box-shadow: 0 0 0 0.06em var(--ink);
+  transform: rotate(-35deg);
+}
+
+/* While the pointer is free (paused / touch), sight chips and the pouch take clicks and show tooltips above the dim. */
+.ui-hud.is-free .ui-hud__slots { position: relative; z-index: 1; }
+.ui-hud.is-free .ui-slot__sight,
+.ui-hud.is-free .ui-pouch__chip { pointer-events: auto; cursor: pointer; }
+.ui-slot__sight { position: relative; }
+.ui-slot__sight::before { content: ''; position: absolute; inset: -0.9em; } /* >= 44 px tap target */
+.ui-hud.is-free [data-tip]:hover::after,
+.ui-hud.is-free [data-tip]:focus-visible::after,
+.ui-hud.is-free [data-tip].is-tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 0.5em);
+  transform: translateX(-50%);
+  max-width: 16em;
+  width: max-content;
+  padding: 0.35em 0.6em;
+  background: var(--ink-glass);
+  color: var(--cream);
+  border: 0.12em solid var(--ink);
+  border-radius: 0.5em;
+  font: 700 1.2em/1.25 var(--font-body);
+  white-space: normal;
+  z-index: 2;
+  animation: ui-tip-in 1ms linear 300ms both;
+}
+@keyframes ui-tip-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* ---- Armor: 4 pips filled with the level colour (count = the non-colour tell). */
+.ui-gear__pips[data-tier='1'] .ui-gear__pip:nth-child(-n + 1) { background: var(--lv1); }
+.ui-gear__pips[data-tier='2'] .ui-gear__pip:nth-child(-n + 2) { background: var(--lv2); }
+.ui-gear__pips[data-tier='3'] .ui-gear__pip:nth-child(-n + 3) { background: var(--lv3); }
+.ui-gear__pips[data-tier='4'] .ui-gear__pip:nth-child(-n + 4) { background: var(--lv4); }
+.ui-gear__pips { gap: 0.08em; }
+.ui-gear__pip { width: 0.36em; height: 0.36em; }
+
+/* ---- Prompt: level badge + "Lv.3 Hot", compare tag, sight chip, extra line. */
+.ui-prompt { display: flex; align-items: center; gap: 0.35em; }
+.ui-prompt__level[hidden], .ui-prompt__extra[hidden], .ui-prompt__compare[hidden], .ui-prompt__chip[hidden] { display: none; }
+.ui-prompt__lvtext { font-weight: 900; }
+.ui-prompt__compare { display: inline-flex; align-items: center; gap: 0.25em; padding: 0.05em 0.35em; border: 0.1em solid currentColor; border-radius: 0.5em; font-weight: 800; }
+.ui-prompt__compare.is-down { border-style: dashed; }
+.ui-prompt__extra { font-weight: 700; }
+
+/* ---- Melee recovery ring (thin, inside the reload ring). */
+.ui-melee { position: absolute; left: -1.4em; top: -1.4em; width: 2.8em; height: 2.8em; --melee-offset: 0; }
+.ui-melee[hidden] { display: none; }
+.ui-melee__svg { width: 100%; height: 100%; transform: rotate(-90deg); overflow: visible; }
+.ui-melee__bg { fill: none; stroke: rgba(42, 29, 51, 0.55); stroke-width: 4.5; }
+.ui-melee__fg { fill: none; stroke: var(--cream); stroke-width: 2.5; stroke-linecap: round; stroke-dashoffset: var(--melee-offset); }
+
+/* ---- "Sight: 2x scope" chip under the crosshair after a T switch. */
+.ui-sightnow { position: absolute; left: 0; top: 5.4em; transform: translateX(-50%); font-size: 0.9em; white-space: nowrap; }
+.ui-sightnow[hidden] { display: none; }
+
+/* ---- Smoke: thicker crosshair outline inside a cloud (UI M2c §6.1). Smoke cook ring: cream, never urgent. */
+.ui-hud.is-in-smoke .ui-crosshair__line,
+.ui-hud.is-in-smoke .ui-crosshair__dot { box-shadow: 0 0 0 2px var(--ink); }
+.ui-cook.is-smoke .ui-cook__fg { stroke: var(--cream); }
+.ui-cook.is-smoke .ui-cook__secs { color: var(--cream); }
+
+/* ---- RPG: hollow hip dot while the tube is empty. */
+.ui-crosshair.is-unloaded .ui-crosshair__dot { background: transparent; box-shadow: 0 0 0 1.5px var(--cream), 0 0 0 2.5px var(--ink); }
+
+/* ---- 2x scope (art §14.5): 46vmin lens, coral rim, 88% outside, iris 34 -> 46vmin. */
+/* --scope-c comes from SCOPE_RIM_COLOR (ads.ts); 2x geometry mirrors SCOPE_2X_FRAME (46vmin lens, 88% outside, iris from 34vmin). */
+.ui-scope[data-sight='scope_2x'] .ui-scope__lens {
+  width: 93.2vmin;
+  height: 93.2vmin;
+  margin: -46.6vmin 0 0 -46.6vmin;
+  box-shadow: 0 0 0 150vmax rgba(20, 14, 26, 0.88), inset 0 0 0 0.5vmin var(--scope-c);
+  transform: scale(0.739);
+}
+.ui-scope[data-sight='scope_2x'].is-in .ui-scope__lens { transform: none; }
+.ui-scope[data-sight='scope_2x'] .ui-scope__glass { background: radial-gradient(circle, rgba(159, 232, 240, 0.05) 0 92%, rgba(20, 14, 26, 0.35) 100%); }
+.ui-scope[data-sight='scope_2x'] .ui-scope__mark--2x { display: block; }
+
+/* ---- Feed tag, death-card weapon line, toast badge. */
+.ui-feed__tag { display: inline-flex; align-items: center; gap: 0.2em; margin-left: 0.35em; vertical-align: -0.15em; }
+.ui-feed__badge { font-size: 0.95em; }
+.ui-death__with { display: flex; align-items: center; justify-content: center; gap: 0.35em; font-weight: 800; }
+.ui-death__with[hidden] { display: none; }
+.ui-death__badge { font-size: 0.85em; }
+.ui-toast__badge { font-size: 0.75em; }
+
+/* ---- Layout code (pause / results) and the waiting-room look line. */
+.ui-layoutcode { margin: 0.4em 0 0; font-size: 0.8em; color: var(--ink-soft); text-align: right; user-select: text; -webkit-user-select: text; }
+.ui-layoutcode[hidden] { display: none; }
+.ui-look { display: flex; align-items: flex-start; gap: 0.45em; margin: 0.2em 0 0.4em; }
+.ui-look[hidden] { display: none; }
+.ui-look__body { display: grid; gap: 0.1em; }
+.ui-look__text { font: 900 0.95em var(--font-display); }
+.ui-look__flavour { font-size: 0.85em; color: var(--ink-soft); }
+.ui-look__flavour:empty { display: none; }
+.ui-look__glyph { width: 1.2em; height: 1.2em; flex: none; border-radius: 50%; border: 0.12em solid var(--ink); background: var(--accent); }
+.ui-look__glyph[data-look='sunset'] { background: linear-gradient(var(--accent) 0 55%, var(--coral) 55%); }
+.ui-look__glyph[data-look='moon'] { background: radial-gradient(circle at 70% 35%, var(--sand) 0 40%, var(--ink-soft) 42%); }
+.ui-look__glyph[data-look='cloud'] { border-radius: 0.6em 0.6em 0.35em 0.35em; background: #d9dfe6; }
+
+/* ---- Reduced motion: no pops or slides (the change itself stays visible). */
+.ui.is-reduced-motion .ui-sightchip.is-pop { animation: none; outline: 0.12em solid var(--ink); }
+.ui.is-reduced-motion .ui-slot.is-cycled .ui-slot__mini,
+.ui.is-reduced-motion .ui-slot.is-cycled .ui-slot__iconbox { animation: none; }
+.ui.is-reduced-motion .ui-scope[data-sight='scope_2x'] .ui-scope__lens { transform: none; transition: none; }
+
+/* ---- Narrow: names already hide; badges stay (>= 1em); the mini chip, cycle hint and prompt level text hide. */
+@media (max-height: 560px), (max-width: 900px) {
+  .ui-slot__badge { font-size: 0.8em; }
+  .ui-slot__mini, .ui-slot__cycle, .ui-prompt__lvtext, .ui-pouch__chip { display: none; }
+  .ui-pouch.is-single .ui-pouch__count { display: inline; }
+  .ui-sightchip:not(.is-reddot) { font-size: 0.7em; }
+}
+
+/* M2c (P2): loot peek = the prompt chip dimmed, no key (UI M2c §3.1); spectate weapon + badge. */
+.ui-prompt.is-peek { opacity: 0.72; border-style: dotted; }
+.ui-hud.is-in-smoke .ui-prompt.is-peek { display: none; }
+.ui-spectate__weapon { display: inline-flex; align-items: center; gap: 0.15em; }
+.ui-spectate__weapon[hidden] { display: none; }
+.ui-lobby__look:empty, .ui-lobby__look[hidden] { display: none; }

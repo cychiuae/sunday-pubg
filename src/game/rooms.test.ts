@@ -215,3 +215,15 @@ describe('RoomsModel: waiting room', () => {
     expect(membersByAge([member(3, { joinedAt: 1 }), member(2, { joinedAt: 1 })]).map((m) => m.memberId)).toEqual([2, 3]);
   });
 });
+
+describe('RoomsModel: M2c locked layout (UI M2c §7.2)', () => {
+  it('RoomView.lockedLayout mirrors RoomState.map.layout; null before the lock or without a generated layout', () => {
+    const { model } = setup();
+    model.onRoomJoined(room({ map: { id: 'office', via: 'vote' } }), 1);
+    expect(model.view(B, 0, false).room!.lockedLayout).toBeNull();
+    model.onRoom(room({ map: { id: 'office', via: 'vote', layout: { seed: 1234, look: 'evening' } } }));
+    const v = model.view(B, 0, false).room!;
+    expect(v.lockedLayout).toEqual({ seed: 1234, look: 'evening' });
+    expect(v.map).toEqual({ id: 'office', via: 'vote' });
+  });
+});

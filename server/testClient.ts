@@ -5,6 +5,7 @@
 import WebSocket from 'ws';
 import { PROTOCOL_VERSION } from '../src/shared/constants';
 import { CAP_DELTA, SnapshotDeltaDecoder } from '../src/shared/protocol/delta';
+import { CAP_ROWS } from '../src/shared/protocol/rows';
 import type { RoomSettingsInput } from '../src/shared/contracts';
 import {
   decodeServerMessage,
@@ -73,7 +74,7 @@ export class TestClient {
    * `keepMessages = false` for long load runs (waitFor then only sees future messages).
    * `origin`: the Origin header to send, like a browser would. Default: the http(s) form of `url`, which passes the
    * production `self` origin policy (server/origin.ts). Pass null to send none.
-   * `deltas`: advertise `delta1` on join (like NetClient). Snapshot messages seen by `messages`, `onMessage` and
+   * `deltas`: advertise `delta1` and `rows1` on hello (like NetClient). Snapshot messages seen by `messages`, `onMessage` and
    * `waitFor` are always the rebuilt full snapshots (complete players and loot), whichever format the wire used.
    */
   constructor(
@@ -181,7 +182,8 @@ export class TestClient {
       name,
       protocolVersion: PROTOCOL_VERSION,
       ...(clientToken !== null ? { clientToken } : {}),
-      ...(this.deltas ? { caps: [CAP_DELTA] } : {}),
+      // A modern client (deltas) also takes M2c rows, like NetClient; `deltas = false` is the plain object format.
+      ...(this.deltas ? { caps: [CAP_DELTA, CAP_ROWS] } : {}),
     });
   }
 

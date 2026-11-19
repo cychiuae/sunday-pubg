@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ArmorHit, ShotImpact } from '../shared/types';
-import { ARMOR_IDS, ITEM_IDS, STANCES, WEAPON_IDS } from '../shared/types';
+import type { ArmorHit, M2cWeaponId, ShotImpact } from '../shared/types';
+import { ARMOR_IDS, ITEM_IDS, M2C_WEAPON_IDS, STANCES, WEAPON_IDS } from '../shared/types';
 import { AUDIO_TUNING, CUES } from './cues';
 import {
   armorPieces,
@@ -29,30 +29,43 @@ const hit = (tier: 1 | 2 | 3, broken = false): ArmorHit => ({ tier, absorbed: 10
 const imp = (surface: ShotImpact['surface'], x = 0): ShotImpact => ({ point: { x, y: 0, z: 0 }, surface, playerId: null, headshot: false });
 
 describe('event -> cue mapping', () => {
-  it('maps every weapon to a distinct local and remote shot cue', () => {
+  it('maps every gun to a distinct local and remote shot cue; melee and the rpg have none (own events)', () => {
     const seen = new Set<string>();
-    for (const w of WEAPON_IDS) {
+    let guns = 0;
+    for (const w of M2C_WEAPON_IDS) {
       const local = shotCue(w, true);
       const remote = shotCue(w, false);
+      if (w === 'knife' || w === 'machete' || w === 'paddle' || w === 'rpg') {
+        expect(local).toBeNull();
+        expect(remote).toBeNull();
+        continue;
+      }
+      if (local === null || remote === null) throw new Error(`no shot cue for ${w}`);
+      guns++;
       expect(CUES[local].spatial).toBe(false);
       expect(CUES[remote].spatial).toBe(true);
       seen.add(local);
       seen.add(remote);
     }
-    expect(seen.size).toBe(WEAPON_IDS.length * 2);
+    expect(seen.size).toBe(guns * 2);
   });
 
+  const remoteRange = (w: M2cWeaponId): number => {
+    const c = shotCue(w, false);
+    if (c === null) throw new Error(`no shot cue for ${w}`);
+    return CUES[c].maxDistance;
+  };
+
   it('remote gunshots carry much farther than fists', () => {
-    for (const w of ['pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper'] as const) {
-      expect(CUES[shotCue(w, false)].maxDistance).toBeGreaterThan(100);
+    for (const w of ['pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper', 'dbshotgun', 'revolver'] as const) {
+      expect(remoteRange(w)).toBeGreaterThan(100);
     }
-    expect(CUES[shotCue('fists', false)].maxDistance).toBeLessThan(30);
+    expect(remoteRange('fists')).toBeLessThan(30);
   });
 
   it('the sniper carries farthest of all guns, the LMG at least as far as the rifle', () => {
-    const range = (w: (typeof WEAPON_IDS)[number]): number => CUES[shotCue(w, false)].maxDistance;
-    for (const w of WEAPON_IDS) if (w !== 'sniper') expect(range('sniper')).toBeGreaterThan(range(w));
-    expect(range('lmg')).toBeGreaterThanOrEqual(range('rifle'));
+    for (const w of M2C_WEAPON_IDS) if (w !== 'sniper' && shotCue(w, false) !== null) expect(remoteRange('sniper')).toBeGreaterThan(remoteRange(w));
+    expect(remoteRange('lmg')).toBeGreaterThanOrEqual(remoteRange('rifle'));
     expect(shotCue('dmr', true)).toBe('shot.dmr.local');
     expect(shotCue('lmg', false)).toBe('shot.lmg.remote');
   });

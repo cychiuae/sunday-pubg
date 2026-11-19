@@ -69,7 +69,7 @@ describe('M2a loot', () => {
   it('armor ids parse with a safe fallback', () => {
     expect(armorFromItemId('vest')).toEqual({ kind: 'vest', tier: 1 });
     expect(armorFromItemId('helmet_3')).toEqual({ kind: 'helmet', tier: 3 });
-    expect(armorFromItemId('vest_9')).toEqual({ kind: 'vest', tier: 3 });
+    expect(armorFromItemId('vest_9')).toEqual({ kind: 'vest', tier: 4 }); // M2c: levels go to 4
     expect(armorFromItemId('medkit')).toBeNull();
   });
 });

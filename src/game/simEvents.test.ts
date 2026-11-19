@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EventBus, type GameEvents } from '../shared/events';
-import type { SimEvent } from '../shared/types';
+import type { DropSimEvent, M2cSimEvent, SimEvent } from '../shared/types';
 import { translateSimEvent, type TranslateContext } from './simEvents';
 
 type Emitted = { type: keyof GameEvents; payload: unknown };
@@ -19,7 +19,7 @@ function setup(localId: number | null = 1) {
     nameOf: (id) => names[id] ?? null,
     posOf: (id) => ({ x: id, y: 0, z: 0 }),
   };
-  return { bus, emitted, run: (ev: SimEvent) => translateSimEvent(ev, ctx, bus) };
+  return { bus, emitted, run: (ev: SimEvent | DropSimEvent | M2cSimEvent) => translateSimEvent(ev, ctx, bus), ctx };
 }
 
 describe('translateSimEvent', () => {
@@ -61,6 +61,7 @@ describe('translateSimEvent', () => {
       vest: { tier: 2, absorbed: 12, broken: false },
       helmet: null,
       cause: 'weapon',
+      obscured: false,
     });
   });
 
@@ -98,6 +99,8 @@ describe('translateSimEvent', () => {
         placement: 4,
         isLocalVictim: true,
         isLocalKiller: false,
+        // M2c: a kill without weaponLevel (M2b server) shows the gun as L1.
+        weaponLevel: 1,
       },
     });
   });
@@ -175,7 +178,7 @@ describe('translateSimEvent', () => {
     run({ type: 'weaponSwitch', playerId: 3, weapon: 'smg', slot: 0 });
     expect(emitted[0]).toEqual({
       type: 'weaponSwitched',
-      payload: { playerId: 3, weapon: 'smg', slot: 0, isLocal: false, pos: { x: 3, y: 0, z: 0 } },
+      payload: { playerId: 3, weapon: 'smg', slot: 0, isLocal: false, pos: { x: 3, y: 0, z: 0 }, level: 1 },
     });
   });
 
@@ -228,23 +231,24 @@ describe('translateSimEvent', () => {
       posOf: () => ({ x: 0, y: 0, z: 0 }),
       localEye: () => ({ x: 0, y: 1, z: 0 }),
     };
-    translateSimEvent({ type: 'grenadeCook', playerId: 1, pos: { x: 0, y: 1, z: 0 }, explodesAt: 4000 }, ctx, bus);
+    translateSimEvent({ type: 'grenadeCook', playerId: 1, pos: { x: 0, y: 1, z: 0 }, explodesAt: 4000, kind: 'grenade' }, ctx, bus);
     translateSimEvent(
-      { type: 'grenadeThrown', id: 5, ownerId: 2, pos: { x: 1, y: 1, z: 0 }, vel: { x: 0, y: 3, z: -9 }, explodesAt: 4000, dropped: true },
+      { type: 'grenadeThrown', id: 5, ownerId: 2, pos: { x: 1, y: 1, z: 0 }, vel: { x: 0, y: 3, z: -9 }, explodesAt: 4000, dropped: true, kind: 'grenade' },
       ctx,
       bus,
     );
-    translateSimEvent({ type: 'grenadeBounce', id: 5, pos: { x: 1, y: 0, z: -3 }, surface: 'water', speed: 4 }, ctx, bus);
-    translateSimEvent({ type: 'explosion', id: 5, ownerId: 1, pos: { x: 3, y: 1, z: 4 }, radius: 6, inHand: false }, ctx, bus);
+    translateSimEvent({ type: 'grenadeBounce', id: 5, pos: { x: 1, y: 0, z: -3 }, surface: 'water', speed: 4, kind: 'grenade' }, ctx, bus);
+    translateSimEvent({ type: 'explosion', id: 5, ownerId: 1, pos: { x: 3, y: 1, z: 4 }, radius: 6, inHand: false, source: 'grenade' }, ctx, bus);
     translateSimEvent(
-      { type: 'explosion', id: 6, ownerId: 2, pos: { x: 0, y: 0, z: 0 }, radius: 6, inHand: true },
+      { type: 'explosion', id: 6, ownerId: 2, pos: { x: 0, y: 0, z: 0 }, radius: 6, inHand: true, source: 'grenade' },
       { ...ctx, localEye: () => null },
       bus,
     );
     expect(emitted.map((e) => e.type)).toEqual(['grenadeCooked', 'grenadeThrown', 'grenadeBounced', 'explosion', 'explosion']);
-    expect(emitted[0]!.payload).toEqual({ playerId: 1, pos: { x: 0, y: 1, z: 0 }, explodesAt: 4000, isLocal: true });
-    expect(emitted[1]!.payload).toMatchObject({ id: 5, ownerId: 2, dropped: true, isLocal: false, explodesAt: 4000 });
-    expect(emitted[2]!.payload).toEqual({ id: 5, pos: { x: 1, y: 0, z: -3 }, surface: 'water', speed: 4 });
+    // M2c: kind / source absent on the wire = the frag.
+    expect(emitted[0]!.payload).toEqual({ playerId: 1, pos: { x: 0, y: 1, z: 0 }, explodesAt: 4000, isLocal: true, kind: 'grenade' });
+    expect(emitted[1]!.payload).toMatchObject({ id: 5, ownerId: 2, dropped: true, isLocal: false, explodesAt: 4000, kind: 'grenade' });
+    expect(emitted[2]!.payload).toEqual({ id: 5, pos: { x: 1, y: 0, z: -3 }, surface: 'water', speed: 4, kind: 'grenade' });
     expect(emitted[3]!.payload).toEqual({
       id: 5,
       ownerId: 1,
@@ -253,6 +257,7 @@ describe('translateSimEvent', () => {
       inHand: false,
       isLocalOwner: true,
       localDistance: 5,
+      source: 'grenade',
     });
     expect(emitted[4]!.payload).toMatchObject({ inHand: true, isLocalOwner: false, localDistance: null });
   });
@@ -289,7 +294,7 @@ describe('translateSimEvent', () => {
 
   it('UI contract: local victim gets vest/helmet broken flags; damage precedes kill; grenade attacker = thrower', () => {
     const { emitted, run } = setup();
-    run({ type: 'explosion', id: 9, ownerId: 3, pos: { x: 0, y: 0, z: 0 }, radius: 6, inHand: false });
+    run({ type: 'explosion', id: 9, ownerId: 3, pos: { x: 0, y: 0, z: 0 }, radius: 6, inHand: false, source: 'grenade' });
     run({
       type: 'damage',
       victimId: 1,
@@ -349,5 +354,127 @@ describe('translateSimEvent', () => {
       { type: 'parachuteOpened', payload: { playerId: 1, pos, manual: false, isLocal: true } },
       { type: 'parachuteOpened', payload: { playerId: 3, pos, manual: true, isLocal: false } },
     ]);
+  });
+
+  describe('M2c gate prep', () => {
+    it('kind, source and levels pass through when the server sends them; kill weaponLevel null for non-weapons', () => {
+      const { emitted, run } = setup();
+      run({ type: 'grenadeCook', playerId: 1, pos: { x: 0, y: 1, z: 0 }, explodesAt: 4000, kind: 'smoke' });
+      run({ type: 'explosion', id: 9, ownerId: 2, pos: { x: 0, y: 0, z: 0 }, radius: 4, inHand: false, source: 'rocket', direct: true });
+      run({ type: 'kill', victimId: 3, killerId: 2, weapon: 'smg', cause: 'weapon', placement: 2, weaponLevel: 3 });
+      run({ type: 'kill', victimId: 3, killerId: 2, weapon: 'grenade', cause: 'explosion', placement: 2 });
+      run({ type: 'kill', victimId: 3, killerId: null, weapon: null, cause: 'zone', placement: 2 });
+      run({ type: 'kill', victimId: 3, killerId: 2, weapon: 'fists', cause: 'weapon', placement: 2 });
+      run({ type: 'weaponSwitch', playerId: 3, weapon: 'grenade', slot: 3 });
+      run({ type: 'pickup', playerId: 1, lootId: 4, item: 'rifle', qty: 1, pos: { x: 0, y: 0, z: 0 }, level: 2, scope: null });
+      expect(emitted[0]!.payload).toMatchObject({ kind: 'smoke' });
+      expect(emitted[1]!.payload).toMatchObject({ source: 'rocket', direct: true });
+      expect(emitted.slice(2, 6).map((e) => (e.payload as { weaponLevel: unknown }).weaponLevel)).toEqual([3, null, null, null]);
+      expect(emitted[6]!.payload).toMatchObject({ level: null });
+      expect(emitted[7]!.payload).toMatchObject({ level: 2, scope: null });
+    });
+
+    it('damage copies weapon and weaponLevel to playerDamaged and localHitConfirmed', () => {
+      const { emitted, run } = setup();
+      run({
+        type: 'damage',
+        victimId: 2,
+        attackerId: 1,
+        amount: 10,
+        headshot: false,
+        cause: 'weapon',
+        sourcePos: { x: 0, y: 0, z: 0 },
+        hpAfter: 50,
+        vest: null,
+        helmet: null,
+        weapon: 'rifle',
+        weaponLevel: 2,
+      });
+      expect(emitted.map((e) => e.type)).toEqual(['playerDamaged', 'localHitConfirmed']);
+      for (const e of emitted) expect(e.payload).toMatchObject({ weapon: 'rifle', weaponLevel: 2 });
+    });
+
+    it('translates the M2c sim events 1:1; the local meleeSwing echo is dropped', () => {
+      const { emitted, bus, ctx } = setup();
+      const run = (ev: M2cSimEvent): void => translateSimEvent(ev, { ...ctx, serverNow: () => 1000 }, bus);
+      const pos = { x: 1, y: 2, z: 3 };
+      run({ type: 'meleeSwing', playerId: 1, weapon: 'knife', level: 1, pos, hitAt: 1100, cycleMs: 400 });
+      run({ type: 'meleeSwing', playerId: 2, weapon: 'paddle', level: 2, pos, hitAt: 1150, cycleMs: 700 });
+      run({ type: 'meleeHit', attackerId: 2, weapon: 'paddle', level: 2, pos, surface: 'player', victimId: 1, headshot: false, knockback: true });
+      run({ type: 'rocketFired', id: 7, ownerId: 1, level: 1, pos, vel: { x: 0, y: 0, z: -40 }, firedAt: 900 });
+      run({ type: 'rocketDud', id: 7, ownerId: 1, pos, surface: 'terrain', victimId: null });
+      run({ type: 'smokeDeployed', id: 8, ownerId: 3, pos, deployedAt: 950, fadeAt: 20_000 });
+      run({ type: 'glassBroken', paneId: 4, pos, byId: 2, cause: 'melee' });
+      run({ type: 'scopeChanged', playerId: 1, slot: 0, gun: 'rifle', from: null, to: 'scope_4x', auto: true, pos });
+      expect(emitted).toEqual([
+        { type: 'meleeSwing', payload: { playerId: 2, weapon: 'paddle', level: 2, pos, windupMs: 150, cycleMs: 700, isLocal: false } },
+        {
+          type: 'meleeHit',
+          payload: {
+            attackerId: 2,
+            weapon: 'paddle',
+            level: 2,
+            pos,
+            surface: 'player',
+            victimId: 1,
+            headshot: false,
+            knockback: true,
+            isLocalAttacker: false,
+            isLocalVictim: true,
+          },
+        },
+        { type: 'rocketFired', payload: { id: 7, ownerId: 1, level: 1, pos, vel: { x: 0, y: 0, z: -40 }, firedAt: 900, isLocal: true } },
+        { type: 'rocketDud', payload: { id: 7, ownerId: 1, pos, surface: 'terrain', victimId: null, isLocalOwner: true } },
+        { type: 'smokeDeployed', payload: { id: 8, ownerId: 3, pos, deployedAt: 950, fadeAt: 20_000, isLocalOwner: false } },
+        { type: 'glassBroken', payload: { paneId: 4, pos, byId: 2, cause: 'melee', isLocal: false } },
+        {
+          type: 'scopeChanged',
+          payload: { playerId: 1, slot: 0, gun: 'rifle', from: null, to: 'scope_4x', auto: true, pos, isLocal: true },
+        },
+      ]);
+    });
+  });
+});
+
+describe('translateSimEvent: M2c fields', () => {
+  it('damage weapon fallback (rocket impact and blasts -> rpg, frag blasts -> grenade) and localHitConfirmed.obscured', () => {
+    const { emitted, run, ctx } = setup();
+    ctx.blastSource = (id) => (id === 7 ? 'rocket' : 'grenade');
+    ctx.obscured = (victim) => victim === 2;
+    const dmg = { type: 'damage' as const, attackerId: 1, amount: 40, headshot: false, sourcePos: { x: 0, y: 0, z: 0 }, hpAfter: 60, vest: null, helmet: null };
+    run({ ...dmg, victimId: 2, cause: 'rocket' });
+    run({ ...dmg, victimId: 3, cause: 'explosion', grenadeId: 7 });
+    run({ ...dmg, victimId: 3, cause: 'explosion', grenadeId: 8 });
+    run({ ...dmg, victimId: 3, cause: 'melee', weapon: 'paddle', weaponLevel: 4 });
+    const damaged = emitted.filter((e) => e.type === 'playerDamaged').map((e) => e.payload as GameEvents['playerDamaged']);
+    expect(damaged.map((d) => [d.weapon, d.weaponLevel])).toEqual([
+      ['rpg', 1],
+      ['rpg', 1],
+      ['grenade', null],
+      ['paddle', 4],
+    ]);
+    const confirms = emitted.filter((e) => e.type === 'localHitConfirmed').map((e) => e.payload as GameEvents['localHitConfirmed']);
+    expect(confirms.map((c) => c.obscured)).toEqual([true, false, false, false]);
+  });
+
+  it('kill: rocket blast kills read weapon rpg; pickup level defaults to 1 for weapons only; reload rounds pass through', () => {
+    const { emitted, run, ctx } = setup();
+    ctx.lastBlastOf = (v) => (v === 3 ? 'rocket' : 'grenade');
+    run({ type: 'kill', victimId: 3, killerId: 2, weapon: 'grenade', cause: 'explosion', placement: 2 });
+    run({ type: 'kill', victimId: 2, killerId: 1, weapon: 'grenade', cause: 'explosion', placement: 3 });
+    run({ type: 'kill', victimId: 2, killerId: 1, weapon: 'machete', cause: 'melee', placement: 3, weaponLevel: 2 });
+    const kills = emitted.filter((e) => e.type === 'playerKilled').map((e) => e.payload as GameEvents['playerKilled']);
+    expect(kills.map((k) => [k.weapon, k.weaponLevel, k.cause])).toEqual([
+      ['rpg', 1, 'explosion'],
+      ['grenade', null, 'explosion'],
+      ['machete', 2, 'melee'],
+    ]);
+    run({ type: 'pickup', playerId: 1, lootId: 1, item: 'knife', qty: 1, pos: { x: 0, y: 0, z: 0 } });
+    run({ type: 'pickup', playerId: 1, lootId: 2, item: 'smoke', qty: 1, pos: { x: 0, y: 0, z: 0 } });
+    run({ type: 'pickup', playerId: 1, lootId: 3, item: 'rpg', qty: 1, pos: { x: 0, y: 0, z: 0 }, level: 4 });
+    const picks = emitted.filter((e) => e.type === 'itemPickedUp').map((e) => (e.payload as GameEvents['itemPickedUp']).level);
+    expect(picks).toEqual([1, undefined, 4]);
+    run({ type: 'reloadStart', playerId: 1, weapon: 'shotgun', durationMs: 900, rounds: 3 });
+    expect(emitted.at(-1)!.payload).toMatchObject({ rounds: 3 });
   });
 });

@@ -254,7 +254,7 @@ describe('AudioEngine', () => {
     const cabin = ctx.nodes.find((n) => n.kind === 'biquad' && n.outputs.some((o) => (o as FakeNode).outputs?.some((x) => (x as FakeNode).kind === 'compressor')));
     const muffle = ctx.nodes.find((n) => n.kind === 'biquad' && n.outputs.includes(cabin as FakeNode));
     expect(muffle?.frequency.value).toBe(20000);
-    bus.emit('explosion', { id: 1, ownerId: 2, pos: { x: 1, y: 0, z: 0 }, radius: 6, inHand: false, isLocalOwner: false, localDistance: 1 });
+    bus.emit('explosion', { id: 1, ownerId: 2, pos: { x: 1, y: 0, z: 0 }, radius: 6, inHand: false, isLocalOwner: false, localDistance: 1, source: 'grenade' });
     expect(engine.voiceCount).toBe(2); // boom + ring
     const calls = muffle?.frequency.calls ?? [];
     expect(calls.filter((c) => c === 'target')).toHaveLength(2); // down, then recover
@@ -266,7 +266,7 @@ describe('AudioEngine', () => {
     engine.unlock();
     engine.setListener(ORIGIN, 0);
     const before = ctx.nodes.length;
-    bus.emit('explosion', { id: 1, ownerId: 2, pos: { x: 100, y: 0, z: 0 }, radius: 6, inHand: false, isLocalOwner: false, localDistance: 100 });
+    bus.emit('explosion', { id: 1, ownerId: 2, pos: { x: 100, y: 0, z: 0 }, radius: 6, inHand: false, isLocalOwner: false, localDistance: 100, source: 'grenade' });
     expect(engine.voiceCount).toBe(1);
     const created = ctx.nodes.slice(before);
     const panner = created.find((n) => n.kind === 'panner');
@@ -278,17 +278,17 @@ describe('AudioEngine', () => {
   it('M2a: grenade cook tick is a keyed loop stopped by the throw; stance and ADS events are voiced', () => {
     const { bus, engine, ctx } = setup();
     engine.unlock();
-    bus.emit('grenadeCooked', { playerId: 1, pos: ORIGIN, explodesAt: 5000, isLocal: true });
+    bus.emit('grenadeCooked', { playerId: 1, pos: ORIGIN, explodesAt: 5000, isLocal: true, kind: 'grenade' });
     expect(engine.voiceCount).toBe(2); // pin + tick loop
     ctx.currentTime = 1;
-    bus.emit('grenadeThrown', { id: 1, ownerId: 1, pos: ORIGIN, vel: ORIGIN, explodesAt: 5000, dropped: false, isLocal: true });
+    bus.emit('grenadeThrown', { id: 1, ownerId: 1, pos: ORIGIN, vel: ORIGIN, explodesAt: 5000, dropped: false, isLocal: true, kind: 'grenade' });
     engine.update(0.016);
     expect(engine.voiceCount).toBe(1); // tick stopped, pin ended, whoosh playing
     ctx.currentTime = 3;
     engine.update(0.016);
     bus.emit('stanceChanged', { playerId: 1, from: 'stand', to: 'prone', forced: false, durationMs: 600, pos: ORIGIN, isLocal: true });
     bus.emit('localAdsChanged', { engaged: true, weapon: 'dmr', sight: 'scope_4x' });
-    bus.emit('grenadeBounced', { id: 2, pos: { x: 3, y: 0, z: 0 }, surface: 'terrain', speed: 8 });
+    bus.emit('grenadeBounced', { id: 2, pos: { x: 3, y: 0, z: 0 }, surface: 'terrain', speed: 8, kind: 'grenade' });
     expect(engine.voiceCount).toBe(3);
   });
 });
@@ -303,6 +303,8 @@ const mapEvent = (kind: 'island' | 'indoor', zoneTheme: GameEvents['mapChanged']
   map: { kind, carrier: kind === 'indoor' ? 'drone' : 'seaplane' } as unknown as GameEvents['mapChanged']['map'],
   balance: BALANCE,
   zoneTheme,
+  layout: null,
+  look: kind === 'indoor' ? 'day' : 'noon',
 });
 
 /** Advances the fake clock and the engine by `seconds` at 60 fps. */
@@ -422,7 +424,7 @@ describe('AudioEngine: M2b carrier drop', () => {
     const { engine, ctx } = setup();
     engine.unlock();
     engine.setListener(ORIGIN, 0);
-    const g = (id: number, x: number) => ({ id, ownerId: 2, pos: { x, y: 0, z: 0 }, vel: { x: 0, y: 0, z: 0 }, explodesAt: 5000, resting: true });
+    const g = (id: number, x: number) => ({ id, ownerId: 2, pos: { x, y: 0, z: 0 }, vel: { x: 0, y: 0, z: 0 }, explodesAt: 5000, resting: true, kind: 'grenade' as const });
     engine.setGrenades([g(1, 3), g(2, 40)], 2000);
     expect(engine.voicesOf('grenade.fuseTick')).toBe(1);
     ctx.currentTime += 0.05;
@@ -432,7 +434,7 @@ describe('AudioEngine: M2b carrier drop', () => {
 
   it('setGrenades before unlock only keeps the clock', () => {
     const { engine, factory } = setup();
-    engine.setGrenades([{ id: 1, ownerId: 2, pos: ORIGIN, vel: ORIGIN, explodesAt: 5000, resting: true }], 2000);
+    engine.setGrenades([{ id: 1, ownerId: 2, pos: ORIGIN, vel: ORIGIN, explodesAt: 5000, resting: true, kind: 'grenade' }], 2000);
     expect(factory).not.toHaveBeenCalled();
     expect(engine.voicesOf('grenade.fuseTick')).toBe(0);
   });

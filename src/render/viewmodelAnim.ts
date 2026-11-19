@@ -26,8 +26,9 @@
  */
 import type { Balance } from '../shared/balance';
 import type { ViewmodelView } from '../shared/contracts';
-import type { GunId, Stance } from '../shared/types';
-import type { ViewmodelItemId } from './procedural/viewmodel';
+import type { GunId, ItemLevel, M2cGunId, Stance } from '../shared/types';
+import { heldScope, type DrawnScope } from './heldItem';
+import { meleeSwingPose, MELEE_SWING_KEYS, type ViewmodelItemId, type ViewmodelMeleeId } from './procedural/viewmodel';
 
 export type Vec3T = [number, number, number];
 
@@ -156,8 +157,10 @@ export function viewmodelFovFromBalance(b: Balance, fallback: number): number {
 // STYLE §21.3 art tables
 // -------------------------------------------------------------------------------------------------
 /** Viewmodel roll kick per shot (rad, random sign). Not in balance (camera roll is `fpRecoil.rollDeg`). */
-export const VM_RECOIL_ROLL: Readonly<Record<GunId, number>> = {
+export const VM_RECOIL_ROLL: Readonly<Record<M2cGunId, number>> = {
   pistol: 0.03, smg: 0.02, shotgun: 0.04, rifle: 0.02, lmg: 0.03, dmr: 0.02, sniper: 0.03,
+  // M2c (art M2c §7.1 recoil table, rot z)
+  dbshotgun: 0.05, revolver: 0.03, rpg: 0.02,
 };
 /** Bob rows: x amp, y amp, rot z amp. */
 export const VM_BOB = {
@@ -206,7 +209,7 @@ const CHUTE_ROT_R: Vec3T = [1.0, 0.25, 0.15];
  * Where the left hand grabs the magazine (or the shotgun loading port), in ITEM space (weapon frame: origin at the
  * grip, barrel -Z). Estimated from weapons.ts piece placement.
  */
-export const VM_MAG_POINT: Readonly<Record<GunId, Vec3T>> = {
+export const VM_MAG_POINT: Readonly<Record<M2cGunId, Vec3T>> = {
   pistol: [0, -0.075, 0.02],
   smg: [0, -0.09, -0.155],
   shotgun: [0, -0.045, -0.09],
@@ -214,17 +217,31 @@ export const VM_MAG_POINT: Readonly<Record<GunId, Vec3T>> = {
   lmg: [-0.06, -0.07, -0.13],
   dmr: [0, -0.085, -0.145],
   sniper: [0, -0.035, -0.1],
+  // M2c (art M2c §2.2 anchors, §7.1 reloads; framed in Phase 2): dbshotgun loads at the open breech, the revolver at the
+  // swung-out cylinder (-X), the rpg at the muzzle (`rocketSeat`).
+  dbshotgun: [0, 0.09, -0.06],
+  revolver: [-0.03, 0.06, -0.03],
+  rpg: [0, 0.1, -0.52],
 };
 
-const GUNS: readonly GunId[] = ['pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper'];
-export const isGun = (id: string): id is GunId => (GUNS as readonly string[]).includes(id);
+const GUNS: readonly string[] = ['pistol', 'smg', 'shotgun', 'rifle', 'lmg', 'dmr', 'sniper', 'revolver', 'dbshotgun', 'rpg'];
+export const isGun = (id: string): id is GunId => GUNS.includes(id);
+const MELEE: readonly string[] = ['knife', 'machete', 'paddle'];
+export const isMeleeVm = (id: string): id is ViewmodelMeleeId => MELEE.includes(id);
+/** Throwables: the frag and the M2c smoke can (each with a pin-pulled model). */
+const isThrowableVm = (id: string): boolean => id === 'grenade' || id === 'smoke';
 
 /** Map the view's held item to a VIEWMODEL_POSES key. */
 export function viewmodelItemFor(item: string, cooking: boolean): ViewmodelItemId {
   if (item === 'grenade') return cooking ? 'grenade_cooking' : 'grenade';
-  if (item === 'bandage' || item === 'medkit' || item === 'fists' || isGun(item)) return item as ViewmodelItemId;
+  if (item === 'smoke') return cooking ? 'smoke_cooking' : 'smoke';
+  if (item === 'bandage' || item === 'medkit' || item === 'fists' || isGun(item) || isMeleeVm(item)) return item as ViewmodelItemId;
   return 'fists';
 }
+
+/** The pin-in / pin-pulled pose key of the throwable in hand. */
+const throwPose = (item: string, pulled: boolean): ViewmodelItemId =>
+  item === 'smoke' ? (pulled ? 'smoke_cooking' : 'smoke') : pulled ? 'grenade_cooking' : 'grenade';
 
 // -------------------------------------------------------------------------------------------------
 // Pure curves (exported for tests)
@@ -328,6 +345,9 @@ export interface VmOut {
   canopy: number;
   /** Fuse spark intensity (0 = off). */
   fuse: number;
+  /** M2c: the held weapon's level and the drawn scope (per-level model, mounted scope, ADS pose from it). */
+  level: ItemLevel | null;
+  scope: DrawnScope | null;
 }
 
 const hand = (): VmHandOut => ({
@@ -337,7 +357,7 @@ export function createVmOut(): VmOut {
   return {
     visible: false, item: 'fists', showItem: true, ads: 0,
     sockPos: [0, 0, 0], sockRot: [0, 0, 0], sockAbsPos: [0, 0, 0], sockAbsRot: [0, 0, 0], sockAbsW: 0,
-    rootRot: [0, 0, 0], handR: hand(), handL: hand(), itemSpinX: 0, drop: null, canopy: -1, fuse: 0,
+    rootRot: [0, 0, 0], handR: hand(), handL: hand(), itemSpinX: 0, drop: null, canopy: -1, fuse: 0, level: null, scope: null,
   };
 }
 const set3 = (v: Vec3T, x: number, y: number, z: number): void => {
@@ -388,6 +408,8 @@ export class ViewmodelAnimator {
   private wasCooking = false;
   private dropGrenadeMs = Infinity;
   private shownItem: ViewmodelItemId = 'fists';
+  /** M2c melee: swings started (knife alternates forehand / backhand). */
+  private swingCount = 0;
   private swapFrom: ViewmodelItemId | null = null;
   private seed = 0x2545f491;
 
@@ -444,6 +466,8 @@ export class ViewmodelAnimator {
     out.fuse = 0;
     out.canopy = -1;
     out.showItem = true;
+    out.level = v.level ?? null;
+    out.scope = heldScope(v.item, v.sight ?? null);
 
     const p = clamp01(v.actionProgress);
     const action = v.action;
@@ -480,6 +504,8 @@ export class ViewmodelAnimator {
       this.punchMs = p * c.punchMs;
       this.punchLeft = !this.punchLeft;
     }
+    // Melee: a new swing when the action starts or its progress wraps.
+    if (action === 'swing' && (this.prevAction !== 'swing' || p < this.prevProgress - 0.2)) this.swingCount++;
     // Swap: remember what was in hand before the swap started.
     if (action === 'swapIn' && this.prevAction !== 'swapIn') {
       this.swapFrom = this.shownItem !== item ? this.shownItem : null;
@@ -549,6 +575,35 @@ export class ViewmodelAnimator {
     let ads = adsRaw;
     let lower = 0; // swap-style lowering 0..1 (1 = off-screen)
 
+    if (action === 'cycle') {
+      // M2c throwable cycle (frag <-> smoke): a quick dip and rise, same curve as a swap.
+      const s = swapCurve(p, false);
+      lower = Math.max(lower, s.lower * 0.6);
+      ads = 0;
+    }
+    if (action === 'scopeSwap') {
+      // M2c T sight switch: tilt the gun toward the camera (the left hand works the rail), then back.
+      const w = reloadTilt(p);
+      out.sockRot[0] += 0.1 * w;
+      out.sockRot[2] += -0.3 * w;
+      out.handL.magW = 0;
+      out.handL.pos[1] += 0.04 * w;
+      ads = 0;
+    }
+    if (action === 'swing' && isMeleeVm(item)) {
+      // M2c melee (art M2c §7.2): absolute socket arc from the designer's keys; the blade crosses the centre at h.
+      const h = clamp01(v.hitFraction ?? 0.35);
+      const xf = meleeSwingPose(item, p, h, this.swingCount % 2 === 0);
+      out.sockAbsW = 1;
+      set3(out.sockAbsPos, xf.pos[0], xf.pos[1], xf.pos[2]);
+      set3(out.sockAbsRot, xf.rot[0], xf.rot[1], xf.rot[2]);
+      const k = MELEE_SWING_KEYS[item].kick;
+      const kw = envelope(p, h - 0.03, h, h + 0.02, h + 0.12) * ms;
+      out.rootRot[0] += k[0] * kw;
+      out.rootRot[1] += k[1] * kw;
+      ads = 0;
+    }
+
     if (action === 'swapIn') {
       const s = swapCurve(p, this.swapFrom !== null);
       if (s.showOld && this.swapFrom) item = this.swapFrom;
@@ -562,7 +617,7 @@ export class ViewmodelAnimator {
       out.sockRot[1] += 0.25 * w;
       out.sockRot[2] += 0.35 * w;
       out.sockPos[1] += 0.03 * w + 0.01 * envelope(p, 0.63, 0.65, 0.65, 0.7);
-      this.reloadHand(gun, p, out.handL);
+      this.reloadHand(gun, p, out.handL, out);
       ads = 0;
     }
 
@@ -592,15 +647,15 @@ export class ViewmodelAnimator {
       const cm = this.cookMs;
       if (cm < VM_PIN_PULL_MS) {
         // Pull the pin: the pin model is still in, the left hand pulls back with the ring.
-        item = 'grenade';
+        item = throwPose(v.item, false);
         const k = easeOut(cm / VM_PIN_PULL_MS);
         out.handL.pos[0] += -0.06 * k;
         out.handL.pos[2] += 0.05 * k;
         out.sockRot[2] += 0.012 * Math.sin(this.t * 70);
       } else {
-        item = 'grenade_cooking';
+        item = throwPose(v.item, true);
         ads = Math.max(ads, easeInOut((cm - VM_PIN_PULL_MS) / VM_WINDUP_MS));
-        out.fuse = 1;
+        out.fuse = v.item === 'smoke' ? 0 : 1;
         // jitter grows as the fuse runs out (actionProgress = fuse fraction)
         out.sockRot[2] += 0.02 * p * Math.sin(this.t * 43) * Math.sin(this.t * 17 + 0.5);
       }
@@ -609,7 +664,7 @@ export class ViewmodelAnimator {
     if (action === 'throw') {
       const tm = p * this.cfg.throwRecoveryMs;
       if (tm < VM_THROW_DROP_END_MS) {
-        item = 'grenade_cooking';
+        item = throwPose(isThrowableVm(v.item) ? v.item : 'grenade', true);
         ads = 1;
         out.sockAbsW = easeOut(tm / VM_THROW_MS);
         set3(out.sockAbsPos, VM_THROW_TARGET.pos[0], VM_THROW_TARGET.pos[1], VM_THROW_TARGET.pos[2]);
@@ -629,7 +684,7 @@ export class ViewmodelAnimator {
       // Swap while cooking: the live grenade drops at the feet, then the next item rises.
       const dm = this.dropGrenadeMs;
       if (dm < VM_DROP_MS) {
-        item = 'grenade_cooking';
+        item = throwPose(isThrowableVm(v.item) ? v.item : 'grenade', true);
         out.sockPos[1] += -0.3 * easeIn(dm / VM_DROP_MS);
         out.handR.curl = 0;
         out.showItem = dm < VM_DROP_MS * 0.5;
@@ -747,7 +802,42 @@ export class ViewmodelAnimator {
   }
 
   /** Left hand during a gun reload (STYLE §21.3 "Reload"). */
-  private reloadHand(gun: GunId, p: number, h: VmHandOut): void {
+  private reloadHand(gun: GunId, p: number, h: VmHandOut, out?: VmOut): void {
+    if (gun === 'dbshotgun') {
+      // Break-open (art M2c §7.1): barrels drop 0-0.2, the left hand dips twice 0.35-0.75, snap shut 0.75-0.85.
+      const open = envelope(p, 0, 0.2, 0.75, 0.85);
+      if (out) {
+        out.sockRot[0] += 0.5 * open;
+        out.sockPos[1] += 0.015 * envelope(p, 0.75, 0.8, 0.8, 0.85);
+      }
+      h.magW = envelope(p, 0.3, 0.38, 0.75, 0.85);
+      this.leaveForeEnd(p, h);
+      if (p > 0.35 && p < 0.75) h.pos[1] += -0.1 * (0.5 - 0.5 * Math.cos(4 * Math.PI * ((p - 0.35) / 0.4)));
+      return;
+    }
+    if (gun === 'revolver') {
+      // Swing-out: tilt left 0-0.2, tip up 0.2-0.35, speed-loader 0.35-0.7, snap back 0.7-0.85.
+      if (out) {
+        out.sockRot[2] += 0.4 * envelope(p, 0, 0.2, 0.7, 0.85);
+        out.sockRot[0] += -0.5 * envelope(p, 0.2, 0.3, 0.35, 0.45);
+      }
+      h.magW = envelope(p, 0.3, 0.4, 0.65, 0.75);
+      this.leaveForeEnd(p, h);
+      if (p > 0.3 && p < 0.55) h.pos[1] += -0.2 * envelope(p, 0.3, 0.38, 0.42, 0.55);
+      return;
+    }
+    if (gun === 'rpg') {
+      // Front load: lower the tube 0-0.2, the left hand brings a rocket up from below 0.2-0.5 and pushes it home.
+      if (out) {
+        const low = envelope(p, 0, 0.2, 0.7, 1);
+        out.sockPos[1] += -0.06 * low;
+        out.sockRot[0] += 0.2 * low;
+      }
+      h.magW = envelope(p, 0.35, 0.5, 0.65, 0.75);
+      this.leaveForeEnd(p, h);
+      if (p > 0.15 && p < 0.45) h.pos[1] += -0.3 * envelope(p, 0.15, 0.25, 0.3, 0.45);
+      return;
+    }
     if (gun === 'shotgun') {
       // to the loading port, down for shells, three dips in, back to the pump
       h.magW = envelope(p, 0.15, 0.3, 0.85, 1);

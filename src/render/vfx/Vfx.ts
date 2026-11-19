@@ -10,7 +10,7 @@
  */
 import type * as THREE from 'three';
 import type { EventBus, GameEvents } from '../../shared/events';
-import type { ArmorTier, GlassSurface, ImpactSurface, IndoorSurface, Surface, Vec3, WeaponId } from '../../shared/types';
+import type { GlassSurface, ImpactSurface, IndoorSurface, M2cArmorTier, M2cWeaponId, Surface, Vec3 } from '../../shared/types';
 import { PARTICLE_SHAPE } from '../shaders/particles';
 import { palette } from '../procedural';
 import { ExplosionDecals, explosionShake } from './Explosions';
@@ -41,9 +41,20 @@ export interface VfxHost {
   shake?(amount: number): void;
 }
 
-/** Muzzle flash scale and tracer width (m) per weapon. */
-const FLASH_SCALE: Record<WeaponId, number> = { fists: 1, pistol: 0.8, smg: 0.9, shotgun: 1.4, rifle: 1, dmr: 1.15, sniper: 1.35, lmg: 1.05 };
-const TRACER_WIDTH: Record<WeaponId, number> = { fists: 0.04, pistol: 0.045, smg: 0.045, shotgun: 0.035, rifle: 0.06, dmr: 0.065, sniper: 0.08, lmg: 0.055 };
+/**
+ * Muzzle flash scale and tracer width (m) per weapon. Keyed by the M2c union (compiles before and after the C-gate).
+ * M2c: the rpg launch flash is the shotgun size (art M2c §3) and it has no tracer (the rocket is drawn); melee never
+ * fires a shot (0 = no flash, no tracer).
+ */
+const FLASH_SCALE: Record<M2cWeaponId, number> = {
+  fists: 1, pistol: 0.8, smg: 0.9, shotgun: 1.4, rifle: 1, dmr: 1.15, sniper: 1.35, lmg: 1.05,
+  dbshotgun: 1.4, revolver: 1.0, rpg: 1.4, knife: 0, machete: 0, paddle: 0,
+};
+const TRACER_WIDTH: Record<M2cWeaponId, number> = {
+  fists: 0.04, pistol: 0.045, smg: 0.045, shotgun: 0.035, rifle: 0.06, dmr: 0.065, sniper: 0.08, lmg: 0.055,
+  dbshotgun: 0.035, revolver: 0.06, rpg: 0, knife: 0, machete: 0, paddle: 0,
+};
+
 /** Explosion: smoke balls drift out to radius x SMOKE_REACH over SMOKE_LIFE (STYLE.md §15). */
 const SMOKE_LIFE = 0.6;
 const SMOKE_REACH = 0.5;
@@ -69,7 +80,9 @@ export class Vfx {
   private readonly muzzle: Vec3 = { x: 0, y: 0, z: 0 };
   private readonly C: Record<string, Rgb>;
   readonly decals = new ExplosionDecals();
-  private readonly armorRgb: Record<ArmorTier, Rgb>;
+  /** FrameView.reducedMotion of the last frame (Renderer sets it): fewer sparks, no drift, no shake. */
+  reducedMotion = false;
+  private readonly armorRgb: Record<M2cArmorTier, Rgb>;
 
   constructor(
     bus: EventBus<GameEvents>,
@@ -104,8 +117,19 @@ export class Vfx {
       tile: linearRgb(0xe6eef0),
       rain: linearRgb(0xf4fbff),
       cream: linearRgb(0xfff4e2),
+      // M2c (art M2c §3, §5)
+      coral: linearRgb(0xff5a5f),
+      mango: linearRgb(0xffc43d),
+      mint: linearRgb(0x7fddb8),
+      lilac: linearRgb(0xc9b6f2),
+      flameCore: linearRgb(0xfff1a8),
+      flameEdge: linearRgb(0xff9d2e),
+      rocketPuff: linearRgb(0xfff3d6),
+      rocketSpark: linearRgb(0xffd23f),
+      pure: linearRgb(0xffffff),
+      glint: linearRgb(0xf4fafc),
     };
-    this.armorRgb = { 1: linearRgb(palette.armor1), 2: linearRgb(palette.armor2), 3: linearRgb(palette.armor3) };
+    this.armorRgb = { 1: linearRgb(palette.armor1), 2: linearRgb(palette.armor2), 3: linearRgb(palette.armor3), 4: linearRgb(palette.armor4) };
 
     this.unsubs.push(
       bus.on('shotFired', (e) => this.onShot(e)),
@@ -134,6 +158,10 @@ export class Vfx {
       // M2b drop: a cream puff at the hatch, and the parachute "pop" (4 cream smoke balls at the canopy, STYLE §20.2).
       bus.on('playerJumped', (e) => this.hatchPuff(e.pos.x, e.pos.y, e.pos.z)),
       bus.on('parachuteOpened', (e) => this.chutePop(e.pos.x, e.pos.y + CANOPY_HEIGHT, e.pos.z)),
+      // M2c (art M2c §3, §5): rocket launch flash + back-blast, dud puff, glass shatter.
+      bus.on('rocketFired', (e) => this.rocketLaunch(e)),
+      bus.on('rocketDud', (e) => this.rocketDud(e.pos.x, e.pos.y, e.pos.z)),
+      bus.on('glassBroken', (e) => this.glassShatter(e.pos.x, e.pos.y, e.pos.z)),
     );
   }
 
@@ -304,8 +332,11 @@ export class Vfx {
   /** Cartoon boom (STYLE.md §15), sized to the blast radius; water spray when the ground under it is below sea level. */
   private explosion(e: GameEvents['explosion']): void {
     this.host.onExploded?.(e.id);
-    const amount = explosionShake(e.localDistance, e.radius);
+    const rocket = e.source === 'rocket';
+    // M2c: rocket blasts shake 1.5x the grenade (art M2c §5.1); none with reduced motion (the renderer skips it).
+    const amount = Math.min(1, explosionShake(e.localDistance, e.radius) * (rocket ? 1.5 : 1));
     if (amount > 0) this.host.shake?.(amount);
+    if (rocket) this.rocketExtras(e);
     const { x, y, z } = e.pos;
     if (this.far(x, y, z, EXPLOSION_FX_DIST2)) return;
     const R = Math.max(1, e.radius);
@@ -332,14 +363,100 @@ export class Vfx {
         const a = (i / 6) * Math.PI * 2;
         this.p(x, 0.1, z, Math.cos(a) * 3, 6 + r() * 3, Math.sin(a) * 3, 0.8, 0.35, 0.2, this.C.foam, PARTICLE_SHAPE.puff, 14, 0.3);
       }
-    } else {
+    } else if (!e.airburst) {
       for (let i = 0; i < 6; i++) {
         const a = (i / 6) * Math.PI * 2 + r() * 0.6;
         const sp = 4 + r() * 4;
         this.p(x, gy + 0.2, z, Math.cos(a) * sp, 4 + r() * 4, Math.sin(a) * sp, 0.7, 0.2, 0.12, this.C.sandDark, PARTICLE_SHAPE.spark, 16, 0.4);
       }
     }
-    this.decals.spawn(x, gy, z, R, !water);
+    // M2c airburst (max range, nothing hit): no ground shock ring and no dust disc.
+    if (!e.airburst) this.decals.spawn(x, gy, z, R, !water);
+  }
+
+  /** M2c rocket blast extras: the fireworks burst (10 star sparks; 5 with reduced motion) and the direct-hit star. */
+  private rocketExtras(e: GameEvents['explosion']): void {
+    const { x, y, z } = e.pos;
+    if (this.far(x, y, z, EXPLOSION_FX_DIST2)) return;
+    const R = Math.max(1, e.radius);
+    const n = this.reducedMotion ? 5 : 10;
+    const cols = [this.C.coral, this.C.mango, this.C.mint, this.C.lilac];
+    // Sparks reach ~0.6 R over 0.5 s with drag 2.5: v0 = 0.6 R * 2.5 / (1 - e^-1.25).
+    const v0 = (0.6 * R * 2.5) / (1 - Math.exp(-1.25));
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      const up = 0.3 + 0.4 * ((i * 7) % 5) / 5;
+      this.p(x, y + 0.5, z, Math.cos(a) * v0 * (1 - up * 0.4), v0 * up, Math.sin(a) * v0 * (1 - up * 0.4), 0.5, 0.35, 0.12,
+        cols[i % 4], PARTICLE_SHAPE.star, 2, 2.5);
+    }
+    if (e.direct) this.p(x, y + 0.2, z, 0, 0, 0, 0.25, 1.2, 1.0, this.C.pure, PARTICLE_SHAPE.star, 0, 0);
+  }
+
+  /** M2c launch (art M2c §3): front flash at the shooter's muzzle (shotgun size) + 6 cream balls blown backwards. */
+  private rocketLaunch(e: GameEvents['rocketFired']): void {
+    this.host.onShot(e.ownerId);
+    const m = this.muzzle;
+    if (!this.host.getMuzzle(e.ownerId, m)) {
+      m.x = e.pos.x; m.y = e.pos.y; m.z = e.pos.z;
+    }
+    if (this.far(m.x, m.y, m.z)) return;
+    const l = Math.hypot(e.vel.x, e.vel.y, e.vel.z) || 1;
+    const fx = e.vel.x / l, fy = e.vel.y / l, fz = e.vel.z / l;
+    this.p(m.x + fx * 0.1, m.y + fy * 0.1, m.z + fz * 0.1, 0, 0, 0, 0.07, 0.6, 0.75, this.C.flash, PARTICLE_SHAPE.flash, 0, 0);
+    // Back-blast at the tube's rear (about 1 m behind the muzzle): a 0.8 m cone of cream smoke, fading over 0.5 s.
+    const bx = m.x - fx * 1.0, by = m.y - fy * 1.0, bz = m.z - fz * 1.0;
+    const r = Math.random;
+    for (let i = 0; i < 6; i++) {
+      const sx = (r() - 0.5) * 1.2, sy = (r() - 0.5) * 1.2, sz = (r() - 0.5) * 1.2;
+      this.p(bx, by, bz, -fx * 3 + sx, -fy * 3 + sy + 0.3, -fz * 3 + sz, 0.5, 0.25, 0.55, this.C.cream, PARTICLE_SHAPE.puff, -0.3, 3, 0.9);
+    }
+  }
+
+  private rocketDud(x: number, y: number, z: number): void {
+    if (this.far(x, y, z)) return;
+    const r = Math.random;
+    this.p(x, y + 0.1, z, 0, 0.5, 0, 0.45, 0.25, 0.5, this.C.rocketPuff, PARTICLE_SHAPE.puff, 0, 2, 0.9);
+    for (let i = 0; i < 4; i++) this.p(x, y + 0.1, z, (r() - 0.5) * 4, r() * 3 + 1, (r() - 0.5) * 4, 0.3, 0.07, 0.03, this.C.spark, PARTICLE_SHAPE.spark, 14, 1);
+  }
+
+  /** M2c rocket in flight (RocketLayer): flame at the nozzle each frame (crossed quads approximated by a flash). */
+  rocketFlame(x: number, y: number, z: number, flicker: number): void {
+    if (this.far(x, y, z)) return;
+    this.p(x, y, z, 0, 0, 0, 0.04, 0.22 * flicker, 0.16 * flicker, this.C.flameCore, PARTICLE_SHAPE.flash, 0, 0);
+    this.p(x, y, z, 0, 0, 0, 0.05, 0.3 * flicker, 0.2 * flicker, this.C.flameEdge, PARTICLE_SHAPE.flash, 0, 0, 0.8);
+  }
+
+  /** M2c rocket trail puff (every 0.35 m): r 0.08 -> 0.30 m over 0.7 s, drifting up 0.3 m (none with reduced motion). */
+  rocketPuff(x: number, y: number, z: number): void {
+    if (this.far(x, y, z)) return;
+    this.p(x, y, z, 0, this.reducedMotion ? 0 : 0.43, 0, 0.7, 0.16, 0.6, this.C.rocketPuff, PARTICLE_SHAPE.puff, 0, 0, 0.9);
+  }
+
+  /** M2c trail spark star (every 0.7 m; none with reduced motion). */
+  rocketSpark(x: number, y: number, z: number): void {
+    if (this.reducedMotion || this.far(x, y, z)) return;
+    const r = Math.random;
+    this.p(x, y, z, (r() - 0.5) * 2, (r() - 0.5) * 2, (r() - 0.5) * 2, 0.3, 0.18, 0.05, this.C.rocketSpark, PARTICLE_SHAPE.star, 0, 2);
+  }
+
+  /**
+   * M2c glass shatter (art M2c §5.2): 16-20 pane-tint shards with white glints falling with gravity, the chip ring at
+   * 2x and 6 sparkle stars (reduced motion: 10 shards, no sparkle). Office world scale (shards 0.3-0.8 m).
+   */
+  glassShatter(x: number, y: number, z: number): void {
+    if (this.far(x, y, z)) return;
+    const r = Math.random;
+    const n = this.reducedMotion ? 10 : 16 + Math.floor(r() * 5);
+    for (let i = 0; i < n; i++) {
+      const a = r() * Math.PI * 2;
+      const sp = 2 + r() * 5;
+      this.p(x + (r() - 0.5) * 2, y + (r() - 0.5) * 3, z + (r() - 0.5) * 2, Math.cos(a) * sp, r() * 4, Math.sin(a) * sp,
+        1.2, 0.3 + r() * 0.5, 0.2, i % 4 === 0 ? this.C.glint : this.C.glass, PARTICLE_SHAPE.spark, 25, 0.4);
+    }
+    this.p(x, y, z, 0, 0, 0, 0.25, 0.3, 0.8, this.C.white, PARTICLE_SHAPE.ring, 0, 1, 0.8);
+    if (!this.reducedMotion) {
+      for (let i = 0; i < 6; i++) this.p(x + (r() - 0.5) * 3, y + (r() - 0.5) * 3, z + (r() - 0.5) * 3, 0, 0.5, 0, 0.5, 0.35, 0.1, this.C.pure, PARTICLE_SHAPE.star, 0, 1);
+    }
   }
 
   /** Death poof (also called by PlayerViews when a toppled body vanishes). */

@@ -16,8 +16,17 @@
  * rises <= RAMP_STEP_FRACTION x stepHeight, and glass walls / glass kit parts set `glass` (solid; impact kind 'glass').
  * The kit is read from `map.kit` (the sim never imports src/shared/kits). The grid covers `mapBounds(map)`, and boxes
  * are inserted by oriented-box cell coverage, so a 68 m wall fills only the cells it crosses.
+ *
+ * M2c glass (melee.md "Glass", ADR 0007 §7): every glass collider carries its `pane` id (glassPanes order: glass walls in
+ * map.walls order, then glass kit parts in prop and collider order). A ColliderSet may carry a `broken` pane set; every
+ * query here (push-out, support, rays, line of sight) skips the colliders of broken panes, so movement, bullets, grenade
+ * flight and blast line of sight pass through the opening. `withBrokenPanes` makes such a view of a shared set.
+ *
+ * BUG-011: a raised kit box (bottom above its placement) whose thinner horizontal half extent is below
+ * `minStandHalfWidth` (player.radius / 2, passed by createMovementContext) is `noStand`: it blocks like any wall but never
+ * supports feet (monitor screens are canopies, not platforms).
  */
-import { isIndoor, mapBounds, wallFrame } from '../maps';
+import { glassPanes, isIndoor, mapBounds, wallFrame } from '../maps';
 import type {
   AnyMapData,
   IndoorMapData,
@@ -25,6 +34,7 @@ import type {
   KitCollider,
   PropKind,
   PropKitEntry,
+  PaneId,
   PropPlacement,
   Vec3,
   WallSegment,
@@ -44,6 +54,10 @@ export interface CircleCollider {
   prop: number;
   /** M2b: glass (solid in the sim; impact and contact surface 'glass'). */
   glass?: boolean;
+  /** M2c: glass pane id (glassPanes order); present iff `glass`. */
+  pane?: PaneId;
+  /** BUG-011: blocks but never supports feet (thin raised parts such as monitor screens). */
+  noStand?: boolean;
 }
 
 export interface BoxCollider {
@@ -62,6 +76,10 @@ export interface BoxCollider {
   prop: number;
   /** M2b: glass (solid in the sim; impact and contact surface 'glass'). */
   glass?: boolean;
+  /** M2c: glass pane id (glassPanes order); present iff `glass`. */
+  pane?: PaneId;
+  /** BUG-011: blocks but never supports feet (thin raised parts such as monitor screens). */
+  noStand?: boolean;
 }
 
 export type Collider = CircleCollider | BoxCollider;
@@ -138,7 +156,18 @@ export interface ColliderSet {
   readonly rows: number;
   /** cells[row * cols + col] = collider indices overlapping the cell (circles by bounding square, boxes by OBB coverage). */
   readonly cells: readonly (readonly number[])[];
+  /** M2c: broken glass panes; their colliders are skipped by every query. Absent = none broken. */
+  readonly broken?: ReadonlySet<PaneId>;
 }
+
+/** M2c: a view of `set` whose `broken` panes are open (shares the colliders and the grid; `broken` is read live). */
+export function withBrokenPanes(set: ColliderSet, broken: ReadonlySet<PaneId>): ColliderSet {
+  return { ...set, broken };
+}
+
+/** M2c: the collider is an intact part of the set (not a broken glass pane). */
+export const isSolid = (set: ColliderSet, c: Collider): boolean =>
+  c.pane === undefined || set.broken === undefined || !set.broken.has(c.pane);
 
 /** Base y of a prop (part heights are measured from here). */
 export function propBaseY(p: PropPlacement, map: AnyMapData): number {
@@ -211,6 +240,7 @@ export function kitPartColliders(
   index: number,
   stepHeight: number,
   out: Collider[] = [],
+  minStandHalfWidth = 0,
 ): Collider[] {
   const s = p.scale;
   const sin = Math.sin(p.rotY);
@@ -228,7 +258,10 @@ export function kitPartColliders(
   const hx = ((x1 - x0) / 2) * s;
   if (part.type === 'box') {
     const cz = (z0 + z1) / 2;
-    out.push(orientedBox(wx(cx, cz), wz(cx, cz), hx, ((z1 - z0) / 2) * s, p.rotY, p.y + y0 * s, p.y + y1 * s, index, part.glass === true));
+    const hz = ((z1 - z0) / 2) * s;
+    const box = orientedBox(wx(cx, cz), wz(cx, cz), hx, hz, p.rotY, p.y + y0 * s, p.y + y1 * s, index, part.glass === true);
+    if (y0 > 0 && Math.min(hx, hz) < minStandHalfWidth) box.noStand = true;
+    out.push(box);
     return out;
   }
   // Ramp: walkable top rises from y0 at z1 to y1 at z0 (toward -Z).
@@ -246,19 +279,47 @@ export function kitPartColliders(
 }
 
 /** Every collider of one indoor prop (empty for visual-only kinds or unknown keys). */
-export function kitPropColliders(entry: PropKitEntry | undefined, p: IndoorPropPlacement, index: number, stepHeight: number): Collider[] {
+export function kitPropColliders(
+  entry: PropKitEntry | undefined,
+  p: IndoorPropPlacement,
+  index: number,
+  stepHeight: number,
+  minStandHalfWidth = 0,
+): Collider[] {
   const out: Collider[] = [];
   if (!entry) return out;
-  for (const part of entry.colliders) kitPartColliders(part, p, index, stepHeight, out);
+  for (const part of entry.colliders) kitPartColliders(part, p, index, stepHeight, out, minStandHalfWidth);
   return out;
 }
 
-function indoorColliders(map: IndoorMapData, stepHeight: number): Collider[] {
+/**
+ * Indoor colliders. Glass ones get their pane id from `glassPanes(map)` (src/shared/maps.ts), the one numbering that
+ * render and the layout tests use too (REVIEW-M2c SF1): a glass wall by its wall index, a glass kit part by (prop, part).
+ */
+function indoorColliders(map: IndoorMapData, stepHeight: number, minStandHalfWidth: number): Collider[] {
+  const wallPane = new Map<number, PaneId>();
+  const partPane = new Map<string, PaneId>();
+  for (const g of glassPanes(map)) {
+    if ('wall' in g) wallPane.set(g.wall, g.id);
+    else partPane.set(`${g.prop}:${g.part}`, g.id);
+  }
   const out: Collider[] = [];
-  for (const w of map.walls) out.push(wallCollider(w));
+  map.walls.forEach((w, i) => {
+    const c = wallCollider(w);
+    const id = wallPane.get(i);
+    if (c.glass && id !== undefined) c.pane = id;
+    out.push(c);
+  });
   map.props.forEach((p, i) => {
     const entry = Object.prototype.hasOwnProperty.call(map.kit, p.kind) ? map.kit[p.kind] : undefined;
-    for (const c of kitPropColliders(entry, p, i, stepHeight)) out.push(c);
+    if (!entry) return;
+    entry.colliders.forEach((part, k) => {
+      const id = partPane.get(`${i}:${k}`);
+      for (const c of kitPartColliders(part, p, i, stepHeight, [], minStandHalfWidth)) {
+        if (c.glass && id !== undefined) c.pane = id;
+        out.push(c);
+      }
+    });
   });
   return out;
 }
@@ -267,10 +328,10 @@ function indoorColliders(map: IndoorMapData, stepHeight: number): Collider[] {
  * Static colliders of a map plus the spatial grid (sized from `mapBounds`). `stepHeight` = balance
  * movement.stepHeight (indoor ramp stairs); island maps ignore it.
  */
-export function buildColliders(map: AnyMapData, stepHeight: number): ColliderSet {
+export function buildColliders(map: AnyMapData, stepHeight: number, minStandHalfWidth = 0): ColliderSet {
   const colliders: Collider[] = [];
   if (isIndoor(map)) {
-    for (const c of indoorColliders(map, stepHeight)) colliders.push(c);
+    for (const c of indoorColliders(map, stepHeight, minStandHalfWidth)) colliders.push(c);
   } else {
     map.props.forEach((p, i) => {
       for (const c of collidersForProp(p, i, map)) colliders.push(c);
@@ -338,10 +399,15 @@ export function forEachColliderNear(
   const c1 = clampCell(Math.floor((x + radius - set.minX) / set.cellSize), set.cols);
   const r0 = clampCell(Math.floor((z - radius - set.minZ) / set.cellSize), set.rows);
   const r1 = clampCell(Math.floor((z + radius - set.minZ) / set.cellSize), set.rows);
+  const broken = set.broken;
   for (let r = r0; r <= r1; r++) {
     for (let col = c0; col <= c1; col++) {
       const cell = set.cells[r * set.cols + col]!;
-      for (let i = 0; i < cell.length; i++) fn(set.colliders[cell[i]!]!);
+      for (let i = 0; i < cell.length; i++) {
+        const c = set.colliders[cell[i]!]!;
+        if (broken !== undefined && c.pane !== undefined && broken.has(c.pane)) continue;
+        fn(c);
+      }
     }
   }
 }
@@ -384,7 +450,7 @@ export function platformHeightAt(set: ColliderSet, x: number, z: number, feetY: 
   let best = -Infinity;
   const limit = feetY + stepHeight;
   forEachColliderNear(set, x, z, 0, (c) => {
-    if (c.top <= limit && c.top > best && containsPoint(c, x, z)) best = c.top;
+    if (c.top <= limit && c.top > best && c.noStand !== true && containsPoint(c, x, z)) best = c.top;
   });
   return best;
 }
@@ -536,10 +602,12 @@ export function raycastColliders(
 ): { t: number; collider: Collider } | null {
   let bestT = Infinity;
   let best: Collider | null = null;
+  const broken = set.broken;
   const testCell = (col: number, row: number): void => {
     const cell = set.cells[row * set.cols + col]!;
     for (let i = 0; i < cell.length; i++) {
       const c = set.colliders[cell[i]!]!;
+      if (broken !== undefined && c.pane !== undefined && broken.has(c.pane)) continue;
       const t = rayCollider(c, o, dir, maxT);
       if (t >= 0 && t < bestT) {
         bestT = t;
@@ -590,6 +658,8 @@ export type StaticHitKind = 'terrain' | 'prop' | 'water' | 'glass';
 export interface StaticHit {
   t: number;
   kind: StaticHitKind;
+  /** M2c: the glass pane hit (kind 'glass'), else absent. */
+  pane?: PaneId;
 }
 
 /**
@@ -605,7 +675,13 @@ export function raycastStatic(set: ColliderSet, map: AnyMapData, o: Vec3, dir: V
     const y = o.y + dir.y * tt;
     return { t: tt, kind: y < 0 ? 'water' : 'terrain' };
   }
-  return prop ? { t: prop.t, kind: prop.collider.glass === true ? 'glass' : 'prop' } : null;
+  if (!prop) return null;
+  if (prop.collider.glass === true) {
+    const hit: StaticHit = { t: prop.t, kind: 'glass' };
+    if (prop.collider.pane !== undefined) hit.pane = prop.collider.pane;
+    return hit;
+  }
+  return { t: prop.t, kind: 'prop' };
 }
 
 /** True when nothing static blocks the segment a -> b. */

@@ -355,8 +355,10 @@ export class RoomsModel {
       countdownSecondsLeft: r.phase === 'countdown' && r.countdownEndsAt !== null ? secondsUntil(r.countdownEndsAt, now) : null,
       autoStart: r.autoStart ? { reason: r.autoStart.reason, secondsLeft: secondsUntil(r.autoStart.at, now) } : null,
       vote,
-      map: r.map ? { ...r.map } : null,
+      map: r.map ? { id: r.map.id, via: r.map.via } : null,
       mapLoading,
+      // M2c (UI M2c §7.2): seed and look once the vote locked (map card look line).
+      lockedLayout: r.map?.layout ? { seed: r.map.layout.seed, look: r.map.layout.look } : null,
     };
   }
 }

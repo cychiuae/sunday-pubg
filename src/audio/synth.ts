@@ -24,6 +24,8 @@ export interface Voice {
   readonly distance: number;
   /** Requested duration for loops/timed voices, seconds (0 if not given). */
   readonly durationS: number;
+  /** M2c: extra numeric recipe parameters (PlayCommand.params), e.g. the smoke hiss shape or reload round count. */
+  readonly params?: readonly number[];
   readonly noise: NoiseBank;
   /** [0, 1) random. */
   readonly rand: () => number;

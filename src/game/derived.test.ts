@@ -14,7 +14,7 @@ import {
 } from './derived';
 import { BALANCE } from '../shared/balance';
 import type { LootState } from '../shared/types';
-import { makeLocal, makeMatch, makePlayer, makeZone } from './testFixtures';
+import { makeAmmo, makeLocal, makeMatch, makePlayer, makeZone } from './testFixtures';
 import { isOutsideZone, zoneAt } from './zoneView';
 
 function recorder() {
@@ -122,9 +122,9 @@ describe('interact prompt', () => {
     t.set({ ...loot[1]!, qty: 1 }, bus);
     t.set(null, bus);
     expect(events.map((e) => e.payload)).toEqual([
-      { lootId: 2, item: 'bandage', qty: 3, durability: null, maxDurability: null, refusal: null },
-      { lootId: 2, item: 'bandage', qty: 1, durability: null, maxDurability: null, refusal: null },
-      { lootId: null, item: null, qty: 0, durability: null, maxDurability: null, refusal: null },
+      { lootId: 2, item: 'bandage', qty: 3, durability: null, maxDurability: null, refusal: null, level: null, scope: null, replacesSlot: null, scopeTarget: null },
+      { lootId: 2, item: 'bandage', qty: 1, durability: null, maxDurability: null, refusal: null, level: null, scope: null, replacesSlot: null, scopeTarget: null },
+      { lootId: null, item: null, qty: 0, durability: null, maxDurability: null, refusal: null, level: null, scope: null, replacesSlot: null, scopeTarget: null },
     ]);
   });
 
@@ -136,9 +136,23 @@ describe('interact prompt', () => {
     t.set(loot[2]!, bus, 'betterArmor');
     t.set(null, bus, 'betterArmor'); // no loot: refusal is dropped
     expect(events.map((e) => e.payload)).toEqual([
-      { lootId: 3, item: 'vest_2', qty: 1, durability: 31, maxDurability: null, refusal: null },
-      { lootId: 3, item: 'vest_2', qty: 1, durability: 31, maxDurability: null, refusal: 'betterArmor' },
-      { lootId: null, item: null, qty: 0, durability: null, maxDurability: null, refusal: null },
+      { lootId: 3, item: 'vest_2', qty: 1, durability: 31, maxDurability: null, refusal: null, level: null, scope: null, replacesSlot: null, scopeTarget: null },
+      { lootId: 3, item: 'vest_2', qty: 1, durability: 31, maxDurability: null, refusal: 'betterArmor', level: null, scope: null, replacesSlot: null, scopeTarget: null },
+      { lootId: null, item: null, qty: 0, durability: null, maxDurability: null, refusal: null, level: null, scope: null, replacesSlot: null, scopeTarget: null },
+    ]);
+  });
+
+  it('M2c: weapons carry their level (absent = L1) and a gun its scope; other items null; a level change re-emits', () => {
+    const { bus, events } = recorder();
+    const t = new InteractPromptTracker();
+    const gun = { id: 9, item: 'rifle' as const, qty: 1, pos: { x: 0, y: 0, z: 0 }, tier: 'rare' as const };
+    t.set(gun, bus);
+    t.set({ ...gun, level: 2 }, bus);
+    t.set(loot[1]!, bus);
+    expect(events.map((e) => e.payload)).toMatchObject([
+      { lootId: 9, level: 1, scope: null },
+      { lootId: 9, level: 2, scope: null },
+      { lootId: 2, level: null, scope: null },
     ]);
   });
 
@@ -165,7 +179,7 @@ describe('interact prompt', () => {
     expect(pickupRefusal(at('helmet_1'), wearing, BALANCE)).toBeNull();
     const full = makeLocal(1, {
       grenades: BALANCE.items.grenade.maxCarry,
-      ammo: { ammo_light: 0, ammo_heavy: 0, ammo_shell: 0, ammo_sniper: BALANCE.items.ammo_sniper.maxCarry },
+      ammo: makeAmmo({ ammo_light: 0, ammo_heavy: 0, ammo_shell: 0, ammo_sniper: BALANCE.items.ammo_sniper.maxCarry }),
       heals: { bandage: BALANCE.items.bandage.maxStack, medkit: 0 },
     });
     expect(pickupRefusal(at('grenade'), full, BALANCE)).toBe('inventoryFull');

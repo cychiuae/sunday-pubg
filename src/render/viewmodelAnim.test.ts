@@ -339,6 +339,8 @@ function frame(vm: ViewmodelView | null, cam: Partial<CameraView> = {}, time = 0
     time, serverTime: 0, phase: 'playing', localId: 1,
     camera: { mode: 'follow', target: { x: 0, y: 1.2, z: 0 }, yaw: 0, pitch: 0, distance: 0, shoulderOffset: 0, fovDeg: 70, firstPerson: true, view: 'firstPerson', subjectId: 1, roll: 0, ...cam },
     players: [], loot: [], highlightLootId: null, zone: null, grenades: [], grenadeArc: null, ads: null, viewmodel: vm, reducedMotion: false,
+    // M2c (gate: required on FrameView)
+    rockets: [], smokes: [], brokenPanes: [], look: 'noon',
   };
 }
 

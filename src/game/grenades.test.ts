@@ -30,6 +30,7 @@ const g = (over: Partial<GrenadeState> = {}): GrenadeState => ({
   vel: { x: 3, y: 0, z: 0 },
   explodesAt: 5_000,
   inWater: false,
+  kind: 'grenade',
   ...over,
 });
 
@@ -112,6 +113,7 @@ describe('grenadeDanger (HUD)', () => {
     vel: { x: 0, y: 0, z: 0 },
     explodesAt: 1_000 + id,
     resting: true,
+    kind: 'grenade',
   });
   const limit = BALANCE.items.grenade.radius + (BALANCE.items.grenade.dangerMargin ?? DEFAULT_DANGER_MARGIN_M);
   const chest = { x: 0, y: 0, z: 0 };
@@ -145,6 +147,7 @@ describe('buildGrenadeArc', () => {
       BALANCE,
     );
     expect(arc.radius).toBe(BALANCE.items.grenade.radius);
+    expect(arc.kind).toBe('grenade');
     expect(arc.points.length).toBeGreaterThan(2);
     // Thrown forward (-Z) from the eye.
     expect(arc.points[arc.points.length - 1]!.z).toBeLessThan(arc.points[0]!.z);
@@ -157,6 +160,21 @@ describe('buildGrenadeArc', () => {
     );
     expect(short.endReason).toBe('fuse');
     expect(short.points.length).toBeLessThan(arc.points.length);
+  });
+
+  it('M2c (REVIEW-M2c SF3): a smoke throw carries kind smoke, the cloud radius and the smoke fuse', () => {
+    const ctx = createMovementContext(TEST_MAP, BALANCE);
+    const smoke = BALANCE.items.smoke;
+    const arc = buildGrenadeArc(
+      { eye: { x: 0, y: 10, z: 0 }, yaw: 0, pitch: 0.5, proneSettled: false, fuseRemainingMs: smoke.fuseMs, maxSeconds: 5, kind: 'smoke' },
+      ctx,
+      BALANCE,
+    );
+    expect(arc.kind).toBe('smoke');
+    expect(arc.radius).toBe(smoke.cloud.radius);
+    // The preview stops on the smoke fuse (or earlier at rest), never past it.
+    expect(arc.points.length - 1).toBeLessThanOrEqual(Math.ceil(smoke.fuseMs / (1000 / BALANCE.net.simHz)));
+    expect(['fuse', 'rest']).toContain(arc.endReason);
   });
 });
 

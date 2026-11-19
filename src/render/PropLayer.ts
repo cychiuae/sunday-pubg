@@ -1,14 +1,73 @@
 /**
- * Map props, instanced: one InstancedMesh per (kind x part), i.e. body + outline hull (+ flame for torches).
- * ~350 placements of 10 kinds => ~21 draw calls in the colour pass, plus shadow casters. CPU frustum/distance culling
- * per instance keeps vertex work proportional to what is on screen. Owner: graphics-engineer.
+ * Island map props. Owner: graphics-engineer.
+ *
+ * M2c (art M2c §11.1): merged per ~56 m chunk at match start (the office's `mergeBuilder` path): one body mesh (the
+ * shared vertex-colour toon material) and one hull mesh (per-vertex outline width, so every outline class shares the
+ * call) per chunk, whatever the number of kinds and variants. Hulls hide per chunk past the outline distance; chunks
+ * past the prop draw distance hide; three.js frustum-culls each chunk in the colour and shadow passes. Tiki flames
+ * stay instanced (vertex-shader flicker, 1 call). Per-match layouts change the props every match, so this is rebuilt
+ * with the scene. Decor (client-only, `MatchLayout.decor`) and `variant` geometry join the same buckets in Phase 2.
+ *
+ * `merge: false` keeps the M1 path (one InstancedMesh per kind x part, CPU culled per instance) for measurements.
  */
 import * as THREE from 'three';
 import { BOAT_MIN_BASE_Y, boundingRadius, collidersForProp, DOCK_DECK_HEIGHT } from '../shared/sim/colliders';
-import type { IslandMapData, PropKind, PropPlacement } from '../shared/types';
+import type { DecorPlacement, IslandMapData, PropKind, PropPlacement } from '../shared/types';
 import type { CameraCollider } from './cameraRig';
-import { extractParts, StaticInstanceSet } from './instancing';
-import { createProp, TIKI_FLAME_OFFSET } from './procedural';
+import { extractParts, StaticInstanceSet, type TemplatePart } from './instancing';
+import { createMergedHullMaterial, MergeBucket, outlineWidthOf } from './mergeBuilder';
+import { createDecor, createProp, TIKI_FLAME_OFFSET, vertexColorToon } from './procedural';
+
+/** Chunk edge (m): about 4 x 4 chunks over the island (art M2c §11.1). */
+export const ISLAND_CHUNK = 56;
+
+export interface PropLayerOptions {
+  /** M2c look: tiki flame brightness (unlit colour multiplier, 1 = shipped). */
+  flameScale?: number;
+  /** Merge static props per chunk (default true). false = the M1 instanced path. */
+  merge?: boolean;
+  chunkSize?: number;
+  /** M2c: client-only decor of this match's layout (MatchLayout.decor), merged into the chunks (y 0 = on the ground). */
+  decor?: readonly DecorPlacement[];
+}
+
+interface PropChunk {
+  body: THREE.Mesh | null;
+  hull: THREE.Mesh | null;
+  box: THREE.Box3;
+}
+
+/** Chunk grid over the placements' bounds: `nx` x `nz` cells of `size` from (minX, minZ). Pure; exported for tests. */
+export interface ChunkGrid {
+  minX: number;
+  minZ: number;
+  size: number;
+  nx: number;
+  nz: number;
+}
+export function chunkGridFor(points: readonly { x: number; z: number }[], size: number): ChunkGrid {
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const p of points) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.z < minZ) minZ = p.z;
+    if (p.z > maxZ) maxZ = p.z;
+  }
+  if (!(minX <= maxX)) return { minX: 0, minZ: 0, size, nx: 1, nz: 1 };
+  const nx = Math.max(1, Math.ceil((maxX - minX) / size));
+  const nz = Math.max(1, Math.ceil((maxZ - minZ) / size));
+  // Centre the grid on the placements so the edge cells are not slivers.
+  return { minX: (minX + maxX) / 2 - (nx * size) / 2, minZ: (minZ + maxZ) / 2 - (nz * size) / 2, size, nx, nz };
+}
+/** Chunk index of a point (clamped to the grid). Pure; exported for tests. */
+export function chunkIndexOf(x: number, z: number, g: ChunkGrid): number {
+  const i = Math.min(g.nx - 1, Math.max(0, Math.floor((x - g.minX) / g.size)));
+  const j = Math.min(g.nz - 1, Math.max(0, Math.floor((z - g.minZ) / g.size)));
+  return j * g.nx + i;
+}
+
+/** Dev / measurement knob: the default for `PropLayerOptions.merge` (harness before/after runs). */
+export const PROP_LAYER_DEFAULTS = { merge: true, chunkSize: ISLAND_CHUNK };
 
 /**
  * Camera blockers come from the sim's collider shapes (src/shared/sim/colliders.ts, read-only import allowed by ADR
@@ -68,35 +127,135 @@ export class PropLayer {
   readonly group = new THREE.Group();
   readonly colliders: CameraCollider[] = [];
   private readonly sets: StaticInstanceSet[] = [];
+  private readonly chunks: PropChunk[] = [];
+  private readonly ownedGeos: THREE.BufferGeometry[] = [];
+  private hullMat: THREE.MeshBasicMaterial | null = null;
   private flameMaterial: THREE.MeshBasicMaterial | null = null;
   private readonly flameTime = { value: 0 };
+  private readonly flameScale: number;
+  readonly merged: boolean;
+  /** Build stats (dev hook / RENDERING.md). */
+  readonly stats = { chunks: 0, bodyTris: 0, hullTris: 0, buildMs: 0, placements: 0, decor: 0, decorTris: 0 };
 
-  constructor(map: IslandMapData, heightAt: (x: number, z: number) => number) {
+  constructor(map: IslandMapData, heightAt: (x: number, z: number) => number, opts: PropLayerOptions = {}) {
+    const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
     this.group.name = 'props';
-    const byKind = new Map<PropKind, PropPlacement[]>();
+    this.flameScale = opts.flameScale ?? 1;
+    this.merged = opts.merge ?? PROP_LAYER_DEFAULTS.merge;
+    // M2c: one template per (kind, variant): variants change geometry or colours, never the collider.
+    const byKind = new Map<string, { kind: PropKind; variant: number; list: PropPlacement[] }>();
     for (const p of map.props) {
-      let list = byKind.get(p.kind);
-      if (!list) byKind.set(p.kind, (list = []));
-      list.push(p);
+      const variant = p.variant ?? 0;
+      const key = `${p.kind}|${variant}`;
+      let g = byKind.get(key);
+      if (!g) byKind.set(key, (g = { kind: p.kind, variant, list: [] }));
+      g.list.push(p);
     }
-    for (const [kind, list] of byKind) {
-      const template = createProp(kind);
+    const grid = chunkGridFor(map.props, opts.chunkSize ?? PROP_LAYER_DEFAULTS.chunkSize);
+    const cells = grid.nx * grid.nz;
+    const bodies = this.merged ? Array.from({ length: cells }, () => new MergeBucket(false)) : [];
+    const hulls = this.merged ? Array.from({ length: cells }, () => new MergeBucket(true)) : [];
+
+    for (const { kind, variant, list } of byKind.values()) {
+      const template = createProp(kind, variant);
       const parts = extractParts(template).map((part) =>
         part.name === 'flame' ? { ...part, material: this.getFlameMaterial(part.material) } : part,
       );
       const body = parts.find((p) => p.name === 'body') ?? parts[0];
       if (!body) continue;
-      if (!body.geometry.boundingSphere) body.geometry.computeBoundingSphere();
-      const bounds = body.geometry.boundingSphere!.clone();
       const matrices = list.map((p) => propMatrix(p, propBaseY(kind, heightAt(p.x, p.z), p.scale)));
-      const set = new StaticInstanceSet(parts, matrices, bounds, `prop:${kind}`);
-      this.sets.push(set);
-      for (const m of set.meshes) this.group.add(m);
-
+      this.stats.placements += list.length;
       list.forEach((p, i) => {
         // The sim's prop index is not needed for the camera, so pass 0.
         for (const c of cameraCollidersFor(p, 0, map, matrices[i].elements[13])) this.colliders.push(c);
       });
+
+      // Instanced parts: everything on the M1 path; only the flickering flames when merging.
+      const instParts = this.merged ? parts.filter((p) => p.name === 'flame') : parts;
+      if (instParts.length > 0) {
+        const ref = instParts.find((p) => p.name === 'body') ?? instParts[0];
+        if (!ref.geometry.boundingSphere) ref.geometry.computeBoundingSphere();
+        const set = new StaticInstanceSet(instParts, matrices, ref.geometry.boundingSphere!.clone(), variant ? `prop:${kind}:v${variant}` : `prop:${kind}`);
+        this.sets.push(set);
+        for (const m of set.meshes) this.group.add(m);
+      }
+      if (!this.merged) continue;
+      const mergeParts = parts.filter((p) => p.name !== 'flame');
+      list.forEach((p, i) => this.addToChunk(bodies, hulls, chunkIndexOf(p.x, p.z, grid), mergeParts, matrices[i]));
+    }
+
+    // M2c decor (client-only, flat or soft): merged into the same chunk bodies (no hull), on the terrain.
+    if (this.merged && opts.decor && opts.decor.length > 0) {
+      const templates = new Map<string, TemplatePart[] | null>();
+      for (const d of opts.decor) {
+        const key = `${d.kind}|${d.variant ?? 0}`;
+        let parts = templates.get(key);
+        if (parts === undefined) {
+          try {
+            parts = extractParts(createDecor(d.kind, d.variant ?? 0));
+          } catch {
+            parts = null; // unknown or office-only kind on the island: skipped (the level test covers the table)
+          }
+          templates.set(key, parts);
+        }
+        if (!parts) continue;
+        const y = d.y !== 0 ? d.y : heightAt(d.x, d.z);
+        const m = propMatrix({ x: d.x, z: d.z, rotY: d.rotY, scale: d.scale } as PropPlacement, y);
+        const k = chunkIndexOf(d.x, d.z, grid);
+        for (const part of parts) this.stats.decorTris += part.geometry.getAttribute('position').count / 3;
+        this.addToChunk(bodies, hulls, k, parts, m);
+        this.stats.decor++;
+      }
+    }
+
+    if (this.merged) {
+      this.hullMat = createMergedHullMaterial('props:hull');
+      const bodyMat = vertexColorToon(); // shared procedural material (not ours to dispose)
+      for (let k = 0; k < bodies.length; k++) {
+        const bg = bodies[k].build(`props:chunk${k}:body`);
+        const hg = hulls[k].build(`props:chunk${k}:hull`);
+        if (!bg && !hg) continue;
+        this.stats.bodyTris += bodies[k].triangles;
+        this.stats.hullTris += hulls[k].triangles;
+        const box = new THREE.Box3();
+        let bodyMesh: THREE.Mesh | null = null, hullMesh: THREE.Mesh | null = null;
+        if (bg) {
+          box.union(bg.boundingBox!);
+          this.ownedGeos.push(bg);
+          bodyMesh = new THREE.Mesh(bg, bodyMat);
+          bodyMesh.name = bg.name;
+          bodyMesh.castShadow = true;
+          bodyMesh.receiveShadow = true;
+        }
+        if (hg) {
+          box.union(hg.boundingBox!);
+          this.ownedGeos.push(hg);
+          hullMesh = new THREE.Mesh(hg, this.hullMat);
+          hullMesh.name = hg.name;
+          hullMesh.raycast = () => {};
+        }
+        for (const m of [bodyMesh, hullMesh]) {
+          if (!m) continue;
+          m.matrixAutoUpdate = false;
+          m.updateMatrix();
+          this.group.add(m);
+        }
+        this.chunks.push({ body: bodyMesh, hull: hullMesh, box });
+      }
+      this.stats.chunks = this.chunks.length;
+    }
+    this.stats.buildMs = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0;
+  }
+
+  /**
+   * Bake one placement's parts into its chunk. Phase 2 seam: `variant` geometry and decor placements
+   * (MatchLayout.decor, through the graphics-designer's decor table) call this with their own parts.
+   */
+  private addToChunk(bodies: MergeBucket[], hulls: MergeBucket[], k: number, parts: readonly TemplatePart[], world: THREE.Matrix4): void {
+    for (const part of parts) {
+      const m = new THREE.Matrix4().multiplyMatrices(world, part.matrix);
+      if (part.isOutline) hulls[k].add(part.geometry, m, outlineWidthOf(part.material));
+      else bodies[k].add(part.geometry, m);
     }
   }
 
@@ -105,6 +264,8 @@ export class PropLayer {
     if (this.flameMaterial) return this.flameMaterial;
     const mat = (src as THREE.MeshBasicMaterial).clone();
     mat.name = 'tikiFlame:flicker';
+    // M2c look: brighter flames at golden hour / overcast (unlit colour multiplier; 1 keeps the shipped white).
+    if (this.flameScale !== 1) mat.color.setScalar(this.flameScale);
     const baseY = (TIKI_FLAME_OFFSET[1] - 0.18).toFixed(3);
     const time = this.flameTime;
     mat.onBeforeCompile = (shader) => {
@@ -134,15 +295,29 @@ export class PropLayer {
     return this.sets.reduce((n, s) => n + s.instanceCount, 0);
   }
 
+  get chunkCount(): number {
+    return this.chunks.length;
+  }
+
   update(frustum: THREE.Frustum, cam: THREE.Vector3, time: number, drawDistance: number, outlineDistance: number): void {
     this.flameTime.value = time;
     const farSq = drawDistance * drawDistance;
     const nearSq = outlineDistance * outlineDistance;
     for (const s of this.sets) s.update(frustum, cam, 8, farSq, nearSq);
+    for (let i = 0; i < this.chunks.length; i++) {
+      const c = this.chunks[i];
+      const d2 = c.box.distanceToPoint(cam) ** 2;
+      const shown = d2 <= farSq;
+      if (c.body) c.body.visible = shown;
+      if (c.hull) c.hull.visible = shown && d2 < nearSq;
+    }
   }
 
   dispose(): void {
     for (const s of this.sets) s.dispose();
+    for (const g of this.ownedGeos) g.dispose();
+    this.ownedGeos.length = 0;
+    this.hullMat?.dispose();
     this.flameMaterial?.dispose();
     this.group.clear();
   }

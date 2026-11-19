@@ -2,31 +2,61 @@
  * Wire protocol (JSON text frames, one message per frame). Owner: network-engineer.
  * Spec: docs/tech/ARCHITECTURE.md §5, docs/tech/NETCODE.md.
  *
- * Only imports types from src/shared (dependency rule §3). Semantic clamping that needs engine constants
- * (pitch limits, SIM_DT, name length, protocol version) happens in server/validate.ts; this module guarantees
- * SHAPE: right types, finite numbers, known enums, no extra fields carried through.
+ * Imports only src/shared/*.ts (types, id lists, constants) and its sibling rows.ts (dependency rule §3). Semantic
+ * clamping that needs engine constants (pitch limits, SIM_DT, name length) happens in server/validate.ts; this module
+ * guarantees SHAPE: right types, finite numbers, known enums, no extra fields carried through.
  *
  * `decode*` never throws: anything malformed returns null.
  */
+import { PROTOCOL_VERSION } from '../constants';
 import type { RoomSettingsInput, ServerHello } from '../contracts';
+import {
+  expandRows,
+  grenadeToRow,
+  playerToRow,
+  rocketToRow,
+  rowToGrenade,
+  rowToPlayer,
+  rowToRocket,
+  rowToSmoke,
+  smokeToRow,
+} from './rows';
+import {
+  AMMO_IDS,
+  isItemLevel,
+  isLookId,
+  isScopeId,
+  type M2cActionFailReason,
+  type M2cAmmoId,
+  type M2cArmorTier,
+  type M2cDeathCause,
+  type M2cFailedAction,
+  type M2cGunId,
+  type M2cHeldId,
+  type M2cItemId,
+  type M2cSightType,
+  type M2cSimEvent,
+  type M2cThrowableId,
+  type M2cWeaponId,
+  type MatchLayoutRef,
+  type MeleeId,
+  type LocalM2cFields,
+  type PlayerM2cFields,
+  type RocketContactSurface,
+  type RocketState,
+  type ScopeId,
+  type SmokeCloudState,
+} from '../types';
 import type {
-  ActionFailReason,
-  AmmoId,
-  ArmorTier,
-  DeathCause,
   DropMovementFields,
   DropPhase,
   DropRoute,
   DropSimEvent,
-  FailedAction,
   GlassSurface,
   GrenadeContactSurface,
   GrenadeState,
-  GunId,
   HealId,
-  HeldId,
   ImpactSurface,
-  ItemId,
   LocalDropFields,
   LocalPlayerState,
   LootId,
@@ -55,7 +85,6 @@ import type {
   SlotIndex,
   Stance,
   StanceRequest,
-  WeaponId,
   WelcomeInfo,
   WorldSnapshot,
   ZoneState,
@@ -140,14 +169,39 @@ export interface LootDelta { from: number; add: LootState[]; remove: LootId[]; q
  * - in a delta snapshot, `match.route` is omitted while it equals the route of the base snapshot (it is fixed for a
  *   World), and the delta decoder carries it forward.
  */
-export type WireMatch = Omit<MatchState, 'route'> & { route?: DropRoute | null };
-export type WireSnapshot = Omit<WorldSnapshot, 'loot' | 'players' | 'match'> & {
+/**
+ * M2c (ADR 0007 §9):
+ * - `rockets`, `smokes` and `brokenPanes` are omitted from a delta snapshot while equal to the base (the `route` rule);
+ *   a change sends the whole list (or the record delta below);
+ * - `local` is omitted from a delta snapshot when it is the same player as the base's; `localPatch` then carries the
+ *   changed fields (absent = unchanged);
+ * - a changed `rockets` / `smokes` list rides as `rocketsDelta` / `smokesDelta` ({ add, remove } by id) when that is
+ *   smaller than the whole list (REVIEW-M2c SF4);
+ * - for CAP_ROWS sessions, `encodeQuantized` writes complete players (full format), grenades, rockets and smokes as
+ *   rows (protocol/rows.ts); `decodeServerMessage` turns them back into objects before the shape check, so a decoded
+ *   WireSnapshot always holds objects.
+ */
+export type WireSnapshot = Omit<WorldSnapshot, 'loot' | 'players' | 'match' | 'rockets' | 'smokes' | 'brokenPanes' | 'local'> & {
   match: WireMatch;
+  /** Absent only in a delta snapshot: the base's local plus `localPatch` (protocol/delta.ts). */
+  local?: LocalPlayerState | null;
+  /** M2c: the changed top-level fields of `local` against the base (nested objects whole). */
+  localPatch?: Partial<LocalPlayerState>;
   base?: number;
   players: (PlayerState | PlayerPatch)[];
   loot?: LootState[];
   lootDelta?: LootDelta;
+  rockets?: RocketState[];
+  smokes?: SmokeCloudState[];
+  brokenPanes?: number[];
+  /** Delta snapshots only, instead of `rockets` when smaller: records added (or replaced) and ids removed. */
+  rocketsDelta?: RecordDelta<RocketState>;
+  /** Delta snapshots only, instead of `smokes` when smaller (a forced earlier fade replaces the record). */
+  smokesDelta?: RecordDelta<SmokeCloudState>;
 };
+/** REVIEW-M2c SF4: change of an id-keyed record list against the base; the result is sorted by id. */
+export interface RecordDelta<T extends { id: number }> { add: T[]; remove: number[] }
+export type WireMatch = Omit<MatchState, 'route'> & { route?: DropRoute | null };
 export type ErrorCode = 'bad_version' | 'bad_name' | 'full' | 'bad_message';
 export const ERROR_CODES: readonly ErrorCode[] = ['bad_version', 'bad_name', 'full', 'bad_message'];
 
@@ -227,17 +281,26 @@ const quantize = (key: string, v: unknown): unknown => {
   return v;
 };
 
+export interface EncodeOptions {
+  /**
+   * M2c (ADR 0007 §9): write full-format entity lists as rows (protocol/rows.ts). Default true; the server passes the
+   * session's CAP_ROWS flag, so clients that did not advertise it get the object format.
+   */
+  rows?: boolean;
+}
+
 /**
  * Server encoder: like `encode` but rounds non-integer numbers to WIRE_DECIMALS (about 40% smaller snapshots) and
  * packs every `anim` object into its bitmask (M2a). The rounding error is far below anything visible, and
  * reconciliation absorbs it (the server keeps full precision). Client inputs stay exact (`encode`) so prediction
- * and the server see the same aim. `decodeServerMessage` accepts `anim` in either form.
+ * and the server see the same aim. `decodeServerMessage` accepts `anim` in either form, and rows or objects.
  */
-export function encodeQuantized(msg: ServerMessage): string {
+export function encodeQuantized(msg: ServerMessage, opts: EncodeOptions = {}): string {
   if (msg.t === 'snapshot') {
     const snap = msg.snap;
+    const local = snap.local === null || snap.local === undefined ? snap.local : stripLocalDropDefaults(snap.local);
+    if (opts.rows !== false) return JSON.stringify({ ...msg, snap: toRows(snap, local) }, quantize);
     const stripPlayers = snap.base === undefined && snap.players.some(hasDropDefaults);
-    const local = snap.local === null ? null : stripLocalDropDefaults(snap.local);
     if (stripPlayers || local !== snap.local) {
       msg = {
         ...msg,
@@ -246,6 +309,21 @@ export function encodeQuantized(msg: ServerMessage): string {
     }
   }
   return JSON.stringify(msg, quantize);
+}
+
+/** Row form of a wire snapshot (encoder side; values are quantized by the JSON replacer afterwards). */
+function toRows(snap: WireSnapshot, local: LocalPlayerState | null | undefined): Obj {
+  const out: Obj = { ...snap, grenades: snap.grenades.map(grenadeToRow) };
+  // Delta patches stay keyed objects; only a snapshot without `base` holds complete players only.
+  if (snap.base === undefined) {
+    out.players = snap.players.map((p) => playerToRow(p as PlayerState, isAnimObject(p.anim) ? packAnim(p.anim) : (p.anim as unknown as number)));
+  }
+  if (snap.rockets !== undefined) out.rockets = snap.rockets.map(rocketToRow);
+  if (snap.smokes !== undefined) out.smokes = snap.smokes.map(smokeToRow);
+  if (snap.rocketsDelta !== undefined) out.rocketsDelta = { ...snap.rocketsDelta, add: snap.rocketsDelta.add.map(rocketToRow) };
+  if (snap.smokesDelta !== undefined) out.smokesDelta = { ...snap.smokesDelta, add: snap.smokesDelta.add.map(smokeToRow) };
+  if (local !== undefined) out.local = local;
+  return out;
 }
 
 /**
@@ -341,25 +419,39 @@ const keysOf = <T extends string>(o: Record<T, 1>): readonly T[] => Object.keys(
 
 // Enum lists. Every one is built with `keysOf(... satisfies Record<Union, 1>)`, so a value added to a shared union is
 // a compile error here until the decoder learns it.
+// M2c (ADR 0007 §10): the lists are keyed by the `M2c*` unions, which already hold the new values and equal the live
+// unions after the C-gate, so these tables compile before and after it. The new values decode from now on (the World
+// starts producing them in the M2c feature build); the M2c FIELDS are staged by M2C_FIELDS_REQUIRED below.
 const WEAPONS = keysOf({
   fists: 1, pistol: 1, smg: 1, shotgun: 1, rifle: 1, lmg: 1, dmr: 1, sniper: 1,
-} satisfies Record<WeaponId, 1>);
-const GUNS = WEAPONS.filter((w): w is GunId => w !== 'fists');
-/** M2a: what a player can hold (`PlayerState.weapon`, `weaponSwitch`, `kill.weapon`). */
-const HELD = keysOf({
-  fists: 1, pistol: 1, smg: 1, shotgun: 1, rifle: 1, lmg: 1, dmr: 1, sniper: 1, grenade: 1,
-} satisfies Record<HeldId, 1>);
-const AMMOS = keysOf({ ammo_light: 1, ammo_heavy: 1, ammo_shell: 1, ammo_sniper: 1 } satisfies Record<AmmoId, 1>);
+  knife: 1, machete: 1, paddle: 1, dbshotgun: 1, revolver: 1, rpg: 1,
+} satisfies Record<M2cWeaponId, 1>);
+const MELEE = keysOf({ knife: 1, machete: 1, paddle: 1 } satisfies Record<MeleeId, 1>);
+const GUNS = WEAPONS.filter((w): w is M2cGunId => w !== 'fists' && !(MELEE as readonly string[]).includes(w));
+const THROWABLES = keysOf({ grenade: 1, smoke: 1 } satisfies Record<M2cThrowableId, 1>);
+/** M2a: what a player can hold (`PlayerState.weapon`, `weaponSwitch`, `kill.weapon`). M2c: + melee, new guns, smoke. */
+const HELD: readonly M2cHeldId[] = [...WEAPONS, ...THROWABLES];
+const AMMOS = keysOf({
+  ammo_light: 1, ammo_heavy: 1, ammo_shell: 1, ammo_sniper: 1, ammo_rocket: 1,
+} satisfies Record<M2cAmmoId, 1>);
 const HEALS = keysOf({ bandage: 1, medkit: 1 } satisfies Record<HealId, 1>);
+const SCOPES = keysOf({ scope_red_dot: 1, scope_2x: 1, scope_4x: 1, scope_8x: 1 } satisfies Record<ScopeId, 1>);
 const ITEMS = keysOf({
-  pistol: 1, smg: 1, shotgun: 1, rifle: 1, lmg: 1, dmr: 1, sniper: 1,
-  ammo_light: 1, ammo_heavy: 1, ammo_shell: 1, ammo_sniper: 1,
+  pistol: 1, smg: 1, shotgun: 1, rifle: 1, lmg: 1, dmr: 1, sniper: 1, dbshotgun: 1, revolver: 1, rpg: 1,
+  knife: 1, machete: 1, paddle: 1,
+  ammo_light: 1, ammo_heavy: 1, ammo_shell: 1, ammo_sniper: 1, ammo_rocket: 1,
   bandage: 1, medkit: 1,
-  vest_1: 1, vest_2: 1, vest_3: 1, helmet_1: 1, helmet_2: 1, helmet_3: 1,
-  grenade: 1,
-} satisfies Record<ItemId, 1>);
+  vest_1: 1, vest_2: 1, vest_3: 1, vest_4: 1, helmet_1: 1, helmet_2: 1, helmet_3: 1, helmet_4: 1,
+  grenade: 1, smoke: 1,
+  scope_red_dot: 1, scope_2x: 1, scope_4x: 1, scope_8x: 1,
+} satisfies Record<M2cItemId, 1>);
+const SIGHTS = keysOf({
+  none: 1, iron: 1, red_dot: 1, scope_2x: 1, scope_4x: 1, scope_8x: 1,
+} satisfies Record<M2cSightType, 1>);
 const PHASES = keysOf({ lobby: 1, countdown: 1, playing: 1, results: 1 } satisfies Record<MatchPhase, 1>);
-const CAUSES = keysOf({ weapon: 1, zone: 1, fall: 1, explosion: 1 } satisfies Record<DeathCause, 1>);
+const CAUSES = keysOf({
+  weapon: 1, zone: 1, fall: 1, explosion: 1, melee: 1, rocket: 1,
+} satisfies Record<M2cDeathCause, 1>);
 /**
  * M2b: 'glass' (ADR 0005 §2) is listed apart so these tables compile both before the C-gate (when the shared unions do
  * not have it yet) and after it (when they do); the Exclude keeps every other value exhaustive.
@@ -388,14 +480,23 @@ const STANCE_REQUESTS = keysOf({ crouch: 1, prone: 1 } satisfies Record<StanceRe
 const SLOTS = [0, 1, 2, 3] as const satisfies readonly SlotIndex[];
 const TIERS = keysOf({ common: 1, rare: 1, epic: 1 } satisfies Record<LootTier, 1>);
 const FAILED_ACTIONS = keysOf(
-  { heal: 1, pickup: 1, reload: 1, fire: 1, swap: 1, stance: 1 } satisfies Record<FailedAction, 1>,
+  { heal: 1, pickup: 1, reload: 1, fire: 1, swap: 1, stance: 1, scope: 1 } satisfies Record<M2cFailedAction, 1>,
 );
 const FAIL_REASONS = keysOf(
   {
     noHeals: 1, fullHp: 1, inventoryFull: 1, betterArmor: 1, noAmmo: 1, noGrenades: 1, tooDeep: 1, noHeadroom: 1,
-  } satisfies Record<ActionFailReason, 1>,
+    scopePouchFull: 1, scopeCantFit: 1, scopeNoneFits: 1,
+  } satisfies Record<M2cActionFailReason, 1>,
 );
-const ARMOR_TIERS = [1, 2, 3] as const satisfies readonly ArmorTier[];
+/** M2c: armor tier = item level 1-4 (vest_4 / helmet_4). */
+const ARMOR_TIERS = [1, 2, 3, 4] as const satisfies readonly M2cArmorTier[];
+/** M2c `rocketDud.surface`. 'glass' is listed apart like SURFACES (it joins the live unions at the gate). */
+const ROCKET_SURFACES: readonly string[] = [
+  ...keysOf({
+    player: 1, terrain: 1, prop: 1, water: 1, edge: 1, range: 1,
+  } satisfies Record<Exclude<RocketContactSurface, GlassSurface>, 1>),
+  ...GLASS,
+];
 
 const isVec3 = (v: unknown): boolean => isObj(v) && isNum(v.x) && isNum(v.y) && isNum(v.z);
 const isVec2 = (v: unknown): boolean => isObj(v) && isNum(v.x) && isNum(v.z);
@@ -409,6 +510,22 @@ const isVec2 = (v: unknown): boolean => isObj(v) && isNum(v.x) && isNum(v.z);
 export const M2B_FIELDS_REQUIRED: boolean = true;
 const gated = (pred: (x: unknown) => boolean) => (v: unknown): boolean => (M2B_FIELDS_REQUIRED ? pred(v) : opt(v, pred));
 const isDropPhaseOrNull = (v: unknown): boolean => v === null || oneOf(v, DROP_PHASES);
+
+/**
+ * M2c C-GATE SWITCH (ADR 0007 §10, ARCHITECTURE §16). While false, the M2c fields that become required at the gate
+ * (`PlayerState.weaponLevel/sight`, the LocalPlayerState M2c block and `ammo.ammo_rocket`, `GrenadeState.kind`,
+ * `WorldSnapshot.rockets/smokes/brokenPanes` in full snapshots, `welcome.layout`, `kind` on the grenade events and
+ * `explosion.source`) are checked when present and may be absent, so an M2b-shaped World still decodes. It is derived
+ * from PROTOCOL_VERSION, so the gate commit's `PROTOCOL_VERSION = 4` flips it with nothing else to remember.
+ * Fields that stay optional for good (slot/loot level and scope, cycleScope, kill.direct, explosion.direct/airburst,
+ * reloadStart.rounds, and the event fields the sim fills only in the feature build: damage.weapon/weaponLevel,
+ * kill.weaponLevel, pickup.level/scope, weaponSwitch.level) use `opt` instead.
+ */
+export const M2C_FIELDS_REQUIRED: boolean = PROTOCOL_VERSION >= 4;
+const gatedM2c = (pred: (x: unknown) => boolean) => (v: unknown): boolean => (M2C_FIELDS_REQUIRED ? pred(v) : opt(v, pred));
+const isLevelOrNull = (v: unknown): boolean => v === null || isItemLevel(v);
+const isScopeOrNull = (v: unknown): boolean => v === null || isScopeId(v);
+const isUint32 = (v: unknown): v is number => isInt(v) && v >= 0 && v <= 0xffffffff;
 
 /** M2b `MatchState.route` (drop.md): finite numbers and startsAt <= noJumpUntil <= ejectAt <= endsAt. */
 export const isDropRoute = (v: unknown): v is DropRoute =>
@@ -427,8 +544,8 @@ export const isDropRoute = (v: unknown): v is DropRoute =>
   v.noJumpUntil <= v.ejectAt &&
   v.ejectAt <= v.endsAt;
 const isSlot = (v: unknown): v is SlotIndex => (SLOTS as readonly unknown[]).includes(v);
-const isArmorTier = (v: unknown): v is ArmorTier => (ARMOR_TIERS as readonly unknown[]).includes(v);
-/** 0 = none, else 1..3 (`PlayerState.vestTier` / `helmetTier`). */
+const isArmorTier = (v: unknown): v is M2cArmorTier => (ARMOR_TIERS as readonly unknown[]).includes(v);
+/** 0 = none, else 1..4 (`PlayerState.vestTier` / `helmetTier`; M2c adds tier 4). */
 const isTierOrNone = (v: unknown): boolean => v === 0 || isArmorTier(v);
 const isStance = (v: unknown): v is Stance => oneOf(v, STANCE_LIST);
 const isNonNeg = (v: unknown): boolean => isNum(v) && v >= 0;
@@ -466,6 +583,8 @@ export function decodeStanceToggle(v: unknown): StanceRequest | null | undefined
  * Shape-checks a PlayerInput and returns a fresh object holding only known fields.
  * M2a (ADR 0004 §8): `ads` is coerced to a boolean (only `true` counts; absent or anything else = false) because a
  * wrong held bit is harmless; a bad `stanceToggle` or `selectSlot` (outside {-1, 0, 1, 2, 3}) rejects the frame.
+ * M2c (ADR 0007 §5): the `cycleScope` edge (T) is coerced the same way: only `true` counts, absent = false. It is
+ * always present in the result, so the World never sees undefined.
  */
 export function decodePlayerInput(v: unknown): PlayerInput | null {
   if (!isObj(v)) return null;
@@ -492,6 +611,7 @@ export function decodePlayerInput(v: unknown): PlayerInput | null {
     useHeal: v.useHeal === true,
     selectSlot: sel as SlotIndex | -1,
     stanceToggle,
+    cycleScope: v.cycleScope === true,
   };
 }
 
@@ -651,6 +771,20 @@ const MATCH_MAP_CHECKS: Record<keyof MatchMapFields, (v: unknown) => boolean> = 
 };
 const MATCH_MAP_KEYS = Object.keys(MATCH_MAP_CHECKS) as (keyof MatchMapFields)[];
 
+/** M2c field blocks (C-gate staged: see M2C_FIELDS_REQUIRED). Spread into the per-type tables below. */
+const PLAYER_M2C_CHECKS: Record<keyof PlayerM2cFields, (v: unknown) => boolean> = {
+  weaponLevel: gatedM2c(isLevelOrNull),
+  sight: gatedM2c((v) => oneOf(v, SIGHTS)),
+};
+const isMeleeSlot = (v: unknown): boolean => v === null || (isObj(v) && oneOf(v.weapon, MELEE) && isItemLevel(v.level));
+const LOCAL_M2C_CHECKS: Record<keyof LocalM2cFields, (v: unknown) => boolean> = {
+  melee: gatedM2c(isMeleeSlot),
+  smokes: gatedM2c((n) => isInt(n) && n >= 0),
+  selectedThrowable: gatedM2c((t) => oneOf(t, THROWABLES)),
+  spareScope: gatedM2c(isScopeOrNull),
+  scopeSwapRemainingMs: gatedM2c(isNonNeg),
+};
+
 /** One check per PlayerState field; keyed by the type so a new field needs a check (compile error otherwise). */
 const PLAYER_FIELDS: Record<keyof PlayerState, (v: unknown) => boolean> = {
   id: isInt,
@@ -672,6 +806,7 @@ const PLAYER_FIELDS: Record<keyof PlayerState, (v: unknown) => boolean> = {
   isBot: isBool,
   kills: isInt,
   ...PLAYER_DROP_CHECKS,
+  ...PLAYER_M2C_CHECKS,
 };
 const PLAYER_KEYS = Object.keys(PLAYER_FIELDS) as (keyof PlayerState)[];
 
@@ -680,7 +815,10 @@ export const isPlayerState = (v: unknown): v is PlayerState => isObj(v) && PLAYE
 export const isPlayerPatch = (v: unknown): v is PlayerPatch =>
   isObj(v) && isInt(v.id) && PLAYER_KEYS.every((k) => v[k] === undefined || PLAYER_FIELDS[k](v[k]));
 
-/** M2a: `durability` (armor pickups only) is a number > 0 when present. */
+/**
+ * M2a: `durability` (armor pickups only) is a number > 0 when present. M2c: `level` (weapons) and `scope` (guns) stay
+ * optional for good (ADR 0007 §10).
+ */
 export const isLoot = (v: unknown): v is LootState =>
   isObj(v) &&
   isInt(v.id) &&
@@ -688,11 +826,27 @@ export const isLoot = (v: unknown): v is LootState =>
   isInt(v.qty) &&
   isVec3(v.pos) &&
   opt(v.tier, (t) => oneOf(t, TIERS)) &&
-  opt(v.durability, isPos);
+  opt(v.durability, isPos) &&
+  opt(v.level, isItemLevel) &&
+  opt(v.scope, isScopeOrNull);
 
-/** M2a (ADR 0004 §3): a live grenade. */
+/** M2a (ADR 0004 §3): a live grenade. M2c: `kind` frag or smoke (C-gate staged; absent = 'grenade' before it). */
 export const isGrenade = (v: unknown): v is GrenadeState =>
-  isObj(v) && isInt(v.id) && isInt(v.ownerId) && isVec3(v.pos) && isVec3(v.vel) && isNum(v.explodesAt) && isBool(v.inWater);
+  isObj(v) && isInt(v.id) && isInt(v.ownerId) && isVec3(v.pos) && isVec3(v.vel) && isNum(v.explodesAt) &&
+  isBool(v.inWater) && gatedM2c((k) => oneOf(k, THROWABLES))(v.kind);
+
+/** M2c (ADR 0007 §4): a rocket's immutable launch record (snapshot `rockets` and the `rocketFired` event). */
+export const isRocket = (v: unknown): v is RocketState =>
+  isObj(v) && isInt(v.id) && isInt(v.ownerId) && isItemLevel(v.level) && isVec3(v.pos) && isVec3(v.vel) && isNum(v.firedAt);
+
+/** M2c (ADR 0007 §6): a smoke cloud record (snapshot `smokes` and the `smokeDeployed` event). fadeAt >= deployedAt. */
+export const isSmokeCloud = (v: unknown): v is SmokeCloudState =>
+  isObj(v) && isInt(v.id) && isInt(v.ownerId) && isVec3(v.pos) && isNum(v.deployedAt) && isNum(v.fadeAt) &&
+  v.fadeAt >= v.deployedAt;
+
+/** M2c (ADR 0007 §7): broken pane ids, non-negative integers in strictly ascending order. */
+const isPaneList = (v: unknown): boolean =>
+  Array.isArray(v) && v.every((id, i) => isNonNegInt(id) && (i === 0 || id > (v[i - 1] as number)));
 
 const isMatch = (v: unknown, routeMayBeOmitted = false): v is MatchState =>
   isObj(v) &&
@@ -720,8 +874,17 @@ const isZone = (v: unknown): v is ZoneState =>
   isNum(v.dps);
 
 const isCountRecord = (v: unknown, keys: readonly string[]): boolean => isObj(v) && keys.every((k) => isNum(v[k]));
-const isWeaponSlot = (v: unknown): boolean => v === null || (isObj(v) && oneOf(v.weapon, GUNS) && isInt(v.mag));
-/** M2a: a worn piece, `null` or `{ tier 1-3, durability > 0 }`. */
+/** A gun slot; M2c `level` and `scope` stay optional for good (absent = L1, built-in sight). */
+const isWeaponSlot = (v: unknown): boolean =>
+  v === null ||
+  (isObj(v) && oneOf(v.weapon, GUNS) && isInt(v.mag) && opt(v.level, isItemLevel) && opt(v.scope, isScopeOrNull));
+/**
+ * `ammo`: the live AmmoId keys are required; the M2c additions (ammo_rocket) are C-gate staged. After the gate
+ * AMMO_IDS includes them, so both rules agree.
+ */
+const isAmmoRecord = (v: unknown): boolean =>
+  isObj(v) && AMMO_IDS.every((k) => isNum(v[k])) && AMMOS.every((k) => gatedM2c(isNum)(v[k]));
+/** M2a: a worn piece, `null` or `{ tier 1-4, durability > 0 }`. */
 const isArmorPiece = (v: unknown): boolean => v === null || (isObj(v) && isArmorTier(v.tier) && isPos(v.durability));
 
 const MOVEMENT_FIELDS: Record<keyof MovementState, (v: unknown) => boolean> = {
@@ -745,7 +908,7 @@ const LOCAL_FIELDS: Record<keyof LocalPlayerState, (v: unknown) => boolean> = {
   movement: isMovement,
   slots: (s) => Array.isArray(s) && s.length === 2 && s.every(isWeaponSlot),
   activeSlot: isSlot,
-  ammo: (a) => isCountRecord(a, AMMOS),
+  ammo: isAmmoRecord,
   heals: (h) => isCountRecord(h, HEALS),
   vest: isArmorPiece,
   helmet: isArmorPiece,
@@ -759,13 +922,29 @@ const LOCAL_FIELDS: Record<keyof LocalPlayerState, (v: unknown) => boolean> = {
   healItem: (h) => h === null || oneOf(h, HEALS),
   swapRemainingMs: isNum,
   ...LOCAL_DROP_CHECKS,
+  ...LOCAL_M2C_CHECKS,
 };
 const LOCAL_KEYS = Object.keys(LOCAL_FIELDS) as (keyof LocalPlayerState)[];
-const isLocal = (v: unknown): boolean => isObj(v) && LOCAL_KEYS.every((k) => LOCAL_FIELDS[k](v[k]));
+export const isLocalPlayerState = (v: unknown): v is LocalPlayerState => isObj(v) && LOCAL_KEYS.every((k) => LOCAL_FIELDS[k](v[k]));
+/** M2c `localPatch`: any subset of valid LocalPlayerState fields (the merged result is checked again). */
+const isLocalPatch = (v: unknown): boolean => isObj(v) && LOCAL_KEYS.every((k) => v[k] === undefined || LOCAL_FIELDS[k](v[k]));
 
 const isQtyPair = (v: unknown): boolean => Array.isArray(v) && v.length === 2 && isInt(v[0]) && isInt(v[1]);
 const isLootDelta = (v: unknown): v is LootDelta =>
   isObj(v) && isInt(v.from) && allOf(v.add, isLoot) && allOf(v.remove, isInt) && allOf(v.qty, isQtyPair);
+
+/**
+ * M2c `rockets` / `smokes` / `brokenPanes`: required in a full snapshot after the C-gate; a delta snapshot omits each
+ * while it equals the base (the decoder carries it forward, like `match.route`).
+ */
+const m2cList = (v: unknown, isDelta: boolean, pred: (x: unknown) => boolean): boolean =>
+  isDelta ? opt(v, pred) : gatedM2c(pred)(v);
+
+/** `rocketsDelta` / `smokesDelta`: delta snapshots only, never together with the whole list. */
+const isRecordDeltaField = (v: Obj, k: string, list: string, pred: (x: unknown) => boolean): boolean =>
+  v[k] === undefined ||
+  (v.base !== undefined && v[list] === undefined && isObj(v[k]) && allOf((v[k] as Obj).add, pred) &&
+    allOf((v[k] as Obj).remove, isInt));
 
 const isSnapshot = (v: unknown): v is WireSnapshot =>
   isObj(v) &&
@@ -780,7 +959,14 @@ const isSnapshot = (v: unknown): v is WireSnapshot =>
   opt(v.lootDelta, isLootDelta) &&
   (v.loot === undefined || v.lootDelta === undefined) &&
   allOf(v.grenades, isGrenade) &&
-  (v.local === null || isLocal(v.local));
+  m2cList(v.rockets, v.base !== undefined, (l) => allOf(l, isRocket)) &&
+  m2cList(v.smokes, v.base !== undefined, (l) => allOf(l, isSmokeCloud)) &&
+  isRecordDeltaField(v, 'rocketsDelta', 'rockets', isRocket) &&
+  isRecordDeltaField(v, 'smokesDelta', 'smokes', isSmokeCloud) &&
+  m2cList(v.brokenPanes, v.base !== undefined, isPaneList) &&
+  (v.local === undefined
+    ? v.base !== undefined && opt(v.localPatch, isLocalPatch)
+    : (v.local === null || isLocalPlayerState(v.local)) && v.localPatch === undefined);
 
 const isImpact = (v: unknown): boolean =>
   isObj(v) && isVec3(v.point) && oneOf(v.surface, SURFACES) && (v.playerId === null || isInt(v.playerId)) && isBool(v.headshot);
@@ -800,37 +986,70 @@ const DROP_EVENT_CHECKS: Record<DropSimEvent['type'], EventCheck> = {
   chuteOpen: (v) => isInt(v.playerId) && isVec3(v.pos) && isBool(v.manual),
 };
 /**
+ * M2c events (ADR 0007 §3-§7; public). Spread into EVENT_CHECKS like DROP_EVENT_CHECKS, so the table compiles before
+ * the C-gate (when SimEventType lacks them) and after it (when it has them).
+ */
+const M2C_EVENT_CHECKS: Record<M2cSimEvent['type'], EventCheck> = {
+  meleeSwing: (v) =>
+    isInt(v.playerId) && oneOf(v.weapon, MELEE) && isItemLevel(v.level) && isVec3(v.pos) && isNum(v.hitAt) &&
+    isNonNeg(v.cycleMs),
+  meleeHit: (v) =>
+    isInt(v.attackerId) && oneOf(v.weapon, MELEE) && isItemLevel(v.level) && isVec3(v.pos) &&
+    oneOf(v.surface, SURFACES) && idOrNull(v.victimId) && isBool(v.headshot) && isBool(v.knockback),
+  rocketFired: (v) => isRocket(v),
+  rocketDud: (v) =>
+    isInt(v.id) && isInt(v.ownerId) && isVec3(v.pos) && oneOf(v.surface, ROCKET_SURFACES) && idOrNull(v.victimId),
+  smokeDeployed: (v) => isSmokeCloud(v),
+  glassBroken: (v) =>
+    isNonNegInt(v.paneId) && isVec3(v.pos) && idOrNull(v.byId) && (v.cause === 'melee' || v.cause === 'rocket'),
+  scopeChanged: (v) =>
+    isInt(v.playerId) && (v.slot === 0 || v.slot === 1) && oneOf(v.gun, GUNS) && isScopeOrNull(v.from) &&
+    isScopeOrNull(v.to) && isBool(v.auto) && isVec3(v.pos),
+};
+/** M2c `kind` on the grenade events (C-gate staged). */
+const throwableKind = gatedM2c((k) => oneOf(k, THROWABLES));
+/**
  * One validator per sim event type. Keyed by `SimEventType` so a new event type in the shared union is a compile
  * error here until it gets a validator; without one, `decodeServerMessage` would filter it out on every client.
- * Optional fields (kill.headshot, M2a damage.grenadeId and pickup.durability) are checked when present.
+ * Optional fields (kill.headshot, M2a damage.grenadeId and pickup.durability, and the M2c additions listed at
+ * M2C_FIELDS_REQUIRED) are checked when present.
  */
 const EVENT_CHECKS: Record<SimEventType, EventCheck> = {
   spawn: (v) => isInt(v.playerId) && isVec3(v.pos),
   shot: (v) => isInt(v.shooterId) && oneOf(v.weapon, WEAPONS) && isVec3(v.origin) && allOf(v.impacts, isImpact),
   damage: (v) =>
     isInt(v.victimId) && idOrNull(v.attackerId) && isNum(v.amount) && isBool(v.headshot) && oneOf(v.cause, CAUSES) &&
-    isVec3(v.sourcePos) && isNum(v.hpAfter) && isArmorHit(v.vest) && isArmorHit(v.helmet) && opt(v.grenadeId, isInt),
+    isVec3(v.sourcePos) && isNum(v.hpAfter) && isArmorHit(v.vest) && isArmorHit(v.helmet) && opt(v.grenadeId, isInt) &&
+    opt(v.weapon, (w) => w === null || oneOf(w, HELD)) && opt(v.weaponLevel, isLevelOrNull),
   kill: (v) =>
     isInt(v.victimId) && idOrNull(v.killerId) && (v.weapon === null || oneOf(v.weapon, HELD)) &&
-    oneOf(v.cause, CAUSES) && isInt(v.placement) && opt(v.headshot, isBool),
+    oneOf(v.cause, CAUSES) && isInt(v.placement) && opt(v.headshot, isBool) && opt(v.weaponLevel, isLevelOrNull) &&
+    opt(v.direct, isBool),
   pickup: (v) =>
     isInt(v.playerId) && isInt(v.lootId) && oneOf(v.item, ITEMS) && isInt(v.qty) && isVec3(v.pos) &&
-    opt(v.durability, isNum),
-  reloadStart: (v) => isInt(v.playerId) && oneOf(v.weapon, GUNS) && isNum(v.durationMs),
+    opt(v.durability, isNum) && opt(v.level, isItemLevel) && opt(v.scope, isScopeOrNull),
+  reloadStart: (v) =>
+    isInt(v.playerId) && oneOf(v.weapon, GUNS) && isNum(v.durationMs) && opt(v.rounds, (n) => isInt(n) && n >= 0),
   reloadEnd: (v) => isInt(v.playerId) && oneOf(v.weapon, GUNS) && isBool(v.completed),
   healStart: (v) => isInt(v.playerId) && oneOf(v.item, HEALS) && isNum(v.durationMs),
   healEnd: (v) => isInt(v.playerId) && oneOf(v.item, HEALS) && isBool(v.completed) && isNum(v.hpAfter),
-  weaponSwitch: (v) => isInt(v.playerId) && oneOf(v.weapon, HELD) && isSlot(v.slot),
+  weaponSwitch: (v) =>
+    isInt(v.playerId) && oneOf(v.weapon, HELD) && isSlot(v.slot) && opt(v.level, isLevelOrNull),
   matchEnded: (v) => idOrNull(v.winnerId) && allOf(v.standings, isStanding),
   stanceChange: (v) =>
     isInt(v.playerId) && isStance(v.from) && isStance(v.to) && isBool(v.forced) && isNonNeg(v.durationMs),
-  grenadeCook: (v) => isInt(v.playerId) && isVec3(v.pos) && isNum(v.explodesAt),
+  grenadeCook: (v) => isInt(v.playerId) && isVec3(v.pos) && isNum(v.explodesAt) && throwableKind(v.kind),
   grenadeThrown: (v) =>
-    isInt(v.id) && isInt(v.ownerId) && isVec3(v.pos) && isVec3(v.vel) && isNum(v.explodesAt) && isBool(v.dropped),
-  grenadeBounce: (v) => isInt(v.id) && isVec3(v.pos) && oneOf(v.surface, GRENADE_SURFACES) && isNonNeg(v.speed),
-  explosion: (v) => isInt(v.id) && isInt(v.ownerId) && isVec3(v.pos) && isNonNeg(v.radius) && isBool(v.inHand),
+    isInt(v.id) && isInt(v.ownerId) && isVec3(v.pos) && isVec3(v.vel) && isNum(v.explodesAt) && isBool(v.dropped) &&
+    throwableKind(v.kind),
+  grenadeBounce: (v) =>
+    isInt(v.id) && isVec3(v.pos) && oneOf(v.surface, GRENADE_SURFACES) && isNonNeg(v.speed) && throwableKind(v.kind),
+  explosion: (v) =>
+    isInt(v.id) && isInt(v.ownerId) && isVec3(v.pos) && isNonNeg(v.radius) && isBool(v.inHand) &&
+    gatedM2c((x) => x === 'grenade' || x === 'rocket')(v.source) && opt(v.direct, isBool) && opt(v.airburst, isBool),
   actionFailed: (v) => isInt(v.playerId) && oneOf(v.action, FAILED_ACTIONS) && oneOf(v.reason, FAIL_REASONS),
   ...DROP_EVENT_CHECKS,
+  ...M2C_EVENT_CHECKS,
 };
 const hasCheck = (t: unknown): t is keyof typeof EVENT_CHECKS => isStr(t) && Object.hasOwn(EVENT_CHECKS, t);
 
@@ -868,11 +1087,32 @@ function filterEvents(raw: unknown[], hooks: DecodeHooks | undefined): SimEvent[
 }
 
 /**
- * Copy of a raw wire snapshot whose integer `anim` fields (encodeQuantized's bitmask) are expanded to objects.
- * Anything else is left as is for the shape check (an out-of-range mask stays a number and fails it).
+ * Copy of a raw wire snapshot whose rows (M2c, protocol/rows.ts) are turned back into objects and whose integer `anim`
+ * fields (encodeQuantized's bitmask) are expanded to objects. Anything else is left as is for the shape check (a row
+ * of the wrong length stays an array, an out-of-range mask stays a number; both fail it).
  */
-function unpackPlayerAnims(snap: unknown): unknown {
-  if (!isObj(snap) || !Array.isArray(snap.players)) return snap;
+function expandWireSnapshot(raw: unknown): unknown {
+  if (!isObj(raw) || !Array.isArray(raw.players)) return raw;
+  let snap: Obj = raw;
+  if (
+    raw.players.some(Array.isArray) || [raw.grenades, raw.rockets, raw.smokes].some((l) => Array.isArray(l) && l.some(Array.isArray))
+  ) {
+    snap = { ...raw, players: expandRows(raw.players, rowToPlayer), grenades: expandRows(raw.grenades, rowToGrenade) };
+    if (raw.rockets !== undefined) snap.rockets = expandRows(raw.rockets, rowToRocket);
+    if (raw.smokes !== undefined) snap.smokes = expandRows(raw.smokes, rowToSmoke);
+  }
+  for (const [k, fromRow] of [['rocketsDelta', rowToRocket], ['smokesDelta', rowToSmoke]] as const) {
+    const d = raw[k];
+    if (isObj(d) && Array.isArray(d.add) && d.add.some(Array.isArray)) {
+      if (snap === raw) snap = { ...raw };
+      snap[k] = { ...d, add: expandRows(d.add, fromRow) };
+    }
+  }
+  return unpackPlayerAnims(snap);
+}
+
+function unpackPlayerAnims(snap: Obj): Obj {
+  if (!Array.isArray(snap.players)) return snap;
   // M2b: full-format players may omit the drop defaults. Before the C-gate only a World that fills the M2b match
   // fields (`mapId`) produces drop fields at all, so only then are they restored.
   const m2b = M2B_FIELDS_REQUIRED || (isObj(snap.match) && snap.match.mapId !== undefined);
@@ -886,8 +1126,13 @@ function unpackPlayerAnims(snap: unknown): unknown {
   return { ...snap, players, local };
 }
 
+/** M2c (ADR 0007 §1.5) `welcome.layout`: uint32 seed, integer format version, uint32 hash, a known look. */
+export const isLayoutRef = (v: unknown): v is MatchLayoutRef =>
+  isObj(v) && isUint32(v.seed) && isInt(v.version) && v.version >= 0 && isUint32(v.hash) && isLookId(v.look);
+
 const isWelcome = (v: unknown): v is WelcomeInfo =>
-  isObj(v) && isInt(v.playerId) && isStr(v.mapId) && isNum(v.serverTime) && isInt(v.matchId) && gated(isStr)(v.roomId);
+  isObj(v) && isInt(v.playerId) && isStr(v.mapId) && isNum(v.serverTime) && isInt(v.matchId) && gated(isStr)(v.roomId) &&
+  gatedM2c(isLayoutRef)(v.layout);
 
 // M2b rooms -------------------------------------------------------------------------------------
 const isStrOrNull = (v: unknown): v is string | null => v === null || isStr(v);
@@ -922,6 +1167,9 @@ const isRoomMember = (v: unknown): v is RoomMember =>
   oneOf(v.status, MEMBER_STATUS) &&
   isNum(v.joinedAt);
 
+/** M2c `RoomState.map.layout` (waiting-room card): seed and look; optional (sent once the layout is locked). */
+const isRoomLayout = (v: unknown): boolean => isObj(v) && isUint32(v.seed) && isLookId(v.look);
+
 const isVoteTally = (v: unknown): boolean => isObj(v) && isStr(v.option) && isNonNegInt(v.count);
 
 export const isRoomState = (v: unknown): v is RoomState =>
@@ -935,7 +1183,7 @@ export const isRoomState = (v: unknown): v is RoomState =>
   oneOf(v.phase, ROOM_PHASE_LIST) &&
   isNum(v.phaseSince) &&
   isStrOrNull(v.pinnedMap) &&
-  (v.map === null || (isObj(v.map) && isStr(v.map.id) && oneOf(v.map.via, MAP_PICK_VIA))) &&
+  (v.map === null || (isObj(v.map) && isStr(v.map.id) && oneOf(v.map.via, MAP_PICK_VIA) && opt(v.map.layout, isRoomLayout))) &&
   isNumOrNull(v.countdownEndsAt) &&
   isNumOrNull(v.lockAt) &&
   (v.autoStart === null ||
@@ -967,7 +1215,7 @@ export function decodeServerMessage(raw: unknown, hooks?: DecodeHooks): ServerMe
       case 'welcome':
         return isWelcome(m.welcome) ? { t: 'welcome', welcome: m.welcome } : null;
       case 'snapshot': {
-        const snap = unpackPlayerAnims(m.snap);
+        const snap = expandWireSnapshot(m.snap);
         return isSnapshot(snap) ? { t: 'snapshot', snap } : null;
       }
       case 'events':

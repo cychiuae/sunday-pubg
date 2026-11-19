@@ -5,7 +5,7 @@ import { FuseTicker, fuseTickIntervalS } from './fuseTicks';
 
 const ORIGIN = { x: 0, y: 0, z: 0 };
 const nade = (id: number, x: number, explodesAt: number): GrenadeView => ({
-  id, ownerId: 2, pos: { x, y: 0, z: 0 }, vel: { x: 0, y: 0, z: 0 }, explodesAt, resting: true,
+  id, ownerId: 2, pos: { x, y: 0, z: 0 }, vel: { x: 0, y: 0, z: 0 }, explodesAt, resting: true, kind: 'grenade',
 });
 
 /** Runs the ticker at 60 fps from `t0` to `t1` (server ms); returns the tick times and urgencies. */

@@ -33,7 +33,20 @@ import type {
   GrenadeId,
   HealId,
   HeldId,
+  ItemLevel,
+  LookId,
   LootId,
+  M2cHeldId,
+  M2cItemId,
+  M2cSightType,
+  M2cThrowableId,
+  MatchLayout,
+  MatchLayoutRef,
+  MeleeId,
+  PaneId,
+  RocketId,
+  ScopeId,
+  SmokeCloudState,
   LootState,
   MapData,
   MapId,
@@ -163,7 +176,12 @@ export interface CameraView {
 }
 
 /** M2b (camera.md "Viewmodel"): what the arms do this frame. Lengths come from balance (reloadMs, useMs, swapMs...). */
-export type ViewmodelAction = 'idle' | 'swapIn' | 'reload' | 'heal' | 'cook' | 'throw' | 'punch';
+export type ViewmodelAction =
+  | 'idle' | 'swapIn' | 'reload' | 'heal' | 'cook' | 'throw' | 'punch'
+  /** M2c: melee swing (actionProgress 0..1 over the swing cycle; the hit frame is at ViewmodelView.hitFraction). */
+  | 'swing'
+  /** M2c: T sight switch (scopes.swapMs) and the throwable cycle (combat.throwableCycleMs). */
+  | 'scopeSwap' | 'cycle';
 
 /**
  * M2b (ADR 0005 §9): first-person viewmodel state, built by ClientGame (pure data; the renderer owns poses and
@@ -206,6 +224,12 @@ export interface ViewmodelView {
   lookRate: { yaw: number; pitch: number };
   /** Multiplier for viewmodel bob and sway: 1, or clientFeel.reducedMotionViewmodelFactor with reduced motion. */
   motionScale: number;
+  /** M2c (gate: required): the held weapon's level (level collar); null for fists, throwables, heals. */
+  level?: ItemLevel | null;
+  /** M2c (gate: required): the held gun's effective sight (which scope model sits on the rail; ADS pose from it). */
+  sight?: M2cSightType;
+  /** M2c: during action 'swing', hitFrameMs / fireIntervalMs (the pose reaches the hit at this progress). */
+  hitFraction?: number;
 }
 
 /**
@@ -254,6 +278,44 @@ export interface GrenadeView {
   explodesAt: number;
   /** vel is zero (resting). */
   resting: boolean;
+  /** M2c (gate: required): frag or smoke canister (model, fuse tick, danger list: frags only). Absent = 'grenade'. */
+  kind: M2cThrowableId;
+}
+
+/** M2c (ADR 0007 §6): a live rocket as drawn this frame (rocketPosAt at FrameView.serverTime; no extrapolation cap). */
+export interface RocketView {
+  id: RocketId;
+  ownerId: PlayerId;
+  level: ItemLevel;
+  pos: Vec3;
+  vel: Vec3;
+  /** Launch origin (trail start; the trail itself is a render particle effect). */
+  origin: Vec3;
+  firedAt: number;
+}
+
+/**
+ * M2c (ADR 0007 §7): a live smoke cloud as drawn this frame. `radius` = smokeRadiusAt(cloud, FrameView.serverTime)
+ * (src/shared/smoke.ts); `center` = smokeCenter. The renderer's visible opaque edge must match `radius` within 0.5 m.
+ */
+export interface SmokeCloudView {
+  id: SmokeCloudState['id'];
+  ownerId: PlayerId;
+  /** Deploy point (audio hiss source). */
+  pos: Vec3;
+  center: Vec3;
+  radius: number;
+  deployedAt: number;
+  fadeAt: number;
+}
+
+/** M2c: a melee swing in progress (remote wind-up readable at 15 m; local from prediction). */
+export interface MeleeSwingView {
+  weapon: MeleeId;
+  /** 0..1 over the swing cycle (fireIntervalMs at the weapon's level). */
+  progress: number;
+  /** hitFrameMs / fireIntervalMs. */
+  hitFraction: number;
 }
 
 /**
@@ -267,8 +329,13 @@ export interface GrenadeArcView {
   /** Where the preview stops: fuse end, rest point, or the end of clientFeel.grenadeArcPreviewSeconds. */
   end: Vec3;
   endReason: 'fuse' | 'rest' | 'time';
-  /** items.grenade.radius (blast ring). */
+  /** items.grenade.radius (blast ring). M2c: items.smoke.cloud.radius for a smoke throw (the landing ring of the cloud). */
   radius: number;
+  /**
+   * M2c (smoke.md "Carrying and throwing"; render: orange frag ring vs the lilac smoke ring): which throwable the
+   * preview is for. Absent = 'grenade'.
+   */
+  kind?: M2cThrowableId;
 }
 
 export interface PlayerView {
@@ -276,6 +343,13 @@ export interface PlayerView {
   state: PlayerState;
   isLocal: boolean;
   isSpectateTarget: boolean;
+  /**
+   * M2c (smoke.md "Vision", UI M2c §6.2; producer ClientGame with segmentBlockedBySmoke): the camera's line to this
+   * player's head AND chest both cross an opaque cloud. Renderer hides the name tag and the spectate outline. Absent = false.
+   */
+  smokeHidden?: boolean;
+  /** M2c: the player's melee swing, else null/absent (ClientGame: meleeSwing events for remotes, prediction for local). */
+  swing?: MeleeSwingView | null;
 }
 
 export interface FrameView {
@@ -302,6 +376,14 @@ export interface FrameView {
   viewmodel: ViewmodelView | null;
   /** M2b: effective reduced motion (Settings.reducedMotion): no explosion or freefall camera shake. */
   reducedMotion: boolean;
+  /** M2c (gate: required): live rockets at serverTime. */
+  rockets: RocketView[];
+  /** M2c (gate: required): live smoke clouds at serverTime (also passed to IAudio.setSmokes). */
+  smokes: SmokeCloudView[];
+  /** M2c (gate: required): broken glass panes of this match (glassPanes ids), ascending. Renderer: broken mask. */
+  brokenPanes: readonly PaneId[];
+  /** M2c (gate: required): this match's look preset (also on mapChanged). */
+  look: LookId;
 }
 
 export interface ListenerPose {
@@ -341,8 +423,22 @@ export interface HudSlotView {
   weapon: HeldId | null;
   /** Rounds in magazine; null for fists/empty/grenade. */
   mag: number | null;
-  /** M2a: slot 3 only, carried grenades (LocalPlayerState.grenades). null for slots 0-2. */
+  /**
+   * M2a: slot 3 only, carried grenades (LocalPlayerState.grenades). null for slots 0-2.
+   * M2c (at the gate `weapon` widens to M2cHeldId): index 2 = 'fists' or the MeleeId; index 3 = the SELECTED throwable
+   * and `count` = that type's count.
+   */
   count: number | null;
+  /** M2c: level badge; null for fists, throwables and empty slots. */
+  level: ItemLevel | null;
+  /** M2c (scopes.md): mounted scope on a gun slot; null = built-in sight (and for non-guns). */
+  scope: ScopeId | null;
+  /** M2c: effective sight now, PREDICTED through a T switch; 'none' for non-guns. */
+  sight: M2cSightType;
+  /** M2c: weapons.<id>.sight (the outline chip); 'none' for non-guns. */
+  builtInSight: M2cSightType;
+  /** M2c: scopes.compatible.<gun>; [] for fists, melee, throwables, rpg, dbshotgun. */
+  compatibleScopes: readonly ScopeId[];
 }
 
 /** M2a: one worn armor piece on the HUD (armor.md "What the UI must show"). */
@@ -361,6 +457,8 @@ export interface HudCookView {
   fuseRemainingMs: number;
   /** items.grenade.fuseMs. */
   fuseMs: number;
+  /** M2c: which throwable (smoke is not cookable today, so 'grenade'; the Ui supports both). Absent = 'grenade'. */
+  throwable?: M2cThrowableId;
 }
 
 /** M2a: a live grenade near the local player (danger indicator, visible through walls). */
@@ -441,6 +539,23 @@ export interface HudLocalView {
    * Consumer: Ui, falling back to its own default only while the field is absent (ADR 0003).
    */
   lowHpThreshold?: number;
+  // ---- M2c (ADR 0007 §9; UI M2c §12, §16.8). Optional until the C-gate. ----
+  /** Held weapon's level (null for fists and throwables). */
+  weaponLevel: ItemLevel | null;
+  /** Carried throwables per type. */
+  throwables: Record<M2cThrowableId, number>;
+  /** items.<id>.maxCarry per type. */
+  throwableMax: Record<M2cThrowableId, number>;
+  /** Selected throwable, PREDICTED (a 4 / G cycle shows in the same frame). */
+  throwableSelected: M2cThrowableId;
+  /** 0..1 while a melee swing recovers (after the hit frame), null when ready. Predicted. */
+  meleeRecovery: number | null;
+  /** The spare-scope pouch in display order ([] or one scope in M2c). */
+  scopeStash: readonly ScopeId[];
+  /** scopes.spareSlots. */
+  scopeStashMax: number;
+  /** 0..1 during a T sight switch (scopes.swapMs), else null. */
+  scopeSwapProgress?: number | null;
 }
 
 export interface HudZoneView {
@@ -459,8 +574,13 @@ export interface HudZoneView {
 }
 
 export interface HudMinimapView {
-  /** Same object every frame; draw coastline/POIs from it (M2b indoor: walls, floor zones, plateaus). */
+  /**
+   * Same object every frame; draw coastline/POIs from it (M2b indoor: walls, floor zones, plateaus).
+   * M2c: the LAYOUT-APPLIED map of this match (props are this match's), so desks and big cover draw from it.
+   */
   map: MapData;
+  /** M2c: this match's layout (rebuild the static layer when `seed` changes); null = base map (title screen). */
+  layout: MatchLayoutRef | null;
   /** Marker for the local player, or the spectate target when spectating. null in lobby. */
   self: { x: number; z: number; yaw: number } | null;
   /**
@@ -596,6 +716,8 @@ export interface RoomView {
   map: { id: MapId; via: MapPickVia } | null;
   /** The client is still building `map` (set on welcome, cleared after the first frame rendered with it). */
   mapLoading: boolean;
+  /** M2c (UI M2c §7.2): seed and look once the vote locked (map card look line); null before. */
+  lockedLayout?: { seed: number; look: LookId } | null;
 }
 
 export interface HudView {
@@ -621,6 +743,9 @@ export interface HudView {
     targetMaxHp?: number;
     /** M2b: FP from their eye or the V chase cam. */
     view: 'firstPerson' | 'chase';
+    /** M2c (P2): target's held item and its level (spectate bar badge). */
+    weapon?: M2cHeldId;
+    weaponLevel?: ItemLevel | null;
   } | null;
   /** M2b (UI.md §13.5): which camera the player looks through. */
   cameraView: 'firstPerson' | 'chase' | 'orbit';
@@ -653,6 +778,12 @@ export interface HudView {
   drop: HudDropView | null;
   /** M2b (ADR 0005 §7): zone fiction of the current map (`hud.<theme>.*` strings). */
   zoneTheme: ZoneTheme;
+  /** M2c (gate: required): the camera is inside an opaque smoke cloud (pointInSmoke). Ui thickens the crosshair outline. */
+  inSmoke: boolean;
+  /** M2c (gate: required): this match's layout seed and look (pause/results "Layout #..."); null without a layout. */
+  layout: { seed: number; look: LookId } | null;
+  /** M2c (P2): the ground item the screen-centre ray hits beyond pickup reach (dimmed prompt), else null. */
+  lootPeek?: { item: M2cItemId; level: ItemLevel | null; qty: number } | null;
 }
 
 export interface UiCallbacks {
@@ -688,6 +819,8 @@ export interface UiCallbacks {
   onSetReady?(ready: boolean): void;
   onVote?(option: MapVoteOption | null): void;
   onKick?(memberId: MemberId): void;
+  /** M2c (UI M2c §16.4): sight-chip tap/click = the T key (main.ts -> IClientGame.cycleScope). */
+  onCycleScope?(): void;
 }
 
 /** M2b: what the create dialog and the host settings dialog send (RoomSettings with `name` as typed). */
@@ -729,6 +862,10 @@ export interface IAudio {
    * has the 2D cook tick. Plain read-only data, the same array the renderer gets; do not keep references across frames.
    */
   setGrenades?(grenades: readonly GrenadeView[], serverTime: number): void;
+  /** M2c (audio M2c §4.2; producer main.ts from FrameView.rockets): rocket whistle emitters (cap 3) and fly-bys. */
+  setRockets?(rockets: readonly RocketView[], serverTime: number): void;
+  /** M2c (audio M2c §5.2; producer main.ts from FrameView.smokes): hiss loops, also for late joiners. */
+  setSmokes?(clouds: readonly SmokeCloudView[], serverTime: number): void;
   dispose(): void;
 }
 
@@ -832,6 +969,11 @@ export interface ClientGameDeps {
   initialMap: MapData;
   /** Full WebSocket URL, e.g. ws://localhost:5173/ws. */
   serverUrl: string;
+  /**
+   * M2c (ADR 0007 §1.5): builds this match's layout from the base map and WelcomeInfo.layout.seed. main.ts passes
+   * src/game/levels/layout `buildMatchLayout` + `applyLayout`; tests may stub it. Absent = no layout (base map).
+   */
+  buildLayout?: (base: MapData, seed: number) => { layout: MatchLayout; map: MapData };
 }
 
 export interface ClientFrame {
@@ -866,5 +1008,7 @@ export interface IClientGame {
   setReady(ready: boolean): void;
   vote(option: MapVoteOption | null): void;
   kick(memberId: MemberId): void;
+  /** M2c: the T action from a UI click (latched into the next PlayerInput.cycleScope edge, like the key). */
+  cycleScope?(): void;
   dispose(): void;
 }

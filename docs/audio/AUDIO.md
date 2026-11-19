@@ -3,8 +3,11 @@
 Owner: audio-designer. Code: [`src/audio/`](../../src/audio/). Cue numbers (priority, limits, ranges, gains) live in
 [`src/audio/cues.ts`](../../src/audio/cues.ts) and are the source of truth if they differ from the tables below.
 
-M2c ("Fresh Every Match & Bigger Arsenal": melee, dbshotgun, revolver, RPG, smoke, item levels, look presets) is
-specified in [M2c.md](M2c.md) and will be folded into this document once it is built.
+M2c ("Fresh Every Match & Bigger Arsenal": melee, dbshotgun, revolver, RPG, smoke, item levels, scopes, look presets)
+is specified and documented in [M2c.md](M2c.md) (built; §13 lists the build notes). Highlights for this document's
+sections: 29 new cues (§9 there), a new persistent bed `RocketLayers.ts` (rocket whistles with doppler, cap 3, outside
+the pool), an ambience-only "cocoon" low-pass inside smoke (sfx is never muffled by smoke), a per-match look preset on
+`mapChanged.look` that colours the ambience beds and adds detail one-shots, and `IAudio.setRockets` / `setSmokes`.
 
 **M1, M2a and M2b ship no audio files.** Every sound is synthesised at runtime with the Web Audio API: oscillators,
 filtered noise buffers, envelopes, LFOs and (M2b) a generated reverb impulse. There is nothing to license, and

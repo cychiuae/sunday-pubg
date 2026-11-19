@@ -9,18 +9,61 @@
  * M2a (PROTOCOL_VERSION 2): the new PlayerState fields (vestTier, helmetTier, stance, stanceFrom, stanceProgress,
  * anim.ads, anim.cooking) go through `diffPlayer` like every other field, so a settled player costs nothing. Loot
  * `durability` is part of an entry (a change re-adds it). `grenades` is NOT delta-encoded: the full list rides in every
- * snapshot (NETCODE.md "Grenades on the wire"). `local` is always sent whole.
+ * snapshot (NETCODE.md "Grenades on the wire").
+ *
+ * M2c: `local` is delta-encoded too (it was about 0.9 KB in every snapshot): in a delta snapshot `local` is omitted
+ * while the base's `local` is an object for the same player, and `localPatch` carries only the top-level fields that
+ * changed (nested objects such as `movement` whole; absent = nothing changed). `local: null` and a different or new
+ * local player are sent whole, as is a local that lost a key. Only for encoders built with `localPatch` (the server
+ * enables it for sessions that advertise CAP_ROWS, so an older delta1 client keeps getting a whole `local`).
+ *
+ * M2c (ADR 0007 §9): `rockets`, `smokes` and `brokenPanes` (immutable records and a grow-only list) are omitted from a
+ * delta snapshot while equal to the base, like `match.route`; a change sends the whole list, or for rockets and smokes `{ add, remove }` when smaller. The decoder carries them
+ * forward. (Rows are a text-level encoding in messages.ts and do not concern this module.)
  *
  * Only clients that join with the `delta1` capability get deltas. Others get the M1 format (full players, loot
  * omitted when the version is unchanged), so a stale cached client keeps working.
  *
  * Imports only shared types and the protocol module (dependency rule §3).
  */
-import type { LootId, LootState, PlayerId, PlayerState, WorldSnapshot } from '../types';
-import { isPlayerState, type LootDelta, type PlayerPatch, type WireMatch, type WireSnapshot } from './messages';
+import type { LocalPlayerState, LootId, LootState, PlayerId, PlayerState, WorldSnapshot } from '../types';
+import { M2C_FIELDS_REQUIRED, isLocalPlayerState, isPlayerState, type RecordDelta, type LootDelta, type PlayerPatch, type WireMatch, type WireSnapshot } from './messages';
 
 /** M2b: `match.route` (C-gate field; read loosely so this compiles before and after the gate). */
 const routeOf = (m: object): unknown => (m as { route?: unknown }).route;
+
+/** M2c snapshot lists carried forward in deltas while unchanged (optional before the C-gate, required after). */
+const CARRIED = ['rockets', 'smokes', 'brokenPanes'] as const;
+type CarriedKey = (typeof CARRIED)[number];
+type Carried = Partial<Record<CarriedKey, unknown>>;
+/** Id-keyed record lists that may ride as { add, remove } (REVIEW-M2c SF4). */
+const RECORD_LISTS = [
+  ['rockets', 'rocketsDelta'],
+  ['smokes', 'smokesDelta'],
+] as const;
+type Rec = { id: number };
+
+/** { add, remove } from `base` to `cur` (both sorted by id); null when the whole list is not larger (send it whole). */
+export function diffRecords(base: readonly Rec[], cur: readonly Rec[]): RecordDelta<Rec> | null {
+  const before = new Map(base.map((r) => [r.id, r]));
+  const now = new Set(cur.map((r) => r.id));
+  const add = cur.filter((r) => !sameValue(before.get(r.id), r));
+  const remove = base.filter((r) => !now.has(r.id)).map((r) => r.id);
+  return add.length < cur.length ? { add, remove } : null;
+}
+
+/** Applies a record delta; null when it removes an unknown id. Result sorted by id. */
+export function applyRecords(base: readonly Rec[], d: RecordDelta<Rec>): Rec[] | null {
+  const m = new Map(base.map((r) => [r.id, r]));
+  for (const id of d.remove) if (!m.delete(id)) return null;
+  for (const r of d.add) m.set(r.id, r);
+  return [...m.values()].sort((a, b) => a.id - b.id);
+}
+
+const carriedOf = (s: object): Carried => {
+  const o = s as Carried;
+  return { rockets: o.rockets, smokes: o.smokes, brokenPanes: o.brokenPanes };
+};
 
 /** Join capability that enables delta snapshots. */
 export const CAP_DELTA = 'delta1';
@@ -61,6 +104,19 @@ export function diffPlayer(prev: PlayerState, cur: PlayerState): PlayerPatch | P
   return patch as PlayerPatch | null;
 }
 
+/**
+ * M2c: changed top-level fields of `cur` against `prev` (same player); `{}` when nothing changed; null when `cur`
+ * must be sent whole (a key disappeared).
+ */
+export function diffLocal(prev: LocalPlayerState, cur: LocalPlayerState): Partial<LocalPlayerState> | null {
+  const p = prev as unknown as Obj;
+  const c = cur as unknown as Obj;
+  for (const k of Object.keys(p)) if (!Object.hasOwn(c, k)) return null;
+  const patch: Obj = {};
+  for (const k of Object.keys(c)) if (!sameValue(p[k], c[k])) patch[k] = c[k];
+  return patch as Partial<LocalPlayerState>;
+}
+
 // -------------------------------------------------------------------------------------------------
 // Server side
 // -------------------------------------------------------------------------------------------------
@@ -69,16 +125,26 @@ export class SnapshotDeltaEncoder {
   private tick = -1;
   /** match.route of the base snapshot (undefined = none yet). */
   private route: unknown = undefined;
+  /** M2c lists of the base snapshot. */
+  private carried: Carried = {};
+  /** M2c: `local` of the base snapshot. */
+  private local: LocalPlayerState | null = null;
   private loot: Map<LootId, LootState> | null = null;
   private lootVersion: number | null = null;
 
-  constructor(readonly deltas: boolean) {}
+  /** `localPatch`: M2c local patches (protocol/rows.ts CAP_ROWS clients); default true. */
+  constructor(
+    readonly deltas: boolean,
+    readonly localPatch = true,
+  ) {}
 
   /** Forget the base: the next snapshot is sent in full (newly joined, or the client asked for a resync). */
   reset(): void {
     this.players = null;
     this.tick = -1;
     this.route = undefined;
+    this.carried = {};
+    this.local = null;
     this.loot = null;
     this.lootVersion = null;
   }
@@ -105,6 +171,31 @@ export class SnapshotDeltaEncoder {
         const { route: _r, ...matchNoRoute } = rest.match as WireMatch;
         wire.match = matchNoRoute;
       }
+      // M2c: immutable records and the grow-only pane list ride only when they change.
+      for (const k of CARRIED) {
+        const v = wire[k];
+        if (v !== undefined && sameValue(v, this.carried[k])) delete wire[k];
+      }
+      // A changed record list rides as { add, remove } when that is smaller (one new rocket, not all 16).
+      for (const [k, dk] of RECORD_LISTS) {
+        const cur = wire[k];
+        const prev = this.carried[k];
+        if (cur === undefined || !Array.isArray(prev)) continue;
+        const d = diffRecords(prev as Rec[], cur);
+        if (d !== null) {
+          delete wire[k];
+          (wire as Record<string, unknown>)[dk] = d;
+        }
+      }
+      // M2c: the local player as a patch against the base's local.
+      const prevLocal = this.local;
+      if (this.localPatch && snap.local !== null && prevLocal !== null && prevLocal.id === snap.local.id) {
+        const patch = diffLocal(prevLocal, snap.local);
+        if (patch !== null) {
+          delete wire.local;
+          if (Object.keys(patch).length > 0) wire.localPatch = patch;
+        }
+      }
       const patches: (PlayerPatch | PlayerState)[] = [];
       for (const cur of players) {
         const prev = this.players.get(cur.id);
@@ -126,6 +217,8 @@ export class SnapshotDeltaEncoder {
     this.players = new Map(players.map((p) => [p.id, p]));
     this.tick = snap.tick;
     this.route = routeOf(snap.match);
+    this.carried = carriedOf(snap);
+    this.local = snap.local;
     if (this.lootVersion !== snap.lootVersion || this.loot === null) {
       this.loot = new Map(loot.map((l) => [l.id, l]));
       this.lootVersion = snap.lootVersion;
@@ -164,6 +257,8 @@ export class SnapshotDeltaDecoder {
   private players: Map<PlayerId, PlayerState> | null = null;
   private tick = -1;
   private route: unknown = undefined;
+  private carried: Carried = {};
+  private local: LocalPlayerState | null = null;
   private loot: Map<LootId, LootState> | null = null;
   private lootList: LootState[] = [];
   private lootVersion: number | null = null;
@@ -173,6 +268,8 @@ export class SnapshotDeltaDecoder {
     this.players = null;
     this.tick = -1;
     this.route = undefined;
+    this.carried = {};
+    this.local = null;
     this.loot = null;
     this.lootList = [];
     this.lootVersion = null;
@@ -194,11 +291,34 @@ export class SnapshotDeltaDecoder {
   }
 
   private tryApply(w: WireSnapshot): DeltaDecodeResult {
-    const { base, lootDelta, loot: wireLoot, players: wirePlayers, match: wireMatch, ...rest } = w;
+    const { base, lootDelta, loot: wireLoot, players: wirePlayers, match: wireMatch, local: wireLocal, localPatch, ...rest } = w;
     // M2b: a delta snapshot omits an unchanged route; restore it from the base.
     let match = wireMatch as WorldSnapshot['match'];
     if (base !== undefined && routeOf(wireMatch) === undefined && this.route !== undefined) {
       match = { ...wireMatch, route: this.route } as WorldSnapshot['match'];
+    }
+    // M2c: likewise rockets, smokes and brokenPanes (checked against the base tick below, with the players).
+    const out: Record<string, unknown> = rest;
+    for (const [k, dk] of RECORD_LISTS) {
+      const d = out[dk] as RecordDelta<Rec> | undefined;
+      if (d === undefined) continue;
+      delete out[dk];
+      const prev = this.carried[k];
+      const next = base !== undefined && Array.isArray(prev) ? applyRecords(prev as Rec[], d) : null;
+      if (next === null) return { ok: false, reason: `${dk} does not apply to the base` };
+      out[k] = next;
+    }
+    for (const k of CARRIED) {
+      if (out[k] === undefined && base !== undefined && this.carried[k] !== undefined) out[k] = this.carried[k];
+      if (out[k] === undefined && M2C_FIELDS_REQUIRED) return { ok: false, reason: `${k} missing` };
+    }
+    // M2c: `local` omitted = the base's local plus `localPatch` (the shape check allowed it only with a base).
+    let local: LocalPlayerState | null;
+    if (wireLocal !== undefined) local = wireLocal;
+    else {
+      if (base === undefined || this.local === null) return { ok: false, reason: 'local patch without a base local' };
+      local = localPatch === undefined ? this.local : ({ ...this.local, ...localPatch } as LocalPlayerState);
+      if (local !== this.local && !isLocalPlayerState(local)) return { ok: false, reason: 'bad local patch' };
     }
     // Players.
     const players: PlayerState[] = [];
@@ -245,9 +365,11 @@ export class SnapshotDeltaDecoder {
     this.players = new Map(players.map((p) => [p.id, p]));
     this.tick = w.tick;
     this.route = routeOf(match);
+    this.carried = carriedOf(out);
+    this.local = local;
     this.loot = lootMap;
     this.lootList = lootList;
     this.lootVersion = w.lootVersion;
-    return { ok: true, snap: { ...rest, match, players, loot: lootList } };
+    return { ok: true, snap: { ...out, match, players, local, loot: lootList } as WorldSnapshot };
   }
 }

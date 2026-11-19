@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { BALANCE } from '../src/shared/balance';
 import { checkLevels } from './app';
-import { deepMerge, levelIds, loadBalance, parseMapPin, readConfig } from './config';
+import { deepMerge, describeLayoutPin, levelIds, loadBalance, parseLayoutSeedEnv, parseMapPin, readConfig } from './config';
 import { createStaticHandler, safeJoin } from './static';
 
 describe('BALANCE_OVERRIDE', () => {
@@ -73,6 +73,31 @@ describe('M2b room env (ADR 0006 §8)', () => {
   it('startup level checks pass for the shipped levels and the balance', () => {
     expect(levelIds()[0]).toBe('island01');
     expect(() => checkLevels(BALANCE)).not.toThrow();
+  });
+});
+
+describe('M2c LAYOUT_SEED (ADR 0007 §1.3)', () => {
+  it('decimal, 0x hex and baseline; absent = per match; invalid = one warning and ignored', () => {
+    const warnings: string[] = [];
+    const warn = (m: string) => warnings.push(m);
+    expect(parseLayoutSeedEnv(undefined, warn)).toBeNull();
+    expect(parseLayoutSeedEnv('  ', warn)).toBeNull();
+    expect(parseLayoutSeedEnv('12345', warn)).toBe(12345);
+    expect(parseLayoutSeedEnv('0xDEADBEEF', warn)).toBe(0xdeadbeef);
+    expect(parseLayoutSeedEnv('baseline', warn)).toBe(0);
+    expect(parseLayoutSeedEnv('0', warn)).toBe(0);
+    expect(warnings).toEqual([]);
+    expect(parseLayoutSeedEnv('4294967296', warn)).toBeNull();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/LAYOUT_SEED/);
+    const cfgWarnings: string[] = [];
+    expect(readConfig({ LAYOUT_SEED: 'tuesday' }, (m) => cfgWarnings.push(m)).layoutSeed).toBeNull();
+    expect(cfgWarnings).toHaveLength(1);
+    expect(readConfig({ LAYOUT_SEED: '0x10' }).layoutSeed).toBe(16);
+    expect(readConfig({}).layoutSeed).toBeNull();
+    expect([describeLayoutPin(null), describeLayoutPin(0), describeLayoutPin(16)]).toEqual([
+      'per match', 'baseline (0x00000000)', 'pinned 0x00000010',
+    ]);
   });
 });
 

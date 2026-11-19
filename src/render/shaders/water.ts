@@ -38,6 +38,8 @@ uniform vec3 uAbyss;
 uniform vec3 uFoam;
 uniform vec3 uSky;
 uniform vec3 uSunDir;
+uniform float uGlintCut;
+uniform vec3 uGlintColor;
 uniform sampler2D uHeightTex;
 uniform vec4 uHeightRect; // minX, minZ, size, 1/size
 uniform float uWorldRadius;
@@ -114,8 +116,8 @@ void main() {
     vec2 sc = vWorld.xz * 2.5;
     float cell = hash12(floor(sc) + floor(uTime * 3.0));
     float glint = 1.0 - smoothstep(0.12, 0.22, length(fract(sc) - 0.5));
-    float sparkle = step(0.965, cell) * glint * step(0.6, spec) * (1.0 - band(60.0, length(cameraPosition - vWorld), 20.0));
-    col = mix(col, vec3(1.0), sparkle);
+    float sparkle = step(uGlintCut, cell) * glint * step(0.6, spec) * (1.0 - band(60.0, length(cameraPosition - vWorld), 20.0));
+    col = mix(col, uGlintColor, sparkle);
   #endif
 
   col = mix(col, uFoam, foam);

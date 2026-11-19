@@ -184,3 +184,15 @@ describe('M2b edge helpers', () => {
     expect(r.full(20_000)).toBe(true);
   });
 });
+
+describe('M2c cycleScope edge', () => {
+  it('sanitizeInput coerces it (absent or non-true = false); mergeInputs never loses a press', () => {
+    const { cycleScope: _c, ...old } = makeInput({ seq: 1 });
+    expect(sanitizeInput(old as never, 0)!.cycleScope).toBe(false);
+    expect(sanitizeInput(makeInput({ seq: 1, cycleScope: 'x' as never }), 0)!.cycleScope).toBe(false);
+    expect(sanitizeInput(makeInput({ seq: 1, cycleScope: true }), 0)!.cycleScope).toBe(true);
+    expect(mergeInputs(makeInput({ seq: 1, cycleScope: true }), makeInput({ seq: 2 })).cycleScope).toBe(true);
+    expect(mergeInputs(makeInput({ seq: 1 }), makeInput({ seq: 2, cycleScope: true })).cycleScope).toBe(true);
+    expect(mergeInputs(makeInput({ seq: 1 }), makeInput({ seq: 2 })).cycleScope).toBe(false);
+  });
+});

@@ -32,7 +32,7 @@ test.afterAll(async () => {
   await stack?.stop();
 });
 
-test('full loop: match -> death -> spectate -> results -> lobby -> next match', async ({ browser }) => {
+test('full loop: match -> death -> spectate -> results -> same waiting room -> next match', async ({ browser }) => {
   test.setTimeout(180_000);
   const { ctx, page, log } = await newPlayer(browser, stack.baseURL);
   await openTitle(page);
@@ -100,7 +100,7 @@ test('full loop: match -> death -> spectate -> results -> lobby -> next match', 
   await ctx.close();
 });
 
-test('results: "Play again" returns to the lobby before the server resets', async ({ browser }) => {
+test('results: "Play again" returns to the same waiting room; the host starts again', async ({ browser }) => {
   test.setTimeout(180_000);
   await waitForHealth(stack, (h) => h.rooms === 0, 60_000);
   const { ctx, page, log } = await newPlayer(browser, stack.baseURL);

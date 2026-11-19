@@ -23,8 +23,8 @@ const RELEASE_AFTER_S = 1.2;
 /** Parameter smoothing time constant, seconds. */
 const TC = 0.12;
 
-/** A set of nodes and sources released together. */
-class Group {
+/** A set of nodes and sources released together (also used by RocketLayers). */
+export class Group {
   readonly nodes: AudioNode[] = [];
   readonly sources: AudioScheduledSourceNode[] = [];
   /** Context time it last had a non-zero target. */
@@ -83,6 +83,11 @@ class Group {
     if (prev !== undefined && Math.abs(prev - value) <= Math.max(1e-4, Math.abs(prev) * 0.01)) return;
     this.last.set(p, value);
     p.setTargetAtTime(value, this.ctx.currentTime, tc);
+  }
+
+  /** Drops the cached target of `p` so the next set() always schedules (after a manual ramp elsewhere). */
+  forget(p: AudioParam): void {
+    this.last.delete(p);
   }
 
   dispose(): void {

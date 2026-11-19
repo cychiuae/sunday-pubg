@@ -18,7 +18,7 @@ import {
   quantizeDeep,
   type SnapshotMessage,
 } from './messages';
-import { makeLocal, makeMatch, makePlayer, makeSnapshot } from './testing';
+import { makeLocal, makeMatch, makePlayer, makeSnapshot, makeWelcome } from './testing';
 
 const route = (over: Partial<DropRoute> = {}): DropRoute => ({
   mapId: 'island01',
@@ -146,7 +146,7 @@ describe('server -> client (M2b)', () => {
       { t: 'roomLeft', reason: 'kicked' },
       { t: 'reject', rid: 9, req: 'joinRoom', code: 'room_full' },
       { t: 'reject', req: 'createRoom', code: 'rate_limited', retryAfterMs: 1200 },
-      { t: 'welcome', welcome: { playerId: 2, mapId: 'office', serverTime: 1, matchId: 3, roomId: 'r1' } },
+      { t: 'welcome', welcome: makeWelcome({ playerId: 2, mapId: 'office', serverTime: 1, matchId: 3, roomId: 'r1' }) },
     ] as const;
     for (const m of msgs) expect(decodeServerMessage(encodeQuantized(m as never))).toEqual(m);
   });
@@ -198,7 +198,7 @@ describe('C-gate snapshot and event fields', () => {
   it("'glass' surfaces, dropJump and chuteOpen events", () => {
     const events = [
       { type: 'shot', shooterId: 1, weapon: 'rifle', origin: { x: 0, y: 1, z: 0 }, impacts: [{ point: { x: 1, y: 1, z: 1 }, surface: 'glass', playerId: null, headshot: false }] },
-      { type: 'grenadeBounce', id: 3, pos: { x: 0, y: 1, z: 0 }, surface: 'glass', speed: 4 },
+      { type: 'grenadeBounce', id: 3, pos: { x: 0, y: 1, z: 0 }, surface: 'glass', speed: 4, kind: 'grenade' },
       { type: 'dropJump', playerId: 2, pos: { x: 1, y: 120, z: 2 }, auto: false },
       { type: 'chuteOpen', playerId: 2, pos: { x: 1, y: 40, z: 2 }, manual: true },
     ] as unknown as SimEvent[];
@@ -211,14 +211,15 @@ describe('C-gate snapshot and event fields', () => {
 });
 
 describe('M2b wire compaction', () => {
-  it('a full snapshot omits resting drop fields; the decoder restores them exactly', () => {
+  it('a full snapshot omits resting drop fields (object format); the decoder restores them exactly', () => {
     const snap = quantizeDeep(
       makeSnapshot(5, [makePlayer(1), makePlayer(2, { aboard: true }), makePlayer(3, { dropPhase: 'freefall' })], {
         local: makeLocal(1),
         match: makeMatch({ route: route() }),
       }),
     );
-    const wire = snapMsg(snap);
+    // The object format (sessions without CAP_ROWS); in rows the drop fields are 0/1/2 columns (m2c.test.ts).
+    const wire = encodeQuantized({ t: 'snapshot', snap }, { rows: false });
     expect(wire).not.toContain('"aboard":false');
     expect(wire).not.toContain('"dropPhase":null');
     expect(wire).not.toContain('"dropMs":0');

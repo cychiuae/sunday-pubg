@@ -13,7 +13,8 @@
  */
 import type { Balance } from '../balance';
 import type { BotDropBalance } from '../balance';
-import { ammoFor, isScopeSight } from '../balance';
+import { ammoFor, effectiveSight, isScopeSight } from '../balance';
+import { segmentBlockedBySmoke } from '../smoke';
 import { isIndoor } from '../maps';
 import { DEG2RAD, type Rng, wrapAngle } from '../math';
 import type {
@@ -22,23 +23,30 @@ import type {
   DropRoute,
   GrenadeId,
   GunId,
+  ItemLevel,
   LootId,
   LootSpawn,
   PlayerId,
   PlayerInput,
+  ScopeId,
   SlotIndex,
+  SmokeCloudState,
   Stance,
   StanceRequest,
   Vec2,
   Vec3,
   WeaponId,
+  WeaponSlotState,
+  MeleeSlotState,
   ZoneState,
 } from '../types';
-import { BOT_PERSONALITY_IDS, FISTS_SLOT, GRENADE_SLOT, isArmorId } from '../types';
-import { lineOfSight, raycastColliders } from './colliders';
+import { BOT_PERSONALITY_IDS, FISTS_SLOT, GRENADE_SLOT, isArmorId, isM2cGunId, isMeleeId, isScopeId } from '../types';
+import { forEachColliderNear, lineOfSight, overlapsCircle, raycastColliders, raycastStatic } from './colliders';
 import { adsProgressOf, expectedBodyDps } from './combat';
 import { type GrenadeBody, stepGrenade, throwLaunch, throwSpeedFor } from './grenade';
-import { activeWeapon, armorAccepted, chooseHeal, isAmmo, isGrenade, isGun, isHeal } from './inventory';
+import { activeWeapon, armorAccepted, chooseHeal, isAmmo, isGrenade, isGun, isHeal, upgradeSlotFor } from './inventory';
+import { effWeapon, levelValue, slotWeapon } from './levels';
+import { wouldMount } from './scopes';
 import type { LootEntity } from './loot';
 import type { MovementContext } from './movement';
 import {
@@ -61,6 +69,21 @@ import { heightAt } from './terrain';
  * AI plumbing defaults (steering, probes, timers). Overridable per key from the optional `balance.bots.ai` block
  * (see BotAiBalance in src/shared/balance.ts); read them through `botAi(balance)`.
  */
+/** M2c plan timeouts and aim tolerance (behaviour constants, not balance; the M2a BOT_M2A_AI pattern). */
+export const BOT_M2C_AI = {
+  /** Give up an rpg plan that has not fired after this long (swap + ADS + aim take about 1 s). */
+  rpgPlanTimeoutMs: 3000,
+  /** Radians of yaw and pitch error within which the rocket is released. */
+  rpgAimTolerance: 0.02,
+  /** Give up a smoke plan after this long. */
+  smokePlanTimeoutMs: 2500,
+  /**
+   * In-match stuck follow-up: zone urgency hysteresis. A bot that had to rotate in keeps the tide goal until it is this
+   * far inside the safe circle, and then ignores loot within this distance of its edge (no shuttling on the line).
+   */
+  zoneHysteresisMetres: 3,
+} as const;
+
 export const BOT_AI = {
   /** Aim point height as a fraction of player.height (chest; below the head zone). */
   aimHeightFraction: 0.45,
@@ -157,6 +180,8 @@ export interface BotPersonalityTuning {
   jumpTimingBiasMs: number;
   /** M2b (drop.md): multiplies bots.drop.tierWeights.epic. */
   dropEpicWeightMultiplier: number;
+  /** M2c (smoke.md "Bots"): multiplies bots.smoke.retreatThrowChance and zoneCrossThrowChance. */
+  smokeChanceMultiplier: number;
 }
 
 /**
@@ -250,6 +275,7 @@ export const BOT_TUNING_DEFAULTS: BotTuning = {
       grenadeChanceMultiplier: 1.5,
       jumpTimingBiasMs: -1000,
       dropEpicWeightMultiplier: 1.5,
+      smokeChanceMultiplier: 0.5,
     },
     balanced: {
       share: 0.4,
@@ -261,6 +287,7 @@ export const BOT_TUNING_DEFAULTS: BotTuning = {
       grenadeChanceMultiplier: 1,
       jumpTimingBiasMs: 0,
       dropEpicWeightMultiplier: 1,
+      smokeChanceMultiplier: 1,
     },
     cautious: {
       share: 0.3,
@@ -272,6 +299,7 @@ export const BOT_TUNING_DEFAULTS: BotTuning = {
       grenadeChanceMultiplier: 0.6,
       jumpTimingBiasMs: 1500,
       dropEpicWeightMultiplier: 0.5,
+      smokeChanceMultiplier: 1.5,
     },
   },
 };
@@ -299,6 +327,7 @@ export function botTuning(b: Balance): BotTuning {
       grenadeChanceMultiplier: p?.grenadeChanceMultiplier ?? def.grenadeChanceMultiplier,
       jumpTimingBiasMs: p?.jumpTimingBiasMs ?? def.jumpTimingBiasMs,
       dropEpicWeightMultiplier: p?.dropEpicWeightMultiplier ?? def.dropEpicWeightMultiplier,
+      smokeChanceMultiplier: p?.smokeChanceMultiplier ?? def.smokeChanceMultiplier,
     };
   }
   return out;
@@ -513,6 +542,35 @@ export interface BotBrain {
   lastSeenY: number;
   /** REVIEW-M2a M3: server ms of this bot's last grenade pitch solve (one solve per tick across bots). */
   throwSolvedAt: number;
+  /** M2c (rpg.md "Bots"): a rocket shot in progress, and the next allowed one. */
+  rpgPlan: BotRpgPlan | null;
+  nextRpgAt: number;
+  /** Zone phase in which the tide became urgent for this bot (urgency hysteresis), -1 = none. */
+  zoneUrgentPhase: number;
+  /** Zone phase in which this bot had to rotate in: it then ignores loot outside the next circle for that phase. */
+  zoneRotatedPhase: number;
+  /** M2c (smoke.md "Bots"): a quick smoke throw in progress, and the next allowed one. */
+  smokePlan: BotSmokePlan | null;
+  nextSmokeAt: number;
+}
+
+/** M2c: an RPG shot: swap to the rpg slot, aim with lead and a seeded offset, fire once, swap back. */
+export interface BotRpgPlan {
+  targetId: PlayerId;
+  slot: 0 | 1;
+  startedAt: number;
+  /** Seeded aim offset (within bots.rpg.aimErrorMetres) on the ground plane. */
+  offset: Vec2;
+  fired: boolean;
+}
+
+/** M2c: a quick smoke throw toward `aim` (no cook): select the smoke, press, release. */
+export interface BotSmokePlan {
+  aim: Vec3;
+  startedAt: number;
+  stage: 'swap' | 'press' | 'release';
+  yaw: number | null;
+  pitch: number | null;
 }
 
 /** M2b (drop.md): a bot's drop choice, fixed at the route reveal. */
@@ -627,6 +685,12 @@ export function createBotBrain(now: number, offsetMs: number, personality: BotPe
     lootLen: [],
     lastSeenY: 0,
     throwSolvedAt: -Infinity,
+    rpgPlan: null,
+    nextRpgAt: 0,
+    zoneUrgentPhase: -1,
+    zoneRotatedPhase: -1,
+    smokePlan: null,
+    nextSmokeAt: 0,
   };
 }
 
@@ -662,6 +726,8 @@ export interface BotEnv {
   /** M2b: the World's path cache and per-tick search budget (required with `nav`). */
   pathCache?: PathCache | null;
   navBudget?: NavBudget | null;
+  /** M2c: live smoke clouds (opaque in every bot line-of-sight test). Absent = none. */
+  smokes?: readonly SmokeCloudState[];
 }
 
 /** The nav parts of a BotEnv when the map has a graph. */
@@ -684,52 +750,87 @@ const chestOf = (p: SimPlayer, b: Balance): Vec3 => ({
 const distXZ = (a: Vec2, b: Vec2): number => Math.hypot(a.x - b.x, a.z - b.z);
 const yawTo = (from: Vec2, to: Vec2): number => Math.atan2(-(to.x - from.x), -(to.z - from.z));
 
-function hasUsableGun(self: SimPlayer, b: Balance): boolean {
-  for (const s of self.inv.slots) if (s && (s.mag > 0 || self.inv.ammo[ammoFor(b, s.weapon)] > 0)) return true;
-  return false;
-}
-
+/** A gun slot the bot fights with: loaded or with reserve ammo. The rpg is a special action (rpg.md), never counted. */
 const usableSlot = (self: SimPlayer, i: 0 | 1, b: Balance): boolean => {
   const s = self.inv.slots[i];
-  return !!s && (s.mag > 0 || self.inv.ammo[ammoFor(b, s.weapon)] > 0);
+  return !!s && s.weapon !== 'rpg' && (s.mag > 0 || self.inv.ammo[ammoFor(b, s.weapon)] > 0);
 };
 
-function gunScore(gun: GunId, b: Balance): number {
-  return expectedBodyDps(b.weapons[gun], botAi(b).gunScoreDistance, b.player.radius);
+function hasUsableGun(self: SimPlayer, b: Balance): boolean {
+  return usableSlot(self, 0, b) || usableSlot(self, 1, b);
 }
 
-/** Loot value of a gun: bots.weaponPrefs.<gun>.lootValue, or null when the gun has no prefs entry. */
-const prefValue = (gun: GunId, b: Balance): number | null => b.bots.weaponPrefs?.[gun]?.lootValue ?? null;
+/** M2c: a gun instance (id, level) for value comparisons. */
+interface GunInst {
+  weapon: GunId;
+  level: ItemLevel;
+}
+const instOf = (s: WeaponSlotState | LootEntity): GunInst => ({
+  weapon: ('weapon' in s ? s.weapon : s.item) as GunId,
+  level: s.level ?? 1,
+});
 
-/** True when gun `a` is worth more than gun `c` x factor (lootValue when both have prefs, else the M1 DPS score). */
-function gunBetter(a: GunId, c: GunId, factor: number, b: Balance): boolean {
+function gunScore(g: GunInst, b: Balance): number {
+  return expectedBodyDps(effWeapon(b, g.weapon, g.level), botAi(b).gunScoreDistance, b.player.radius);
+}
+
+/**
+ * Loot value of a gun: bots.weaponPrefs.<gun>.lootValue (the rpg: bots.rpg.lootValue) x levels.botValueMultiplier,
+ * or null when the gun has no value entry.
+ */
+const prefValue = (g: GunInst, b: Balance): number | null => {
+  const base = g.weapon === 'rpg' ? b.bots.rpg.lootValue : (b.bots.weaponPrefs?.[g.weapon]?.lootValue ?? null);
+  return base === null ? null : base * levelValue(b, g.level);
+};
+
+/** True when gun `a` is worth more than gun `c` x factor (lootValue when both have one, else the M1 DPS score). */
+function gunBetter(a: GunInst, c: GunInst, factor: number, b: Balance): boolean {
   const va = prefValue(a, b);
   const vc = prefValue(c, b);
   if (va !== null && vc !== null) return va > vc * factor;
   return gunScore(a, b) > gunScore(c, b) * factor;
 }
 
-/** Does a bot aim down sights with this gun at this distance (bots.ads._note)? */
-export function botWouldAds(gun: WeaponId, dist: number, b: Balance): boolean {
-  const sight = b.weapons[gun].sight;
+/**
+ * Does a bot aim down sights with this gun at this distance (bots.ads._note)? M2c: by the EFFECTIVE sight (a mounted
+ * scope): 4x / 8x always, 2x / red dot / iron beyond ads.minRange.
+ */
+export function botWouldAds(gun: WeaponId, dist: number, b: Balance, scope: ScopeId | null = null): boolean {
+  const sight = effectiveSight(b, gun, scope);
   if (sight === 'none') return false;
   return isScopeSight(sight) || dist > botM2a(b).ads.minRange;
 }
 
 /** Body DPS at a distance using the cone the bot will actually shoot with (ADS when botWouldAds). */
-function botDps(gun: GunId, dist: number, b: Balance): number {
-  const w = b.weapons[gun];
-  const spread = botWouldAds(gun, dist, b) ? w.spreadDeg * w.adsSpreadMultiplier : w.spreadDeg;
+function botDps(s: WeaponSlotState, dist: number, b: Balance): number {
+  const w = slotWeapon(b, s);
+  const spread = botWouldAds(s.weapon, dist, b, s.scope ?? null) ? w.spreadDeg * w.adsSpreadMultiplier : w.spreadDeg;
   return expectedBodyDps(w, dist, b.player.radius, spread);
 }
 
-/** Carries a usable scope_4x / scope_8x gun (bots see up to bots.ads.scopedVisionRange). */
+/** Carries a usable gun with an effective scope_4x / scope_8x (bots see up to bots.ads.scopedVisionRange). */
 function hasUsableScope(self: SimPlayer, b: Balance): boolean {
   for (const i of [0, 1] as const) {
-    if (usableSlot(self, i, b) && isScopeSight(b.weapons[self.inv.slots[i]!.weapon].sight)) return true;
+    const s = self.inv.slots[i];
+    if (s && usableSlot(self, i, b) && isScopeSight(effectiveSight(b, s.weapon, s.scope ?? null))) return true;
   }
   return false;
 }
+
+/** M2c (smoke.md "Bots"): line of sight for bots: static colliders AND every live smoke cloud (closeSightRange aside). */
+function botSees(env: BotEnv, a: Vec3, c: Vec3): boolean {
+  if (!lineOfSight(env.ctx.colliders, env.map, a, c)) return false;
+  const clouds = env.smokes;
+  return !clouds || clouds.length === 0 || !segmentBlockedBySmoke(clouds, a, c, env.now, env.balance.items.smoke.cloud);
+}
+
+/** M2c: the melee value of a melee weapon (or fists) at a level (bots.melee.lootValue x levels.botValueMultiplier). */
+const meleeValue = (m: MeleeSlotState | null, b: Balance): number =>
+  m ? b.bots.melee.lootValue[m.weapon] * levelValue(b, m.level) : b.bots.melee.lootValue.fists;
+
+/** M2c: the gun slot holding the rpg, else null. */
+const rpgSlot = (self: SimPlayer): 0 | 1 | null =>
+  self.inv.slots[0]?.weapon === 'rpg' ? 0 : self.inv.slots[1]?.weapon === 'rpg' ? 1 : null;
 
 /** Sight range: bots.ads.scopedVisionRange while carrying a usable scoped gun, else bots.visionRange. */
 export function botVisionRange(self: SimPlayer, b: Balance): number {
@@ -740,13 +841,15 @@ export function botVisionRange(self: SimPlayer, b: Balance): number {
 export function botFireRange(weapon: WeaponId, b: Balance): number {
   const w = b.weapons[weapon];
   if (weapon === 'fists') return w.range;
+  // M2c (melee.md "Bots"): swing when the target is within range x swingRangeFraction.
+  if (isMeleeId(weapon)) return w.range * b.bots.melee.swingRangeFraction;
   const f = botTuning(b).fireRangeFalloffFraction;
   return Math.min(w.range, w.falloffStart + (w.falloffEnd - w.falloffStart) * f);
 }
 
 /** Longest fire range among the bot's usable guns (fists range when unarmed). */
 function bestFireRange(self: SimPlayer, b: Balance): number {
-  let r = b.weapons.fists.range;
+  let r = self.inv.melee ? botFireRange(self.inv.melee.weapon, b) : b.weapons.fists.range;
   for (const i of [0, 1] as const) if (usableSlot(self, i, b)) r = Math.max(r, botFireRange(self.inv.slots[i]!.weapon, b));
   return r;
 }
@@ -795,13 +898,17 @@ export function bestSlotFor(self: SimPlayer, dist: number, b: Balance): SlotInde
   let bestScore = 0;
   for (const i of [0, 1] as const) {
     if (!usableSlot(self, i, b)) continue;
-    const gun = self.inv.slots[i]!.weapon;
+    const s = self.inv.slots[i]!;
+    const gun = s.weapon;
     const pref = prefs?.[gun];
-    if (pref && dist >= pref.minRange && dist <= pref.maxRange && pref.lootValue > bandValue) {
+    // scopes.md "Bots": a mounted scope stretches the band (maxRange x mountedMaxRangeMultiplier).
+    const maxR = pref ? pref.maxRange * (s.scope ? b.bots.scopes.mountedMaxRangeMultiplier[s.scope] : 1) : 0;
+    const value = pref ? pref.lootValue * levelValue(b, s.level ?? 1) : 0;
+    if (pref && dist >= pref.minRange && dist <= maxR && value > bandValue) {
       banded = i;
-      bandValue = pref.lootValue;
+      bandValue = value;
     }
-    const sc = botDps(gun, dist, b) + 1e-3;
+    const sc = botDps(s, dist, b) + 1e-3;
     if (sc > bestScore) {
       bestScore = sc;
       best = i;
@@ -814,15 +921,19 @@ export function bestSlotFor(self: SimPlayer, dist: number, b: Balance): SlotInde
 function worstGunSlot(self: SimPlayer, b: Balance): 0 | 1 | null {
   const [a, c] = self.inv.slots;
   if (!a || !c) return null;
-  return gunBetter(a.weapon, c.weapon, 1, b) ? 1 : 0;
+  return gunBetter(instOf(a), instOf(c), 1, b) ? 1 : 0;
 }
 
 /** Value of a pickup for this bot (0 = not wanted / would be refused). Scores come from botAi (balance.bots.ai). */
 function lootValue(self: SimPlayer, l: LootEntity, b: Balance, ai: BotAi): number {
   const inv = self.inv;
   if (isGun(l.item)) {
+    const g = instOf(l);
+    // levels.md "Upgrade swap": the same gun at a lower level is replaced in place (L1 -> L2: 1.2 > 1.15).
+    const same = upgradeSlotFor(inv, g.weapon, g.level);
+    if (same !== null) return gunBetter(g, instOf(inv.slots[same]!), ai.gunUpgradeFactor, b) ? ai.lootScoreUpgradeGun : 0;
     const hasGun = inv.slots[0] !== null || inv.slots[1] !== null;
-    if (!hasGun) return ai.lootScoreUnarmedGun;
+    if (!hasGun) return l.item === 'rpg' ? ai.lootScoreSecondGun : ai.lootScoreUnarmedGun;
     if (inv.slots[0] === null || inv.slots[1] === null) {
       // Don't carry two of the same gun when an empty slot could hold something else.
       if (inv.slots.some((s) => s?.weapon === l.item)) return ai.lootScoreDuplicateGun;
@@ -831,8 +942,17 @@ function lootValue(self: SimPlayer, l: LootEntity, b: Balance, ai: BotAi): numbe
     const worst = worstGunSlot(self, b);
     if (worst === null) return 0;
     const cur = inv.slots[worst]!;
-    return gunBetter(l.item, cur.weapon, ai.gunUpgradeFactor, b) ? ai.lootScoreUpgradeGun : 0;
+    return gunBetter(g, instOf(cur), ai.gunUpgradeFactor, b) ? ai.lootScoreUpgradeGun : 0;
   }
+  if (isMeleeId(l.item)) {
+    const v = b.bots.melee.lootValue[l.item] * levelValue(b, l.level ?? 1);
+    return v > meleeValue(inv.melee, b) * ai.gunUpgradeFactor ? b.bots.melee.lootScoreMelee : 0;
+  }
+  if (isScopeId(l.item)) {
+    // scopes.md "Bots": only when it would auto-mount on a carried gun; never into the pouch.
+    return wouldMount(b, inv.slots[0], l.item) || wouldMount(b, inv.slots[1], l.item) ? b.bots.scopes.lootScoreScope : 0;
+  }
+  if (l.item === 'smoke') return inv.smokes < b.items.smoke.maxCarry ? b.bots.smoke.lootScoreSmoke : 0;
   if (isArmorId(l.item)) {
     if (!armorAccepted(self, l.item)) return 0;
     const it = b.items[l.item];
@@ -867,13 +987,19 @@ function zoneInfo(self: SimPlayer, env: BotEnv, brain?: BotBrain, search = false
   if (!z) return null;
   const b = env.balance;
   const ai = botAi(b);
-  const margin = b.bots.zoneSafetyMargin;
-  const safeR = Math.max(0, z.targetRadius - margin > z.targetRadius * 0.5 ? z.targetRadius - margin : z.targetRadius * 0.5);
+  const safeR = safeRadiusOf(z, b);
   const p = { x: self.move.pos.x, z: self.move.pos.z };
   const distOut = distXZ(p, z.targetCenter) - safeR;
   const dc = distXZ(p, z.center);
   const outsideCurrent = dc > z.radius;
-  if (distOut <= 0 && !outsideCurrent) return { urgent: false, safeCenter: z.targetCenter, safeR };
+  if (distOut <= 0 && !outsideCurrent) {
+    // Hysteresis: a bot that rotated in stays "urgent" until it is a few metres inside, not on the line.
+    if (brain && brain.zoneUrgentPhase === z.phaseIndex && distOut > -BOT_M2C_AI.zoneHysteresisMetres) {
+      return { urgent: true, safeCenter: z.targetCenter, safeR };
+    }
+    if (brain) brain.zoneUrgentPhase = -1;
+    return { urgent: false, safeCenter: z.targetCenter, safeR };
+  }
   const timeLeftS = Math.max(0, z.phaseEndsAt - env.now) / 1000;
   let walk = Math.max(0, distOut);
   const n = navEnvOf(env);
@@ -889,8 +1015,24 @@ function zoneInfo(self: SimPlayer, env: BotEnv, brain?: BotBrain, search = false
     walk = known ?? distOut * BOT_NAV_AI.detourFactor;
   }
   const travelS = walk / b.movement.walkSpeed;
-  const urgent = outsideCurrent || travelS * ai.zoneUrgencyFactor + ai.zoneUrgencyBufferS >= timeLeftS || z.shrinking;
+  let urgent = outsideCurrent || travelS * ai.zoneUrgencyFactor + ai.zoneUrgencyBufferS >= timeLeftS || z.shrinking;
+  // Hysteresis (in-match stuck follow-up): once urgent in a phase, stay urgent until inside the safe circle. Without it
+  // the estimate flips as the bot moves (toward the circle: not urgent -> back to loot; away: urgent again) and the bot
+  // shuttles between the loot and the zone goal every decision.
+  if (brain) {
+    if (urgent) {
+      brain.zoneUrgentPhase = z.phaseIndex;
+      brain.zoneRotatedPhase = z.phaseIndex;
+    }
+    else if (brain.zoneUrgentPhase === z.phaseIndex) urgent = true;
+  }
   return { urgent, safeCenter: z.targetCenter, safeR };
+}
+
+/** Radius of the next circle the bots treat as safe (targetRadius - zoneSafetyMargin, at least half of it). */
+function safeRadiusOf(z: ZoneState, b: Balance): number {
+  const margin = b.bots.zoneSafetyMargin;
+  return Math.max(0, z.targetRadius - margin > z.targetRadius * 0.5 ? z.targetRadius - margin : z.targetRadius * 0.5);
 }
 
 /**
@@ -905,6 +1047,59 @@ function zoneEntryPoint(p: Vec2, zi: ZoneInfo, tun: BotTuning, botId: PlayerId, 
   const r = zi.safeR * Math.max(0, tun.zoneEntryFraction - tun.zoneEntrySpread * jitter);
   if (d <= r || d < 1e-6) return { x: zi.safeCenter.x, z: zi.safeCenter.z };
   return { x: zi.safeCenter.x + (dx / d) * r, z: zi.safeCenter.z + (dz / d) * r };
+}
+
+/** rpg.md "Bots": the target is near cover, grouped with another enemy, or (nearly) standing still. */
+function rpgWorthy(self: SimPlayer, target: SimPlayer, env: BotEnv): boolean {
+  const r = env.balance.bots.rpg;
+  const tp = target.move.pos;
+  if (Math.hypot(target.move.vel.x, target.move.vel.z) < r.stillSpeed) return true;
+  for (const o of env.players) {
+    if (o === self || o === target || !o.alive || o.dying || o.aboard) continue;
+    if (Math.hypot(o.move.pos.x - tp.x, o.move.pos.z - tp.z) <= r.groupRadius) return true;
+  }
+  let cover = false;
+  forEachColliderNear(env.ctx.colliders, tp.x, tp.z, r.coverRadius, (c) => {
+    if (!cover && overlapsCircle(c, tp.x, tp.z, r.coverRadius)) cover = true;
+  });
+  return cover;
+}
+
+/**
+ * smoke.md "Bots": with a smoke carried and the cooldown over, roll `chance` and plan a quick throw at the point
+ * bots.smoke.throwDistance from the bot toward the attacker (the last damager, else `toward`).
+ */
+function maybeSmoke(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng, chance: number, toward: SimPlayer | null = null): void {
+  const b = env.balance;
+  const now = env.now;
+  if (brain.smokePlan || brain.throwPlan || self.cook || self.inv.smokes <= 0 || now < brain.nextSmokeAt) return;
+  const att = self.lastDamagedBy ? (env.players.find((o) => o.id === self.lastDamagedBy!.id) ?? null) : null;
+  const src = att && att.alive ? att.move.pos : toward ? toward.move.pos : null;
+  if (!src) return;
+  if (!(rng.next() < chance)) return;
+  const pos = self.move.pos;
+  const dx = src.x - pos.x;
+  const dz = src.z - pos.z;
+  const d = Math.max(1e-6, Math.hypot(dx, dz));
+  const k = b.bots.smoke.throwDistance / d;
+  const ax = pos.x + dx * k;
+  const az = pos.z + dz * k;
+  brain.smokePlan = { aim: { x: ax, y: pos.y, z: az }, startedAt: now, stage: 'swap', yaw: null, pitch: null };
+  brain.nextSmokeAt = now + b.bots.smoke.cooldownMs;
+}
+
+/** The loot E would take from `pos` (World.tryPickup: nearest in 3D within range; the later entity wins a tie). */
+function nearestPickable(loot: readonly LootEntity[], pos: Vec3, range: number): LootEntity | null {
+  let best: LootEntity | null = null;
+  let bestD = range * range;
+  for (const l of loot) {
+    const d = (l.pos.x - pos.x) ** 2 + (l.pos.y - pos.y) ** 2 + (l.pos.z - pos.z) ** 2;
+    if (d <= bestD) {
+      bestD = d;
+      best = l;
+    }
+  }
+  return best;
 }
 
 /** Periodic decision: perception, target, goals and one-shot actions. */
@@ -1010,7 +1205,7 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
       if (retaliate) score *= 0.5;
     }
     if (score >= bestScore && (engageable || d >= avoidD)) continue;
-    if (!lineOfSight(env.ctx.colliders, env.map, eye, chestOf(o, b))) continue;
+    if (!botSees(env, eye, chestOf(o, b))) continue;
     if (engageable && score < bestScore) {
       bestTarget = o;
       bestScore = score;
@@ -1073,17 +1268,34 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
   brain.pendingHeal = false;
   brain.sprint = false;
 
-  // Weapon management (not while a grenade throw is in progress).
-  const active = activeWeapon(self.inv);
-  if (brain.throwPlan || self.cook) {
-    // The throw plan drives the slot.
+  // Weapon management (not while a grenade, rocket or smoke plan is in progress).
+  const activeSlot = self.inv.activeSlot;
+  const heldGun = activeSlot === 0 || activeSlot === 1 ? self.inv.slots[activeSlot] : null;
+  const rs = rpgSlot(self);
+  const rpgEmpty = rs !== null && self.inv.slots[rs]!.mag === 0 && self.inv.ammo.ammo_rocket > 0;
+  if (brain.throwPlan || self.cook || brain.rpgPlan || brain.smokePlan) {
+    // The plan drives the slot.
   } else if (target && target.alive) {
-    const want = bestSlotFor(self, distXZ(p2, target.move.pos), b);
-    if (want !== self.inv.activeSlot && self.swapRemainingMs <= 0 && !self.reload) brain.pendingSlot = want;
-  } else if (active === 'fists' && armed) {
+    const d = distXZ(p2, target.move.pos);
+    // melee.md "Bots": an empty mag with the target in close range: the melee weapon instead of reloading in its face.
+    const best = bestSlotFor(self, d, b);
+    const bestGun = best === 0 || best === 1 ? self.inv.slots[best] : null;
+    const closeMelee =
+      !!self.inv.melee && d <= b.bots.melee.closeSwitchRange && ((!!heldGun && heldGun.mag === 0) || (activeSlot === FISTS_SLOT && !!bestGun && bestGun.mag === 0));
+    const want = closeMelee ? FISTS_SLOT : best;
+    if (want !== activeSlot && self.swapRemainingMs <= 0 && (!self.reload || closeMelee)) brain.pendingSlot = want;
+  } else if (activeSlot === GRENADE_SLOT) {
     brain.pendingSlot = bestSlotFor(self, ai.gunScoreDistance, b);
-  } else if (active !== 'fists') {
-    const s = self.inv.slots[self.inv.activeSlot as 0 | 1];
+  } else if (rpgEmpty && activeSlot !== rs && !self.reload) {
+    // rpg.md "Bots": out of combat, re-equip and reload an empty rpg (then swap back below).
+    brain.pendingSlot = rs!;
+  } else if (heldGun && heldGun.weapon === 'rpg' && heldGun.mag > 0) {
+    const back = bestSlotFor(self, ai.gunScoreDistance, b);
+    if (back !== activeSlot) brain.pendingSlot = back;
+  } else if (activeSlot === FISTS_SLOT && armed) {
+    brain.pendingSlot = bestSlotFor(self, ai.gunScoreDistance, b);
+  } else if (heldGun) {
+    const s = heldGun;
     if (s && s.mag === 0 && self.inv.ammo[ammoFor(b, s.weapon)] === 0) {
       brain.pendingSlot = bestSlotFor(self, ai.gunScoreDistance, b);
       if (brain.pendingSlot === self.inv.activeSlot) brain.pendingSlot = -1;
@@ -1105,8 +1317,13 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
     brain.lootId = null;
     brain.retreatUntil = 0;
     brain.throwPlan = null;
+    brain.rpgPlan = null;
     brain.stanceUntil = 0;
     brain.sprint = !brain.targetVisible;
+    // smoke.md "Bots": escaping the zone after recent damage: smoke toward the attacker.
+    if (now - self.lastHurtAt <= b.bots.smoke.recentDamageMs) {
+      maybeSmoke(brain, self, env, rng, b.bots.smoke.zoneCrossThrowChance * pers.smokeChanceMultiplier);
+    }
     return;
   }
 
@@ -1168,6 +1385,28 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
     return;
   }
 
+  // 2d. rpg.md "Bots": a rocket at a visible target that is in cover, grouped or standing still.
+  if (!brain.rpgPlan && target && target.alive && brain.targetVisible && now >= brain.nextRpgAt && !self.reload && !self.heal) {
+    const slot = rpgSlot(self);
+    if (slot !== null && (self.inv.slots[slot]!.mag > 0 || self.inv.ammo.ammo_rocket > 0)) {
+      const d = distXZ(p2, target.move.pos);
+      const r = b.bots.rpg;
+      if (d >= r.minRange && d <= r.maxRange && rpgWorthy(self, target, env)) {
+        if (rng.next() < r.fireChancePerDecision * pers.grenadeChanceMultiplier) {
+          const a = rng.next() * Math.PI * 2;
+          const e = r.aimErrorMetres * Math.sqrt(rng.next());
+          brain.rpgPlan = { targetId: target.id, slot, startedAt: now, offset: { x: Math.cos(a) * e, z: Math.sin(a) * e }, fired: false };
+          brain.nextRpgAt = now + r.cooldownMs;
+        }
+      }
+    }
+  }
+  if (brain.rpgPlan) {
+    brain.goal = null;
+    brain.lootId = null;
+    return;
+  }
+
   // 2b. Retreat to heal: hurt, carrying a heal, and facing an enemy (personality decides the threshold).
   const canHeal = chooseHeal(self.hp, self.inv.heals, b) !== null;
   if (
@@ -1180,6 +1419,8 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
   ) {
     brain.retreatUntil = now + tun.retreatMs;
     brain.retreatCooldownUntil = now + tun.retreatMs * 3;
+    // smoke.md "Bots": entering Retreat: smoke toward the attacker.
+    maybeSmoke(brain, self, env, rng, b.bots.smoke.retreatThrowChance * pers.smokeChanceMultiplier, target);
   }
   if (now < brain.retreatUntil && brain.lastSeenPos) {
     const ax = pos.x - brain.lastSeenPos.x;
@@ -1194,8 +1435,9 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
 
   // 3. Engage: movement handled per tick around the target; out of sight, go to where it was last seen.
   const chasePos = brain.targetVisible && target ? { x: target.move.pos.x, z: target.move.pos.z } : brain.lastSeenPos;
-  if (target && target.alive && chasePos && (armed || !brain.targetVisible || distXZ(p2, target.move.pos) < b.bots.lootSearchRadius)) {
-    if (armed || activeWeapon(target.inv) === 'fists' || !nearestWantedLoot(brain, self, env)) {
+  const meleeChaseOk = armed || distXZ(p2, target ? target.move.pos : p2) <= b.bots.melee.chaseRange;
+  if (target && target.alive && chasePos && meleeChaseOk && (armed || !brain.targetVisible || distXZ(p2, target.move.pos) < b.bots.lootSearchRadius)) {
+    if (armed || !hasUsableGun(target, b) || !nearestWantedLoot(brain, self, env)) {
       if (!brain.targetVisible && distXZ(p2, chasePos) < ai.arriveDistance) {
         // Reached the last known position without regaining sight: give up.
         brain.targetId = null;
@@ -1367,7 +1609,7 @@ function visibleGrenadeNear(self: SimPlayer, env: BotEnv, radius: number): Vec3 
   for (const g of gs) {
     const d = Math.hypot(g.pos.x - pos.x, g.pos.z - pos.z);
     if (d > bestD) continue;
-    if (!lineOfSight(env.ctx.colliders, env.map, eye, { x: g.pos.x, y: g.pos.y + lift, z: g.pos.z })) continue;
+    if (!botSees(env, eye, { x: g.pos.x, y: g.pos.y + lift, z: g.pos.z })) continue;
     best = g.pos;
     bestD = d;
   }
@@ -1614,6 +1856,11 @@ function nearestWantedLoot(brain: BotBrain, self: SimPlayer, env: BotEnv): LootE
     const d = Math.hypot(l.pos.x - pos.x, l.pos.z - pos.z);
     if (d > b.bots.lootSearchRadius) continue;
     if (z && Math.hypot(l.pos.x - z.center.x, l.pos.z - z.center.z) > z.radius) continue;
+    // After rotating in for this phase, loot outside the next circle would only pull the bot back out (and the tide
+    // urgency straight back in): skip it until the next phase.
+    if (z && brain.zoneRotatedPhase === z.phaseIndex && distXZ(l.pos, z.targetCenter) > safeRadiusOf(z, b) - BOT_M2C_AI.zoneHysteresisMetres) {
+      continue;
+    }
     if (brain.ignoredLoot.includes(l.id)) continue;
     // Contested loot: closer to a visible enemy than the avoid range (and not clearly ours).
     if (avoid && distXZ(avoid, l.pos) < avoidR && distXZ(avoid, l.pos) < d) continue;
@@ -2048,6 +2295,9 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
   const weapon = activeWeapon(self.inv);
   const wb = b.weapons[weapon];
   const fireRange = botFireRange(weapon, b);
+  const heldSlot = self.inv.activeSlot === 0 || self.inv.activeSlot === 1 ? self.inv.slots[self.inv.activeSlot] : null;
+  const heldScope = heldSlot?.scope ?? null;
+  const closeRange = weapon === 'fists' || isMeleeId(weapon);
   if (engaged && target && !retreating) {
     const zi = zoneInfo(self, env, brain, false);
     const tx = (target.move.pos.x - pos.x) / Math.max(dist, 1e-6);
@@ -2070,10 +2320,10 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
         }
       }
     }
-    const pref = weapon === 'fists' ? undefined : b.bots.weaponPrefs?.[weapon];
+    const pref = isM2cGunId(weapon) ? b.bots.weaponPrefs?.[weapon] : undefined;
     const preferred = Math.min(
       fireRange,
-      weapon === 'fists'
+      closeRange
         ? wb.range * 0.6
         : pref
           ? (pref.minRange + pref.maxRange) / 2
@@ -2088,13 +2338,14 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
     } else if (dist > preferred * 1.3 || dist > fireRange) {
       ax = tx;
       az = tz;
-    } else if (dist < preferred * 0.4 && weapon !== 'fists' && weapon !== 'shotgun') {
+    } else if (dist < preferred * 0.4 && !closeRange && weapon !== 'shotgun' && weapon !== 'dbshotgun') {
       ax = -tx * 0.5;
       az = -tz * 0.5;
     }
-    // Perpendicular strafe.
-    const sx = -tz * brain.strafeDir;
-    const sz = tx * brain.strafeDir;
+    // Perpendicular strafe. M2c: none for melee and fists inside reach (orbiting a target at 2 m outruns the aim turn).
+    const strafe = closeRange && dist <= fireRange ? 0 : 1;
+    const sx = -tz * brain.strafeDir * strafe;
+    const sz = tx * brain.strafeDir * strafe;
     let cx = ax + sx * 0.8;
     let cz = az + sz * 0.8;
     if (zi && zi.urgent && brain.goal) {
@@ -2130,6 +2381,10 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
       if (self.inv.activeSlot !== GRENADE_SLOT) {
         if (self.inv.grenades <= 0) brain.throwPlan = null;
         else if (self.swapRemainingMs <= 0 && !self.cook) input.selectSlot = GRENADE_SLOT;
+      } else if (self.inv.selectedThrowable !== 'grenade') {
+        // M2c: the throwable slot holds a smoke selection: cycle to the frag first.
+        if (self.inv.grenades <= 0) brain.throwPlan = null;
+        else if (self.swapRemainingMs <= 0 && !self.smokeHeld) input.selectSlot = GRENADE_SLOT;
       } else if (
         self.swapRemainingMs <= 0 &&
         self.throwRecoveryMs <= 0 &&
@@ -2166,6 +2421,90 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
     }
     if (plan.yaw !== null && plan.pitch !== null) planAim = { yaw: plan.yaw, pitch: plan.pitch };
     else planAim = { yaw: yawTo(p2, plan.aim), pitch: 0 };
+  }
+
+  // M2c (rpg.md "Bots"): rocket plan: stand still, swap to the rpg, ADS, lead the target's feet, one shot, swap back.
+  const rp = plan ? null : brain.rpgPlan;
+  if (rp) {
+    mx = 0;
+    mz = 0;
+    const tgt = env.players.find((o) => o.id === rp.targetId) ?? null;
+    const slot = self.inv.slots[rp.slot];
+    const r = b.bots.rpg;
+    const rb = b.weapons.rpg.rocket;
+    const done = rp.fired && self.lastShotWeapon === 'rpg';
+    if (done || now - rp.startedAt > BOT_M2C_AI.rpgPlanTimeoutMs || !tgt || !tgt.alive || !slot || slot.weapon !== 'rpg' || self.move.dropping) {
+      brain.rpgPlan = null;
+      brain.pendingSlot = bestSlotFor(self, tgt ? distXZ(p2, tgt.move.pos) : ai.gunScoreDistance, b);
+    } else if (self.inv.activeSlot !== rp.slot) {
+      planFire = false;
+      if (self.swapRemainingMs <= 0 && !self.cook) input.selectSlot = rp.slot;
+    } else {
+      const eye = eyeOf(self, b);
+      const tp = tgt.move.pos;
+      const flight = Math.hypot(tp.x - eye.x, tp.z - eye.z) / rb.speed;
+      const ax = tp.x + tgt.move.vel.x * flight * r.leadFactor + rp.offset.x;
+      const az = tp.z + tgt.move.vel.z * flight * r.leadFactor + rp.offset.z;
+      const hx = ax - eye.x;
+      const hz = az - eye.z;
+      const hd = Math.hypot(hx, hz);
+      const t = hd / rb.speed;
+      // Gravity drop compensation (rocketPosAt: y - 0.5 g t^2).
+      const yaw = Math.atan2(-hx, -hz);
+      const pitch = Math.atan2(tp.y - eye.y + 0.5 * rb.gravity * t * t, hd);
+      planAim = { yaw, pitch };
+      const aimDir = { x: -Math.sin(yaw) * Math.cos(pitch), y: Math.sin(pitch), z: -Math.cos(yaw) * Math.cos(pitch) };
+      if (raycastStatic(env.ctx.colliders, env.map, eye, aimDir, r.selfSafeDistance)) {
+        brain.rpgPlan = null;
+        planFire = false;
+      } else {
+        input.ads = botWouldAds('rpg', hd, b, slot.scope ?? null);
+        const aimed = Math.abs(wrapAngle(self.yaw - yaw)) < BOT_M2C_AI.rpgAimTolerance && Math.abs(self.pitch - pitch) < BOT_M2C_AI.rpgAimTolerance;
+        const steady = !input.ads || adsProgressOf(self.move, 'rpg', b, slot.scope ?? null) >= 1;
+        const ready = self.swapRemainingMs <= 0 && slot.mag > 0 && !self.reload;
+        planFire = ready && aimed && steady && !self.prevFire;
+        if (planFire) rp.fired = true;
+      }
+    }
+  }
+
+  // M2c (smoke.md "Bots"): quick smoke throw (no cook): select the smoke, press, release toward the planned point.
+  const sp = plan || rp ? null : brain.smokePlan;
+  if (sp) {
+    // A quick throw: hold position for the half second it takes, so the cloud lands where it was planned.
+    mx = 0;
+    mz = 0;
+    if (now - sp.startedAt > BOT_M2C_AI.smokePlanTimeoutMs || self.move.dropping || (self.inv.smokes <= 0 && sp.stage !== 'release')) {
+      brain.smokePlan = null;
+    } else if (sp.stage === 'swap') {
+      planFire = false;
+      if (self.inv.activeSlot !== GRENADE_SLOT) {
+        if (self.swapRemainingMs <= 0 && !self.cook) input.selectSlot = GRENADE_SLOT;
+      } else if (self.inv.selectedThrowable !== 'smoke') {
+        if (self.swapRemainingMs <= 0 && !self.cook) input.selectSlot = GRENADE_SLOT;
+      } else if (
+        self.swapRemainingMs <= 0 &&
+        self.throwRecoveryMs <= 0 &&
+        isStanceSettled(self.move) &&
+        !self.prevFire &&
+        !env.players.some((o) => o !== self && o.brain !== null && o.brain.throwSolvedAt === now)
+      ) {
+        brain.throwSolvedAt = now;
+        const eye = eyeOf(self, b);
+        sp.yaw = yawTo(eye, sp.aim);
+        // The frag solver with the cook that leaves the smoke fuse (same throw formula; smoke.md "Carrying and throwing").
+        const cookMs = Math.max(0, b.items.grenade.fuseMs - b.items.smoke.fuseMs);
+        sp.pitch = solveThrow(eye, sp.yaw, sp.aim, self.move.stance === 'prone', cookMs, env.ctx).deg * DEG2RAD;
+        sp.stage = 'press';
+      }
+    } else if (sp.stage === 'press') {
+      planFire = true;
+      if (self.smokeHeld) sp.stage = 'release';
+    } else {
+      planFire = false;
+      brain.smokePlan = null;
+    }
+    if (sp.yaw !== null && sp.pitch !== null) planAim = { yaw: sp.yaw, pitch: sp.pitch };
   }
 
   // Obstacle avoidance and stuck detour. A low obstacle (log, crate edge) under the probe gets a hop. Path following
@@ -2248,10 +2587,10 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
     brain.jumpNext = false;
   }
 
-  // ADS (bots.ads): scoped guns always while engaged, iron/red dot beyond ads.minRange.
-  const holdingGun = self.inv.activeSlot !== GRENADE_SLOT && weapon !== 'fists';
-  if (engaged && target && !self.move.dropping && !retreating && !plan && holdingGun && dist <= fireRange) {
-    input.ads = botWouldAds(weapon, dist, b);
+  // ADS (bots.ads): scoped guns always while engaged, iron/red dot beyond ads.minRange (M2c: by the effective sight).
+  const holdingGun = heldSlot !== null;
+  if (engaged && target && !self.move.dropping && !retreating && !plan && !rp && !sp && holdingGun && dist <= fireRange) {
+    input.ads = botWouldAds(weapon, dist, b, heldScope);
   }
   // Stance: hold the rolled stance while it lasts, otherwise get back up (only from a settled stance).
   if (isStanceSettled(self.move) && !self.move.dropping && self.move.grounded) {
@@ -2271,11 +2610,13 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
       brain.burstUntil = now + b.bots.fireBurstMs;
       brain.pauseUntil = brain.burstUntil + b.bots.burstPauseMs;
     }
-    const inBurst = now < brain.burstUntil;
+    // M2c: melee weapons swing on their cycle (the swing is the pacing), no burst pauses.
+    const inBurst = now < brain.burstUntil || isMeleeId(weapon);
     const aimed = Math.abs(wrapAngle(input.yaw - desiredYaw)) < Math.max(maxTurn, 0.15);
-    const scoped = isScopeSight(wb.sight);
-    const steady = !scoped || adsProgressOf(self.move, weapon, b) >= m2a.ads.scopedFireMinProgress;
-    if (reacted && inBurst && dist <= fireRange && aimed && steady) {
+    const scoped = isScopeSight(effectiveSight(b, weapon, heldScope));
+    const steady = !scoped || adsProgressOf(self.move, weapon, b, heldScope) >= m2a.ads.scopedFireMinProgress;
+    // The rpg only fires through its plan (rpg.md "Bots").
+    if (reacted && inBurst && dist <= fireRange && aimed && steady && weapon !== 'rpg') {
       input.fire = wb.automatic ? true : brain.parity;
     }
   }
@@ -2283,7 +2624,15 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
   // One-shot actions decided this period.
   if (input.selectSlot !== -1) {
     brain.pendingSlot = -1;
-  } else if (brain.pendingSlot !== -1 && brain.pendingSlot !== self.inv.activeSlot && !brain.throwPlan && !self.cook) {
+  } else if (
+    brain.pendingSlot !== -1 &&
+    brain.pendingSlot !== self.inv.activeSlot &&
+    !brain.throwPlan &&
+    !brain.rpgPlan &&
+    !brain.smokePlan &&
+    !self.cook &&
+    !self.smokeHeld
+  ) {
     input.selectSlot = brain.pendingSlot;
     brain.pendingSlot = -1;
   } else {
@@ -2306,7 +2655,9 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
     } else {
       const d3 = Math.hypot(l.pos.x - pos.x, l.pos.y - pos.y, l.pos.z - pos.z);
       if (d3 <= b.player.pickupRange * ai.interactFraction && brain.parity) {
-        input.interact = true;
+        // E takes the NEAREST item in reach (World.tryPickup): press only when that is the wanted one, so a gun just
+        // dropped at the feet by a swap is not picked straight back up (M2c fix for swap churn).
+        if (nearestPickable(env.loot, pos, b.player.pickupRange)?.id === l.id) input.interact = true;
         brain.lootPresses++;
         if (brain.lootPresses > ai.lootGiveUpPresses) {
           brain.ignoredLoot.push(l.id);

@@ -5,7 +5,7 @@
 import { createWorld } from '../src/shared/sim/World';
 import { WS_PATH } from '../src/shared/constants';
 import { startServer } from './app';
-import { readConfig } from './config';
+import { describeLayoutPin, readConfig } from './config';
 import { describeOriginPolicy } from './origin';
 
 async function main(): Promise<void> {
@@ -22,6 +22,7 @@ async function main(): Promise<void> {
     maxRooms: config.maxRooms,
     maxConnections: config.maxConnections,
     mapPin: config.mapPin,
+    layoutSeed: config.layoutSeed,
     maxConnsPerIp: config.maxConnsPerIp,
     originPolicy: config.originPolicy,
     trustProxy: config.trustProxy,
@@ -36,6 +37,7 @@ async function main(): Promise<void> {
     config.seed !== null ? `SEED ${config.seed} (deterministic room seeds)` : 'random room seeds',
     `max ${config.maxRooms} rooms / ${config.maxConnections} connections`,
     config.mapPin ? `MAP pinned to ${config.mapPin}` : null,
+    config.layoutSeed !== null ? `LAYOUT_SEED ${describeLayoutPin(config.layoutSeed)}` : null,
     `ws origins: ${describeOriginPolicy(config.originPolicy)}`,
   ].filter(Boolean);
   if (config.production && config.originPolicy.any) {

@@ -1,0 +1,12 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`layout contract > LV1: is deterministic, decor-independent in its sim part, and pins golden hashes 1`] = `
+{
+  "island01 0x00000000": "0xD939C1C1",
+  "island01 0x00000001": "0x44E0BB36",
+  "island01 0x3FA2C1D0": "0xACA4ACFD",
+  "office 0x00000000": "0xFEE2A6CF",
+  "office 0x00000001": "0x392C5EEE",
+  "office 0x3FA2C1D0": "0x89B1FFF9",
+}
+`;

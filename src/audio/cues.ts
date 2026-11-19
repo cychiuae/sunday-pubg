@@ -26,6 +26,11 @@ export const CUE_IDS = [
   'shot.dmr.remote',
   'shot.sniper.local',
   'shot.sniper.remote',
+  // M2c guns (docs/audio/M2c.md §3)
+  'shot.dbshotgun.local',
+  'shot.dbshotgun.remote',
+  'shot.revolver.local',
+  'shot.revolver.remote',
   'weapon.bolt',
   'weapon.dryFire',
   'weapon.switch',
@@ -118,6 +123,37 @@ export const CUE_IDS = [
   // Ambience one-shots
   'amb.gull',
   'amb.keys',
+  // ---- M2c (docs/audio/M2c.md) ----
+  // Melee (§2)
+  'melee.swing.local',
+  'melee.swing.remote',
+  'melee.hit',
+  'melee.knockback',
+  'glass.shatter',
+  // RPG (§4); the in-flight whistle is a RocketLayers bed
+  'rocket.launch.local',
+  'rocket.launch.remote',
+  'rocket.flyby',
+  'rocket.dud',
+  'explosion.rocket',
+  // Smoke (§5)
+  'smoke.pin',
+  'smoke.bounce',
+  'smoke.pop',
+  'smoke.hiss',
+  // Levels and scopes (§7, §7a)
+  'pickup.level',
+  'pickup.scope',
+  'scope.mount',
+  'scope.unmount',
+  // Look detail one-shots (§8)
+  'amb.bird',
+  'amb.crickets',
+  'amb.chime',
+  'amb.palms',
+  'amb.copier',
+  'amb.hvacCycle',
+  'amb.cooler',
 ] as const;
 
 export type CueId = (typeof CUE_IDS)[number];
@@ -176,6 +212,12 @@ export const CUES: Record<CueId, CueDef> = {
   'shot.sniper.local': flat({ ...SHOT_LOCAL, priority: 82, maxInstances: 2, gain: 1 }),
   'shot.sniper.remote': world({ ...SHOT_REMOTE, priority: 74, maxInstances: 3, gain: 1, refDistance: 8, maxDistance: 260, rolloff: 0.6 }),
   // Sniper bolt cycle: the lock lands at fireIntervalMs, so enemies can count the gap (combat.md).
+  // M2c: the deepest gun (a doubled flam only if a future both-barrels input exists; one barrel per click today).
+  'shot.dbshotgun.local': flat({ ...SHOT_LOCAL, priority: 81, maxInstances: 2, gain: 1, pitchJitter: 0.5 }),
+  'shot.dbshotgun.remote': world({ ...SHOT_REMOTE, priority: 71, maxInstances: 3, gain: 1, maxDistance: 140 }),
+  // M2c: heavy cork pop plus the cylinder tick.
+  'shot.revolver.local': flat({ ...SHOT_LOCAL, maxInstances: 2, gain: 0.9 }),
+  'shot.revolver.remote': world({ ...SHOT_REMOTE, maxInstances: 4, gain: 0.95, maxDistance: 150 }),
   'weapon.bolt': world({
     bus: 'sfx', priority: 62, maxInstances: 3, gain: 0.6, pitchJitter: 0.2, gainJitterDb: 1, cooldownS: 0,
     refDistance: 2, maxDistance: 30, rolloff: 1.1,
@@ -389,6 +431,110 @@ export const CUES: Record<CueId, CueDef> = {
     bus: 'ambience', priority: 10, maxInstances: 2, gain: 0.35, pitchJitter: 1, gainJitterDb: 2, cooldownS: 0.3,
     refDistance: 6, maxDistance: 50, rolloff: 0.8,
   }),
+
+  // ---- M2c ------------------------------------------------------------------------------------------------------
+  // Melee swing: the whoosh peaks on the hit frame (durationS = windup). Remote swings are a close-range threat cue
+  // (above remote footsteps); the recipe scales the range per weapon (knife shortest, paddle longest).
+  'melee.swing.local': flat({ bus: 'sfx', priority: 78, maxInstances: 2, gain: 0.6, pitchJitter: 0.8, gainJitterDb: 1, cooldownS: 0.05 }),
+  'melee.swing.remote': world({
+    bus: 'sfx', priority: 69, maxInstances: 4, gain: 0.7, pitchJitter: 1, gainJitterDb: 1.5, cooldownS: 0,
+    refDistance: 2, maxDistance: 20, rolloff: 1.1,
+  }),
+  // Contact, variant `<weapon>.<material>`. 2D for the local attacker/victim (+5 priority), 3D otherwise.
+  'melee.hit': world({
+    bus: 'sfx', priority: 67, maxInstances: 4, gain: 0.75, pitchJitter: 1.2, gainJitterDb: 1.5, cooldownS: 0.02,
+    refDistance: 2, maxDistance: 30, rolloff: 1,
+  }),
+  // Paddle knockback: shove, then the body thud at durationS. Keyed per victim.
+  'melee.knockback': world({
+    bus: 'sfx', priority: 70, maxInstances: 3, gain: 0.8, pitchJitter: 0.6, gainJitterDb: 1, cooldownS: 0,
+    refDistance: 3, maxDistance: 35, rolloff: 1,
+  }),
+  // A pane breaking is route intel: heard across the floor, through the indoor reverb.
+  'glass.shatter': world({
+    bus: 'sfx', priority: 73, maxInstances: 3, gain: 0.8, pitchJitter: 1.5, gainJitterDb: 1.5, cooldownS: 0.03,
+    refDistance: 3, maxDistance: 50, rolloff: 0.9,
+  }),
+  'rocket.launch.local': flat({ bus: 'sfx', priority: 84, maxInstances: 1, gain: 1, pitchJitter: 0.4, gainJitterDb: 0.5, cooldownS: 0 }),
+  'rocket.launch.remote': world({
+    bus: 'sfx', priority: 77, maxInstances: 3, gain: 1, pitchJitter: 0.6, gainJitterDb: 1, cooldownS: 0,
+    refDistance: 8, maxDistance: 220, rolloff: 0.6,
+  }),
+  'rocket.flyby': world({
+    bus: 'sfx', priority: 79, maxInstances: 2, gain: 0.8, pitchJitter: 0.5, gainJitterDb: 1, cooldownS: 0.1,
+    refDistance: 2, maxDistance: 14, rolloff: 1,
+  }),
+  // Dud (too close to arm, or a direct hit without a blast): a hollow clunk and a small puff.
+  'rocket.dud': world({
+    bus: 'sfx', priority: 72, maxInstances: 2, gain: 0.7, pitchJitter: 0.8, gainJitterDb: 1, cooldownS: 0,
+    refDistance: 3, maxDistance: 50, rolloff: 0.9,
+  }),
+  // Separate from the frag bang so a rocket barrage cannot steal every grenade explosion.
+  'explosion.rocket': world({
+    bus: 'sfx', priority: 99, maxInstances: 3, gain: 1, pitchJitter: 1, gainJitterDb: 1, cooldownS: 0,
+    refDistance: 8, maxDistance: 180, rolloff: 0.5,
+  }),
+  // Smoke: a frag's quieter cousin. Pin and bounce sit just under the frag's so a live frag wins a contested voice.
+  'smoke.pin': world({
+    bus: 'sfx', priority: 74, maxInstances: 3, gain: 0.55, pitchJitter: 0.4, gainJitterDb: 1, cooldownS: 0,
+    refDistance: 2, maxDistance: 10, rolloff: 1.2,
+  }),
+  'smoke.bounce': world({
+    bus: 'sfx', priority: 67, maxInstances: 4, gain: 0.6, pitchJitter: 1.5, gainJitterDb: 1.5, cooldownS: 0.02,
+    refDistance: 2, maxDistance: 30, rolloff: 1,
+  }),
+  'smoke.pop': world({
+    bus: 'sfx', priority: 64, maxInstances: 3, gain: 0.7, pitchJitter: 0.6, gainJitterDb: 1, cooldownS: 0,
+    refDistance: 4, maxDistance: 60, rolloff: 0.9,
+  }),
+  // Canister hiss shaped by the cloud's grow / hold / fade (PlayCommand.params), keyed `smoke:<id>`.
+  'smoke.hiss': world({
+    bus: 'sfx', priority: 52, maxInstances: 4, gain: 0.4, pitchJitter: 0.3, gainJitterDb: 0, cooldownS: 0,
+    refDistance: 3, maxDistance: 35, rolloff: 1,
+  }),
+  // Local-only kalimba run that rises with the item level (1 to 4 notes). No pitch jitter: the level stays learnable.
+  'pickup.level': flat({ bus: 'sfx', priority: 61, maxInstances: 1, gain: 0.3, pitchJitter: 0, gainJitterDb: 0, cooldownS: 0.1 }),
+  'pickup.scope': world({
+    bus: 'sfx', priority: 58, maxInstances: 1, gain: 0.5, pitchJitter: 0.3, gainJitterDb: 1, cooldownS: 0.05,
+    refDistance: 2, maxDistance: 10, rolloff: 1.2,
+  }),
+  'scope.mount': world({
+    bus: 'sfx', priority: 56, maxInstances: 1, gain: 0.5, pitchJitter: 0.3, gainJitterDb: 1, cooldownS: 0.05,
+    refDistance: 2, maxDistance: 8, rolloff: 1.2,
+  }),
+  'scope.unmount': world({
+    bus: 'sfx', priority: 56, maxInstances: 1, gain: 0.5, pitchJitter: 0.3, gainJitterDb: 1, cooldownS: 0.05,
+    refDistance: 2, maxDistance: 8, rolloff: 1.2,
+  }),
+  // Look-preset detail one-shots (decoration: first to be stolen, duck with the ambience).
+  'amb.bird': world({
+    bus: 'ambience', priority: 10, maxInstances: 2, gain: 0.3, pitchJitter: 2, gainJitterDb: 2, cooldownS: 0.3,
+    refDistance: 10, maxDistance: 90, rolloff: 0.7,
+  }),
+  'amb.crickets': world({
+    bus: 'ambience', priority: 10, maxInstances: 2, gain: 0.25, pitchJitter: 1, gainJitterDb: 2, cooldownS: 0.3,
+    refDistance: 6, maxDistance: 60, rolloff: 0.8,
+  }),
+  'amb.chime': world({
+    bus: 'ambience', priority: 10, maxInstances: 2, gain: 0.3, pitchJitter: 0, gainJitterDb: 2, cooldownS: 0.3,
+    refDistance: 12, maxDistance: 100, rolloff: 0.6,
+  }),
+  'amb.palms': world({
+    bus: 'ambience', priority: 10, maxInstances: 2, gain: 0.4, pitchJitter: 1, gainJitterDb: 2, cooldownS: 0.3,
+    refDistance: 10, maxDistance: 80, rolloff: 0.7,
+  }),
+  'amb.copier': world({
+    bus: 'ambience', priority: 10, maxInstances: 2, gain: 0.35, pitchJitter: 1, gainJitterDb: 2, cooldownS: 0.3,
+    refDistance: 6, maxDistance: 60, rolloff: 0.8,
+  }),
+  'amb.hvacCycle': world({
+    bus: 'ambience', priority: 10, maxInstances: 2, gain: 0.4, pitchJitter: 1, gainJitterDb: 2, cooldownS: 0.3,
+    refDistance: 8, maxDistance: 70, rolloff: 0.7,
+  }),
+  'amb.cooler': world({
+    bus: 'ambience', priority: 10, maxInstances: 2, gain: 0.35, pitchJitter: 1, gainJitterDb: 2, cooldownS: 0.3,
+    refDistance: 5, maxDistance: 50, rolloff: 0.8,
+  }),
 };
 
 /** M2b: persistent carrier engine bed per model (DropLayers). Distances in metres, like CueDef. */
@@ -485,4 +631,41 @@ export const AUDIO_TUNING = {
   reverbSend: 0.22,
   /** Ambience scene crossfade on map change, seconds. */
   sceneFadeS: 1.5,
+
+  // --- M2c (docs/audio/M2c.md) ---------------------------------------------------------------------------------
+  /** Melee whoosh peak clamp (s) around meleeSwing.windupMs. */
+  meleePeakMinS: 0.04,
+  meleePeakMaxS: 0.6,
+  /** Paddle knockback: the body thud lands this long after the shove (no balance key: a feel number). */
+  knockbackThudS: 0.3,
+  /** Rocket whistle emitters (RocketLayers): cap, range, gain, distance model. */
+  rocketEmitters: 3,
+  rocketRefM: 5,
+  rocketMaxM: 90,
+  rocketRolloff: 0.9,
+  rocketGain: 0.7,
+  /** Doppler-ish pitch: c / (c - v_radial), clamped. */
+  rocketSoundSpeed: 343,
+  rocketDopplerMin: 0.78,
+  rocketDopplerMax: 1.35,
+  /** Fly-by whoosh when a rocket's closest approach passes inside this (m). */
+  rocketFlybyM: 6,
+  /** A rocket missing from setRockets this long (ms) fades out. */
+  rocketMissingMs: 150,
+  /** Without setRockets for this long (ms), the engine dead-reckons rockets from rocketFired (rocketPosAt). */
+  rocketFeedStaleMs: 500,
+  /** Smoke hiss: a late joiner more than this into a cloud skips the deploy pop (s). */
+  smokePopSkipS: 0.5,
+  /** Fallback cloud shape when the balance has no items.smoke.cloud (s). */
+  smokeFallbackGrowS: 1.5,
+  smokeFallbackFadeS: 3,
+  /** Listener inside a cloud: ambience-only low-pass and duck (gameplay sounds stay full-band, M2c §5.3). */
+  cocoonLowpassHz: 2500,
+  cocoonAmbienceDb: -6,
+  /** Auto-mounted scope: the mount click follows the pickup by this much (s). */
+  scopeAutoMountDelayS: 0.09,
+  /** Pickup level sparkle: MIDI notes (major pentatonic from G5) and spacing. */
+  levelNotes: [79, 84, 88, 91],
+  levelNoteStepS: 0.055,
+  levelSparkleDelayS: 0.08,
 } as const;

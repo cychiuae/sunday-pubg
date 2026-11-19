@@ -18,7 +18,16 @@ import type {
   GunId,
   HealId,
   ItemId,
+  ItemLevel,
   LootTier,
+  M2cArmorTier,
+  M2cGunId,
+  M2cHeldId,
+  M2cSightType,
+  M2cWeaponId,
+  MeleeId,
+  ScopedSightType,
+  ScopeId,
   SightType,
   Stance,
   StanceTransitionKey,
@@ -27,12 +36,19 @@ import type {
 import {
   AMMO_IDS,
   ARMOR_IDS,
-  ARMOR_PIECES,
   BOT_PERSONALITY_IDS,
-  GUN_IDS,
   HEAL_IDS,
-  ITEM_IDS,
-  SIGHT_TYPES,
+  isMeleeId,
+  M2C_AMMO_IDS,
+  M2C_ARMOR_IDS,
+  M2C_ARMOR_PIECES,
+  M2C_GUN_IDS,
+  M2C_ITEM_IDS,
+  M2C_SIGHT_TYPES,
+  M2C_WEAPON_IDS,
+  MELEE_IDS,
+  SCOPE_IDS,
+  SCOPED_SIGHT_TYPES,
   STANCE_TRANSITION_KEYS,
   STANCES,
   WEAPON_IDS,
@@ -84,8 +100,11 @@ export interface ArmorBalance {
   absorbFraction: number;
 }
 
-/** M2a: `items.grenade` (systems/grenades.md; see its `_note` for formulas). Unit rule: ms / degrees / metres. */
-export interface GrenadeBalance {
+/**
+ * M2c (smoke.md "Tunable values"): the throw, flight and bounce keys every throwable has (`items.grenade` and
+ * `items.smoke`; grenades.md formulas). Unit rule: ms / degrees / metres.
+ */
+export interface ThrowableBalance {
   maxCarry: number;
   spawnQty: number;
   /** Fuse runs from the pin pull (true) rather than from the throw. */
@@ -109,20 +128,178 @@ export interface GrenadeBalance {
   restSpeed: number;
   waterVelocityDamping: number;
   bounceEventMinSpeed: number;
-  /** Blast radius; validated innerRadius < radius. */
+}
+
+/**
+ * M2c: the grenade blast model (grenades.md "Explosion"): flat on `items.grenade`, nested as `weapons.rpg.rocket.blast`.
+ * Damage = maxDamage within innerRadius, then linear to maxDamage x minDamageFactor at radius; LOS from
+ * centre + losHeightOffset to each chest; vests absorb, helmets do not.
+ */
+export interface BlastBalance {
+  /** Blast radius; validated 0 <= innerRadius < radius. */
   radius: number;
   innerRadius: number;
   maxDamage: number;
   minDamageFactor: number;
-  /** The thrower is damaged by their own blast. */
+  /** The thrower / shooter is damaged by their own blast. */
   selfDamage: boolean;
-  /** Blast LOS ray starts this far above the grenade centre. */
+  /** Blast LOS ray starts this far above the blast centre. */
   losHeightOffset: number;
+}
+
+/** M2a: `items.grenade` (the frag; systems/grenades.md). M2c: = the shared throwable keys + the flat blast keys. */
+export interface GrenadeBalance extends ThrowableBalance, BlastBalance {
   /**
    * M2a addendum (optional; client only): the HUD danger indicator lists live grenades within radius + dangerMargin
    * metres of the local player. Absent = 2 (grenades.md "Danger indicator"). Must be >= 0.
    */
   dangerMargin?: number;
+}
+
+/** M2c (smoke.md): `items.smoke.cloud`. Shape over time: src/shared/smoke.ts. */
+export interface SmokeCloudBalance {
+  /** Opaque radius at full size, m. */
+  radius: number;
+  /** Sphere centre above the deploy point, m. */
+  centerHeight: number;
+  growMs: number;
+  holdMs: number;
+  fadeMs: number;
+  /** Two points closer than this see each other through smoke (bots, name tags). */
+  closeSightRange: number;
+  /** At most this many clouds; a new one forces the oldest into its fade. Integer >= 1. */
+  maxActive: number;
+}
+/** M2c (smoke.md): `items.smoke`: the shared throwable keys (cookable is false) + the cloud. No blast. */
+export interface SmokeBalance extends ThrowableBalance {
+  cloud: SmokeCloudBalance;
+}
+
+/**
+ * M2c (melee.md): the extra keys of `weapons.<MeleeId>` (fireIntervalMs = the swing cycle, range = the reach).
+ * Validated: 0 < hitFrameMs < fireIntervalMs, sweepRadius >= 0, knockback >= 0, ammo null, magSize 0, sight none.
+ */
+export interface MeleeFields {
+  hitFrameMs: number;
+  sweepRadius: number;
+  knockbackSpeed: number;
+  knockbackLift: number;
+}
+export type MeleeBalance = WeaponBalance & MeleeFields;
+
+/** M2c (rpg.md): `weapons.rpg.rocket`. weapons.rpg.damage is the impact damage; weapons.rpg.range the max travel. */
+export interface RocketBalance {
+  /** m/s, > 0. */
+  speed: number;
+  /** m/s^2 downward, >= 0. */
+  gravity: number;
+  collisionRadius: number;
+  originForward: number;
+  /** Travel below this is a dud (impact only, no blast), >= 0. */
+  armDistance: number;
+  /** maxDamage scales with the level damage multiplier (levels.md). */
+  blast: BlastBalance;
+}
+export type RpgBalance = WeaponBalance & { rocket: RocketBalance };
+
+/** M2c (levels.md): fields a level multiplier may scale. fireIntervalMs also scales melee hitFrameMs; damage the rpg blast. */
+export type LevelField = 'damage' | 'reloadMs' | 'fireIntervalMs' | 'spreadDeg';
+export const LEVEL_FIELDS: readonly LevelField[] = ['damage', 'reloadMs', 'fireIntervalMs', 'spreadDeg'];
+/** Four entries L1..L4; L1 is exactly 1; each in [0.5, 2] (validated). Loot tables: four weights >= 0, sum > 0. */
+export type LevelArray = readonly [number, number, number, number];
+export type LevelMultipliers = Partial<Record<LevelField, LevelArray>>;
+/** M2c (levels.md): `levels`. */
+export interface LevelsBalance {
+  /** Class default for guns (every weapon with ammo != null). */
+  gun: LevelMultipliers;
+  /** Class default for MeleeIds. */
+  melee: LevelMultipliers;
+  /** Per-weapon overrides (any weapon id except fists); win over the class default field by field. */
+  overrides: Partial<Record<Exclude<M2cWeaponId, 'fists'>, LevelMultipliers>>;
+  /** Relative L1..L4 weights for a weapon rolled at a loot spot of that tier. */
+  lootTiers: Record<LootTier, LevelArray>;
+  /** Bots multiply a weapon's loot value by this per level (index 0 = 1). */
+  botValueMultiplier: LevelArray;
+}
+
+/** M2c (scopes.md): `scopes.<ScopeId>`. */
+export interface ScopeBalance {
+  /** The sight it gives; never 'none' or 'iron'. */
+  sight: ScopedSightType;
+  /** adsZoom while mounted (>= 1). */
+  zoom: number;
+}
+/** M2c (scopes.md): `scopes.sightFactors.<sight>`. Factors > 0; ranks unique. */
+export interface SightFactorBalance {
+  rank: number;
+  adsTime: number;
+  adsSpread: number;
+  adsMove: number;
+}
+/** M2c (scopes.md): `scopes`. */
+export type ScopesBalance = Record<ScopeId, ScopeBalance> & {
+  sightFactors: Record<ScopedSightType, SightFactorBalance>;
+  /** ScopeIds each gun accepts (never its default sight). Guns not listed, melee and fists accept none. */
+  compatible: Partial<Record<M2cGunId, ScopeId[]>>;
+  /** Spare-scope pouch size (integer >= 0; 1 in M2c). */
+  spareSlots: number;
+  /** T sight switch duration, ms. */
+  swapMs: number;
+};
+
+/** M2c (layout.md): `layout` (per-map override `maps.<id>.layout`). */
+export interface LayoutBalance {
+  /** Activated loot points per tier per match (integers >= 0). Must equal the sum of the level data's group uses. */
+  lootUsedPerTier: Record<LootTier, number>;
+  /** Every loot group has >= ceil(use x this) candidates (>= 1). */
+  lootCandidateFactorMin: number;
+  /** Metres between activated loot points (>= 0). */
+  minLootSpacing: number;
+  /** Cover parity, in [0, 1]. */
+  minCoverFraction: number;
+}
+
+/** M2c (loot.md "Guaranteed weapons"): `loot.guaranteedWeapon`. */
+export interface GuaranteedWeaponBalance {
+  /** Relative weights of guns (weights >= 0, sum > 0). */
+  weights: Partial<Record<M2cGunId, number>>;
+  /** Relative L1..L4 weights. */
+  levels: LevelArray;
+}
+
+/** M2c bot blocks (all keys required when the block is present). */
+export interface BotMeleeBalance {
+  /** Per melee id plus 'fists' (the empty melee slot). */
+  lootValue: Record<MeleeId | 'fists', number>;
+  lootScoreMelee: number;
+  swingRangeFraction: number;
+  closeSwitchRange: number;
+  chaseRange: number;
+}
+export interface BotRpgBalance {
+  lootValue: number;
+  minRange: number;
+  maxRange: number;
+  coverRadius: number;
+  groupRadius: number;
+  stillSpeed: number;
+  fireChancePerDecision: number;
+  cooldownMs: number;
+  selfSafeDistance: number;
+  leadFactor: number;
+  aimErrorMetres: number;
+}
+export interface BotSmokeBalance {
+  lootScoreSmoke: number;
+  retreatThrowChance: number;
+  zoneCrossThrowChance: number;
+  recentDamageMs: number;
+  throwDistance: number;
+  cooldownMs: number;
+}
+export interface BotScopesBalance {
+  lootScoreScope: number;
+  mountedMaxRangeMultiplier: Record<ScopeId, number>;
 }
 
 /** M2a: `movement.stances.<stance>`. */
@@ -267,8 +444,8 @@ export interface ClientFeelBalance {
   carrierCameraDistance?: number;
   /** M2b (camera.md "Camera mode per state"): the death cam orbits the killer when alive within this range, m. */
   deathCamKillerRange?: number;
-  /** Visual-only recoil per gun (FpRecoilBalance). */
-  fpRecoil?: Partial<Record<GunId, FpRecoilBalance>>;
+  /** Visual-only recoil per gun (FpRecoilBalance). M2c: keys may be any M2cGunId. */
+  fpRecoil?: Partial<Record<M2cGunId, FpRecoilBalance>>;
 }
 
 /**
@@ -369,6 +546,8 @@ export interface BotPersonalityBalance {
   jumpTimingBiasMs?: number;
   /** M2b (drop.md): multiplies bots.drop.tierWeights.epic for this personality. */
   dropEpicWeightMultiplier?: number;
+  /** M2c (smoke.md "Bots"): multiplies bots.smoke retreat/zone throw chances. */
+  smokeChanceMultiplier?: number;
 }
 
 /**
@@ -398,8 +577,8 @@ export interface BotPacingBalance {
   zoneEntryFraction?: number;
   zoneEntrySpread?: number;
   personalities?: Partial<Record<BotPersonalityId, BotPersonalityBalance>>;
-  /** M2a: range bands and loot value per gun. Absent guns use the M1 expectedBodyDps rule. */
-  weaponPrefs?: Partial<Record<GunId, BotWeaponPrefBalance>>;
+  /** M2a: range bands and loot value per gun. Absent guns use the M1 expectedBodyDps rule. M2c: any M2cGunId. */
+  weaponPrefs?: Partial<Record<M2cGunId, BotWeaponPrefBalance>>;
   /** M2a. */
   ads?: BotAdsBalance;
   /** M2a. */
@@ -408,6 +587,14 @@ export interface BotPacingBalance {
   grenade?: BotGrenadeBalance;
   /** M2b: bot jump choice (drop.md). */
   drop?: BotDropBalance;
+  /** M2c (melee.md "Bots"). Required at the C-gate. */
+  melee?: BotMeleeBalance;
+  /** M2c (rpg.md "Bots"). Required at the C-gate. */
+  rpg?: BotRpgBalance;
+  /** M2c (smoke.md "Bots"). Required at the C-gate. */
+  smoke?: BotSmokeBalance;
+  /** M2c (scopes.md "Bots"). Required at the C-gate. */
+  scopes?: BotScopesBalance;
 }
 /** M2b (systems/drop.md; `bots.drop`, required since REVIEW-M2b M1). All four keys required. */
 export interface BotDropBalance {
@@ -562,17 +749,26 @@ export interface Balance {
     fireMoveWindowMs: number;
     /** M2a. */
     hitbox: HitboxBalance;
+    /** M2c (grenades.md "Throwable slot"): 4 / G while the throwable slot is ready cycles frag <-> smoke. Gate: required. */
+    throwableCycleMs: number;
   };
-  weapons: Record<WeaponId, WeaponBalance>;
-  /** M2a: M1 `items.vest` removed; armor pieces and the grenade added. */
+  /**
+   * M2c: the new weapons are optional until the C-gate (the merged balance.json has them; WEAPONS lookups for them go
+   * through `weaponBalance()`), then `Record<WeaponId, ...>` covers them.
+   */
+  weapons: Record<WeaponId, WeaponBalance> & Record<MeleeId, MeleeBalance> & { rpg: RpgBalance };
+  /** M2a: M1 `items.vest` removed; armor pieces and the grenade added. M2c: optional new items until the C-gate. */
   items: Record<HealId, HealBalance> & Record<AmmoId, AmmoBalance> & Record<ArmorId, ArmorBalance> & {
     grenade: GrenadeBalance;
+    smoke: SmokeBalance;
   };
   /** M2a: M1 `absorbFraction` moved per piece. Worn pieces with durability > 0 drop on death when true. */
   armor: { dropOnDeath: boolean };
   loot: {
-    /** Relative weights per tier; missing item = weight 0. */
-    tiers: Record<LootTier, Partial<Record<ItemId, number>>>;
+    /** Relative weights per tier; missing item = weight 0. M2c: keys may be any M2cItemId. */
+    tiers: Record<LootTier, Partial<Record<ItemId | (typeof M2C_ITEM_IDS)[number], number>>>;
+    /** M2c (loot.md): guaranteed-weapon points. Gate: required. */
+    guaranteedWeapon: GuaranteedWeaponBalance;
     extraAmmoWithWeapon: number;
     spawnChance: number;
     weaponSpawnsWithFullMag: boolean;
@@ -601,6 +797,11 @@ export interface Balance {
     warningSecondsBeforeShrink: number;
   };
   bots: BotPacingBalance & {
+    /** M2c (required since the C-gate). */
+    melee: BotMeleeBalance;
+    rpg: BotRpgBalance;
+    smoke: BotSmokeBalance;
+    scopes: BotScopesBalance;
     /** M2b: indoor navigation (maps.md §4). Required in the base; island maps ignore it. */
     nav: BotNavBalance;
     /** M2b: bot jump choice (drop.md). Required (REVIEW-M2b M1). */
@@ -643,6 +844,12 @@ export interface Balance {
    * effective balance from balanceForMap and the theme from zoneThemeOf. Absent in a merged (effective) balance.
    */
   maps?: Record<string, MapBalanceEntry>;
+  /** M2c (levels.md). */
+  levels: LevelsBalance;
+  /** M2c (scopes.md). */
+  scopes: ScopesBalance;
+  /** M2c (layout.md). */
+  layout: LayoutBalance;
 }
 
 type Kind = 'number' | 'boolean';
@@ -688,12 +895,37 @@ const WEAPON_SPEC: Record<string, Kind> = {
 const HEAL_SPEC: Record<string, Kind> = { heal: N, healCap: N, useMs: N, maxStack: N, spawnQty: N };
 const AMMO_SPEC: Record<string, Kind> = { pickupQty: N, maxCarry: N };
 const ARMOR_SPEC: Record<string, Kind> = { tier: N, durability: N, absorbFraction: N };
-const GRENADE_SPEC: Record<Exclude<keyof GrenadeBalance, 'dangerMargin'>, Kind> = {
+const THROWABLE_SPEC: Record<keyof ThrowableBalance, Kind> = {
   maxCarry: N, spawnQty: N, cookable: B, fuseMs: N, throwSpeedMin: N, throwSpeedMax: N, throwPitchMinDeg: N,
   throwPitchMaxDeg: N, throwLiftDeg: N, throwOriginForward: N, throwSpeedProneMultiplier: N, throwRecoveryMs: N,
   dropOnSwitchSpeed: N, gravity: N, restitution: N, friction: N, collisionRadius: N, restSpeed: N,
-  waterVelocityDamping: N, bounceEventMinSpeed: N, radius: N, innerRadius: N, maxDamage: N, minDamageFactor: N,
-  selfDamage: B, losHeightOffset: N,
+  waterVelocityDamping: N, bounceEventMinSpeed: N,
+};
+const BLAST_SPEC: Record<keyof BlastBalance, Kind> = {
+  radius: N, innerRadius: N, maxDamage: N, minDamageFactor: N, selfDamage: B, losHeightOffset: N,
+};
+const GRENADE_SPEC: Record<Exclude<keyof GrenadeBalance, 'dangerMargin'>, Kind> = { ...THROWABLE_SPEC, ...BLAST_SPEC };
+// M2c
+const SMOKE_CLOUD_SPEC: Record<keyof SmokeCloudBalance, Kind> = {
+  radius: N, centerHeight: N, growMs: N, holdMs: N, fadeMs: N, closeSightRange: N, maxActive: N,
+};
+const MELEE_SPEC: Record<keyof MeleeFields, Kind> = { hitFrameMs: N, sweepRadius: N, knockbackSpeed: N, knockbackLift: N };
+const ROCKET_SPEC: Record<Exclude<keyof RocketBalance, 'blast'>, Kind> = {
+  speed: N, gravity: N, collisionRadius: N, originForward: N, armDistance: N,
+};
+const SIGHT_FACTOR_SPEC: Record<keyof SightFactorBalance, Kind> = { rank: N, adsTime: N, adsSpread: N, adsMove: N };
+const LAYOUT_SPEC: Record<Exclude<keyof LayoutBalance, 'lootUsedPerTier'>, Kind> = {
+  lootCandidateFactorMin: N, minLootSpacing: N, minCoverFraction: N,
+};
+const BOT_MELEE_SPEC: Record<Exclude<keyof BotMeleeBalance, 'lootValue'>, Kind> = {
+  lootScoreMelee: N, swingRangeFraction: N, closeSwitchRange: N, chaseRange: N,
+};
+const BOT_RPG_SPEC: Record<keyof BotRpgBalance, Kind> = {
+  lootValue: N, minRange: N, maxRange: N, coverRadius: N, groupRadius: N, stillSpeed: N, fireChancePerDecision: N,
+  cooldownMs: N, selfSafeDistance: N, leadFactor: N, aimErrorMetres: N,
+};
+const BOT_SMOKE_SPEC: Record<keyof BotSmokeBalance, Kind> = {
+  lootScoreSmoke: N, retreatThrowChance: N, zoneCrossThrowChance: N, recentDamageMs: N, throwDistance: N, cooldownMs: N,
 };
 const STANCE_SPEC: Record<keyof StanceBalance, Kind> = { speedMultiplier: N, height: N, eyeHeight: N };
 const STANCES_SPEC: Record<string, Kind> = {
@@ -717,6 +949,12 @@ const BOT_NAV_SPEC: Record<keyof BotNavBalance, Kind> = {
   plateauHoldChance: N,
 };
 const LOOT_TIERS: readonly LootTier[] = ['common', 'rare', 'epic'];
+
+/**
+ * M2c C-gate switch (ADR 0007 §10). false: every M2c block and id is validated when present, so the live balance.json
+ * validates both before and after the game-designer merges `_m2cPending`. true (at the gate): they are required.
+ */
+export const M2C_BALANCE_REQUIRED: boolean = true;
 const ROOMS_SPEC: Record<keyof RoomsBalance, Kind> = {
   defaultMaxHumans: N, minMaxHumans: N, maxMaxHumans: N, fillWithBotsDefault: B, minHumansToStartWithBots: N,
   minHumansToStartWithoutBots: N, autoStartAllReadyMinHumans: N, publicAutoStartMinHumans: N,
@@ -736,6 +974,8 @@ export const MAP_OVERRIDE_FORBIDDEN: readonly string[] = [
  */
 export const OPEN_RECORD_PATHS: readonly string[] = [
   'loot.tiers.common', 'loot.tiers.rare', 'loot.tiers.epic', 'bots.weaponPrefs', 'bots.personalities',
+  // M2c
+  'loot.guaranteedWeapon.weights', 'levels.overrides', 'scopes.compatible', 'clientFeel.fpRecoil',
 ];
 
 /** M1-fix: keys allowed in the optional sections. Each one present must be a finite number. */
@@ -769,6 +1009,8 @@ const BOT_PERSONALITY_KEYS: readonly (keyof BotPersonalityBalance)[] = [
   'stanceChance', 'grenadeChanceMultiplier',
   // M2b
   'jumpTimingBiasMs', 'dropEpicWeightMultiplier',
+  // M2c
+  'smokeChanceMultiplier',
 ];
 const BOT_ADS_KEYS: readonly (keyof BotAdsBalance)[] = [
   'minRange', 'aimErrorMultiplier', 'scopedVisionRange', 'scopedFireMinProgress',
@@ -807,43 +1049,101 @@ function balanceErrors(raw: unknown): string[] {
   };
   const get = (obj: unknown, key: string): unknown => (isObj(obj) ? obj[key] : undefined);
   if (!isObj(raw)) throw new Error('balance.json: root must be an object');
+  /** M2a/M2c throw keys (items.grenade, items.smoke). */
+  const checkThrowable = (t: Record<string, unknown>, path: string): void => {
+    const { throwSpeedMin, throwSpeedMax, throwPitchMinDeg, throwPitchMaxDeg, maxCarry } = t;
+    if (isNum(throwSpeedMin) && isNum(throwSpeedMax) && !(throwSpeedMin <= throwSpeedMax)) {
+      errors.push(`${path}.throwSpeedMin must be <= throwSpeedMax`);
+    }
+    if (isNum(throwPitchMinDeg) && isNum(throwPitchMaxDeg) && !(throwPitchMinDeg < throwPitchMaxDeg)) {
+      errors.push(`${path}.throwPitchMinDeg must be < throwPitchMaxDeg`);
+    }
+    if (isNum(maxCarry) && !(Number.isInteger(maxCarry) && maxCarry >= 1)) errors.push(`${path}.maxCarry must be an integer >= 1`);
+  };
+  /** M2a/M2c blast model (items.grenade flat, weapons.rpg.rocket.blast). */
+  const checkBlast = (b: unknown, path: string): void => {
+    check(b, path, BLAST_SPEC);
+    if (!isObj(b)) return;
+    const { innerRadius, radius } = b;
+    if (isNum(innerRadius) && isNum(radius) && !(innerRadius >= 0 && innerRadius < radius)) {
+      errors.push(`${path}.innerRadius must be in [0, radius)`);
+    }
+  };
 
   for (const [section, spec] of Object.entries(SECTION_SPEC)) check(raw[section], section, spec);
 
-  // Weapons: per-id spec, ammo, sight (M2a).
+  // Weapons: per-id spec, ammo, sight (M2a). M2c: melee (sight 'none', no ammo) and the new guns, validated when
+  // present until the C-gate (M2C_BALANCE_REQUIRED), then required.
   const weapons = raw['weapons'];
-  for (const id of WEAPON_IDS) {
+  for (const id of M2C_WEAPON_IDS) {
     const w = get(weapons, id);
-    check(w, `weapons.${id}`, WEAPON_SPEC);
+    if (w === undefined && !M2C_BALANCE_REQUIRED && !(WEAPON_IDS as readonly string[]).includes(id)) continue;
+    const path = `weapons.${id}`;
+    check(w, path, WEAPON_SPEC);
+    const unarmed = id === 'fists' || isMeleeId(id);
     const ammo = get(w, 'ammo');
-    const ammoOk = id === 'fists' ? ammo === null : (AMMO_IDS as readonly unknown[]).includes(ammo);
-    if (!ammoOk) errors.push(`weapons.${id}.ammo must be ${id === 'fists' ? 'null' : 'an AmmoId'}`);
+    const ammoOk = unarmed ? ammo === null : (M2C_AMMO_IDS as readonly unknown[]).includes(ammo);
+    if (!ammoOk) errors.push(`${path}.ammo must be ${unarmed ? 'null' : 'an AmmoId'}`);
     const sight = get(w, 'sight');
-    if (!(SIGHT_TYPES as readonly unknown[]).includes(sight)) {
-      errors.push(`weapons.${id}.sight must be one of ${SIGHT_TYPES.join('|')}`);
-    } else if ((id === 'fists') !== (sight === 'none')) {
-      errors.push(`weapons.${id}.sight must ${id === 'fists' ? 'be' : 'not be'} 'none'`);
+    const sightKnown = (M2C_SIGHT_TYPES as readonly unknown[]).includes(sight);
+    if (!sightKnown) {
+      errors.push(`${path}.sight must be one of ${M2C_SIGHT_TYPES.join('|')}`);
+    } else if (unarmed !== (sight === 'none')) {
+      errors.push(`${path}.sight must ${unarmed ? 'be' : 'not be'} 'none' (only fists and melee have no sight)`);
     }
     const adsZoom = get(w, 'adsZoom');
-    if (isNum(adsZoom) && adsZoom < 1) errors.push(`weapons.${id}.adsZoom must be >= 1`);
+    if (isNum(adsZoom) && adsZoom < 1) errors.push(`${path}.adsZoom must be >= 1`);
     const adsTimeMs = get(w, 'adsTimeMs');
-    if (isNum(adsTimeMs) && adsTimeMs < 0) errors.push(`weapons.${id}.adsTimeMs must be >= 0`);
+    if (isNum(adsTimeMs) && adsTimeMs < 0) errors.push(`${path}.adsTimeMs must be >= 0`);
     // ADR 0004 addendum A1.7: a sighted weapon with adsTimeMs 0 could never engage ADS (adsMs stays 0).
-    if (isNum(adsTimeMs) && sight !== 'none' && (SIGHT_TYPES as readonly unknown[]).includes(sight) && !(adsTimeMs > 0)) {
-      errors.push(`weapons.${id}.adsTimeMs must be > 0 for a weapon with a sight`);
+    if (isNum(adsTimeMs) && sight !== 'none' && sightKnown && !(adsTimeMs > 0)) {
+      errors.push(`${path}.adsTimeMs must be > 0 for a weapon with a sight`);
+    }
+    if (isMeleeId(id) && isObj(w)) {
+      // M2c (melee.md "Tunable values").
+      check(w, path, MELEE_SPEC);
+      const { hitFrameMs, fireIntervalMs, range, magSize, sweepRadius, knockbackSpeed, knockbackLift } = w;
+      if (isNum(hitFrameMs) && isNum(fireIntervalMs) && !(hitFrameMs > 0 && hitFrameMs < fireIntervalMs)) {
+        errors.push(`${path}.hitFrameMs must be in (0, fireIntervalMs)`);
+      }
+      if (isNum(range) && !(range > 0)) errors.push(`${path}.range must be > 0`);
+      if (isNum(magSize) && magSize !== 0) errors.push(`${path}.magSize must be 0`);
+      for (const [k, v] of [['sweepRadius', sweepRadius], ['knockbackSpeed', knockbackSpeed], ['knockbackLift', knockbackLift]] as const) {
+        if (isNum(v) && !(v >= 0)) errors.push(`${path}.${k} must be >= 0`);
+      }
+    }
+    if (id === 'rpg' && isObj(w)) {
+      // M2c (rpg.md "Tunable values").
+      if (isNum(w['magSize']) && w['magSize'] !== 1) errors.push(`${path}.magSize must be 1`);
+      const rocket = w['rocket'];
+      check(rocket, `${path}.rocket`, ROCKET_SPEC);
+      if (isObj(rocket)) {
+        if (isNum(rocket['speed']) && !(rocket['speed'] > 0)) errors.push(`${path}.rocket.speed must be > 0`);
+        for (const k of ['gravity', 'armDistance', 'collisionRadius', 'originForward'] as const) {
+          const v = rocket[k];
+          if (isNum(v) && !(v >= 0)) errors.push(`${path}.rocket.${k} must be >= 0`);
+        }
+        checkBlast(rocket['blast'], `${path}.rocket.blast`);
+      }
     }
   }
 
-  // Items: heals, ammo, armor pieces (M2a), grenade (M2a).
+  // Items: heals, ammo, armor pieces (M2a), grenade (M2a). M2c: ammo_rocket, vest_4, helmet_4, smoke.
   const items = raw['items'];
+  const m2cOptional = (list: readonly string[], id: string): boolean =>
+    !M2C_BALANCE_REQUIRED && !list.includes(id) && get(items, id) === undefined;
   for (const id of HEAL_IDS) check(get(items, id), `items.${id}`, HEAL_SPEC);
-  for (const id of AMMO_IDS) check(get(items, id), `items.${id}`, AMMO_SPEC);
-  for (const id of ARMOR_IDS) {
+  for (const id of M2C_AMMO_IDS) {
+    if (m2cOptional(AMMO_IDS, id)) continue;
+    check(get(items, id), `items.${id}`, AMMO_SPEC);
+  }
+  for (const id of M2C_ARMOR_IDS) {
+    if (m2cOptional(ARMOR_IDS, id)) continue;
     const a = get(items, id);
     const path = `items.${id}`;
     check(a, path, ARMOR_SPEC);
     if (!isObj(a)) continue;
-    const piece = ARMOR_PIECES[id];
+    const piece = M2C_ARMOR_PIECES[id];
     if (a['slot'] !== piece.slot) errors.push(`${path}.slot must be '${piece.slot}'`);
     if (isNum(a['tier']) && a['tier'] !== piece.tier) errors.push(`${path}.tier must be ${piece.tier} (the id suffix)`);
     if (isNum(a['durability']) && !(a['durability'] > 0)) errors.push(`${path}.durability must be > 0`);
@@ -854,19 +1154,29 @@ function balanceErrors(raw: unknown): string[] {
   const grenade = get(items, 'grenade');
   check(grenade, 'items.grenade', GRENADE_SPEC);
   if (isObj(grenade)) {
-    const { innerRadius, radius, throwSpeedMin, throwSpeedMax } = grenade;
-    if (isNum(innerRadius) && isNum(radius) && !(innerRadius >= 0 && innerRadius < radius)) {
-      errors.push('items.grenade.innerRadius must be in [0, radius)');
-    }
-    if (isNum(throwSpeedMin) && isNum(throwSpeedMax) && !(throwSpeedMin <= throwSpeedMax)) {
-      errors.push('items.grenade.throwSpeedMin must be <= throwSpeedMax');
-    }
-    const { throwPitchMinDeg, throwPitchMaxDeg } = grenade;
-    if (isNum(throwPitchMinDeg) && isNum(throwPitchMaxDeg) && !(throwPitchMinDeg < throwPitchMaxDeg)) {
-      errors.push('items.grenade.throwPitchMinDeg must be < throwPitchMaxDeg');
-    }
+    checkThrowable(grenade, 'items.grenade');
+    checkBlast(grenade, 'items.grenade');
     const dm = grenade['dangerMargin'];
     if (dm !== undefined && !(isNum(dm) && dm >= 0)) errors.push('items.grenade.dangerMargin must be a number >= 0');
+  }
+  // M2c (smoke.md): the smoke canister and its cloud.
+  const smoke = get(items, 'smoke');
+  if (smoke !== undefined || M2C_BALANCE_REQUIRED) {
+    check(smoke, 'items.smoke', THROWABLE_SPEC);
+    if (isObj(smoke)) {
+      checkThrowable(smoke, 'items.smoke');
+      const cloud = smoke['cloud'];
+      check(cloud, 'items.smoke.cloud', SMOKE_CLOUD_SPEC);
+      if (isObj(cloud)) {
+        if (isNum(cloud['radius']) && !(cloud['radius'] > 0)) errors.push('items.smoke.cloud.radius must be > 0');
+        for (const k of ['centerHeight', 'growMs', 'holdMs', 'fadeMs', 'closeSightRange'] as const) {
+          const v = cloud[k];
+          if (isNum(v) && !(v >= 0)) errors.push(`items.smoke.cloud.${k} must be >= 0`);
+        }
+        const ma = cloud['maxActive'];
+        if (isNum(ma) && !(Number.isInteger(ma) && ma >= 1)) errors.push('items.smoke.cloud.maxActive must be an integer >= 1');
+      }
+    }
   }
 
   // M2a: movement.stances.
@@ -902,7 +1212,7 @@ function balanceErrors(raw: unknown): string[] {
   check(get(combat, 'stanceSpreadMultiplier'), 'combat.stanceSpreadMultiplier', Object.fromEntries(STANCES.map((s) => [s, N])));
   check(get(combat, 'hitbox'), 'combat.hitbox', HITBOX_SPEC);
 
-  // Loot tiers: objects of known ItemId -> non-negative weight (M2a: unknown ids are a data bug).
+  // Loot tiers: objects of known ItemId -> non-negative weight (M2a: unknown ids are a data bug). M2c: M2cItemId.
   const loot = raw['loot'];
   const tiers = get(loot, 'tiers');
   for (const tier of ['common', 'rare', 'epic'] as const) {
@@ -912,7 +1222,7 @@ function balanceErrors(raw: unknown): string[] {
       continue;
     }
     for (const k of dataKeys(t)) {
-      if (!(ITEM_IDS as readonly string[]).includes(k)) errors.push(`loot.tiers.${tier}.${k} is not an ItemId`);
+      if (!(M2C_ITEM_IDS as readonly string[]).includes(k)) errors.push(`loot.tiers.${tier}.${k} is not an ItemId`);
       else if (!(isNum(t[k]) && (t[k] as number) >= 0)) errors.push(`loot.tiers.${tier}.${k} must be a number >= 0`);
     }
   }
@@ -940,7 +1250,7 @@ function balanceErrors(raw: unknown): string[] {
   if (recoil !== undefined && !isObj(recoil)) errors.push('clientFeel.fpRecoil must be an object when present');
   if (isObj(recoil)) {
     for (const key of dataKeys(recoil)) {
-      if (!(GUN_IDS as readonly string[]).includes(key)) errors.push(`clientFeel.fpRecoil.${key} is not a gun`);
+      if (!(M2C_GUN_IDS as readonly string[]).includes(key)) errors.push(`clientFeel.fpRecoil.${key} is not a gun`);
       else check(recoil[key], `clientFeel.fpRecoil.${key}`, FP_RECOIL_SPEC);
     }
   }
@@ -964,8 +1274,8 @@ function balanceErrors(raw: unknown): string[] {
   if (prefs !== undefined && !isObj(prefs)) errors.push('bots.weaponPrefs must be an object when present');
   if (isObj(prefs)) {
     for (const key of dataKeys(prefs)) {
-      if (!(GUN_IDS as readonly string[]).includes(key)) {
-        errors.push(`bots.weaponPrefs.${key} is not a gun (${GUN_IDS.join(', ')})`);
+      if (!(M2C_GUN_IDS as readonly string[]).includes(key)) {
+        errors.push(`bots.weaponPrefs.${key} is not a gun (${M2C_GUN_IDS.join(', ')})`);
         continue;
       }
       const p = prefs[key];
@@ -1041,6 +1351,9 @@ function balanceErrors(raw: unknown): string[] {
     checkOptional({ dropHeight: match['dropHeight'], spawnJitter: match['spawnJitter'] }, 'match', ['dropHeight', 'spawnJitter']);
   }
 
+  // M2c blocks (validated when present; required at the C-gate).
+  m2cErrors(raw, errors, check, get);
+
   // M2b: per-map entries. Each must name a zone theme, override only existing (or open-record) paths, and produce a
   // merged balance that passes this same validation.
   const maps = raw['maps'];
@@ -1068,6 +1381,211 @@ function balanceErrors(raw: unknown): string[] {
   }
 
   return errors;
+}
+
+type CheckFn = (obj: unknown, path: string, spec: Record<string, Kind>) => void;
+type GetFn = (obj: unknown, key: string) => unknown;
+
+/**
+ * M2c (ADR 0007 §10): validation of the M2c blocks. Each block is checked when present and required only when
+ * M2C_BALANCE_REQUIRED (the C-gate). Rules: levels.md, scopes.md, layout.md, loot.md, melee/rpg/smoke.md "Bots".
+ */
+function m2cErrors(raw: Record<string, unknown>, errors: string[], check: CheckFn, get: GetFn): void {
+  const need = (v: unknown, path: string): boolean => {
+    if (v !== undefined) return true;
+    if (M2C_BALANCE_REQUIRED) errors.push(`${path} is required (M2c)`);
+    return false;
+  };
+  /** Four multipliers: index 0 exactly 1, each in [0.5, 2]. */
+  const multipliers = (v: unknown, path: string): void => {
+    if (!Array.isArray(v) || v.length !== 4 || !v.every(isNum)) {
+      errors.push(`${path} must be an array of 4 numbers`);
+      return;
+    }
+    if (v[0] !== 1) errors.push(`${path}[0] (L1) must be exactly 1`);
+    v.forEach((x: number, i) => {
+      if (!(x >= 0.5 && x <= 2)) errors.push(`${path}[${i}] must be in [0.5, 2]`);
+    });
+  };
+  /** Four relative weights: each >= 0, sum > 0. */
+  const weights4 = (v: unknown, path: string): void => {
+    if (!Array.isArray(v) || v.length !== 4 || !v.every(isNum)) {
+      errors.push(`${path} must be an array of 4 numbers`);
+      return;
+    }
+    if (!v.every((x: number) => x >= 0) || !(v.reduce((a: number, x: number) => a + x, 0) > 0)) {
+      errors.push(`${path}: weights must be >= 0 with a positive sum`);
+    }
+  };
+  const fieldTable = (v: unknown, path: string): void => {
+    if (!isObj(v)) {
+      errors.push(`${path} must be an object`);
+      return;
+    }
+    for (const f of dataKeys(v)) {
+      if (!(LEVEL_FIELDS as readonly string[]).includes(f)) errors.push(`${path}.${f} is not a level field (${LEVEL_FIELDS.join(', ')})`);
+      else multipliers(v[f], `${path}.${f}`);
+    }
+  };
+
+  // combat.throwableCycleMs
+  const cycle = get(raw['combat'], 'throwableCycleMs');
+  if (need(cycle, 'combat.throwableCycleMs') && !(isNum(cycle) && cycle >= 0)) errors.push('combat.throwableCycleMs must be a number >= 0');
+
+  // levels
+  const levels = raw['levels'];
+  if (need(levels, 'levels')) {
+    if (!isObj(levels)) errors.push('levels must be an object');
+    else {
+      fieldTable(levels['gun'], 'levels.gun');
+      fieldTable(levels['melee'], 'levels.melee');
+      const ov = levels['overrides'];
+      if (!isObj(ov)) errors.push('levels.overrides must be an object');
+      else {
+        for (const id of dataKeys(ov)) {
+          if (id === 'fists' || !(M2C_WEAPON_IDS as readonly string[]).includes(id)) {
+            errors.push(`levels.overrides.${id} is not a levelled weapon (any weapon id except fists)`);
+          } else fieldTable(ov[id], `levels.overrides.${id}`);
+        }
+      }
+      const lt = levels['lootTiers'];
+      if (!isObj(lt)) errors.push('levels.lootTiers must be an object');
+      else for (const t of LOOT_TIERS) weights4(lt[t], `levels.lootTiers.${t}`);
+      multipliers(levels['botValueMultiplier'], 'levels.botValueMultiplier');
+    }
+  }
+
+  // scopes
+  const scopes = raw['scopes'];
+  if (need(scopes, 'scopes')) {
+    if (!isObj(scopes)) errors.push('scopes must be an object');
+    else {
+      for (const id of SCOPE_IDS) {
+        const sc = scopes[id];
+        check(sc, `scopes.${id}`, { zoom: N });
+        const sight = get(sc, 'sight');
+        if (sight === 'iron' || !(SCOPED_SIGHT_TYPES as readonly unknown[]).includes(sight)) {
+          errors.push(`scopes.${id}.sight must be one of red_dot|scope_2x|scope_4x|scope_8x`);
+        }
+        const zoom = get(sc, 'zoom');
+        if (isNum(zoom) && !(zoom >= 1)) errors.push(`scopes.${id}.zoom must be >= 1`);
+      }
+      const sf = scopes['sightFactors'];
+      if (!isObj(sf)) errors.push('scopes.sightFactors must be an object');
+      else {
+        const ranks = new Set<number>();
+        for (const s of SCOPED_SIGHT_TYPES) {
+          const f = sf[s];
+          check(f, `scopes.sightFactors.${s}`, SIGHT_FACTOR_SPEC);
+          if (!isObj(f)) continue;
+          for (const k of ['adsTime', 'adsSpread', 'adsMove'] as const) {
+            const v = f[k];
+            if (isNum(v) && !(v > 0)) errors.push(`scopes.sightFactors.${s}.${k} must be > 0`);
+          }
+          const r = f['rank'];
+          if (isNum(r)) {
+            if (ranks.has(r)) errors.push(`scopes.sightFactors.${s}.rank ${r} is not unique`);
+            ranks.add(r);
+          }
+        }
+      }
+      const comp = scopes['compatible'];
+      if (!isObj(comp)) errors.push('scopes.compatible must be an object');
+      else {
+        for (const gun of dataKeys(comp)) {
+          const path = `scopes.compatible.${gun}`;
+          if (!(M2C_GUN_IDS as readonly string[]).includes(gun)) {
+            errors.push(`${path}: only guns take scopes (${M2C_GUN_IDS.join(', ')})`);
+            continue;
+          }
+          const list = comp[gun];
+          if (!Array.isArray(list)) {
+            errors.push(`${path} must be an array of ScopeIds`);
+            continue;
+          }
+          const builtIn = get(get(raw['weapons'], gun), 'sight');
+          const seen = new Set<unknown>();
+          for (const sid of list) {
+            if (!(SCOPE_IDS as readonly unknown[]).includes(sid)) errors.push(`${path}: ${String(sid)} is not a ScopeId`);
+            else if (get(scopes[sid as string], 'sight') === builtIn) {
+              errors.push(`${path}: ${String(sid)} gives the gun's built-in sight (${String(builtIn)}); never list the default`);
+            }
+            if (seen.has(sid)) errors.push(`${path}: ${String(sid)} listed twice`);
+            seen.add(sid);
+          }
+        }
+      }
+      const spare = scopes['spareSlots'];
+      if (!(isNum(spare) && Number.isInteger(spare) && spare >= 0)) errors.push('scopes.spareSlots must be an integer >= 0');
+      const swap = scopes['swapMs'];
+      if (!(isNum(swap) && swap >= 0)) errors.push('scopes.swapMs must be a number >= 0');
+    }
+  }
+
+  // layout
+  const layout = raw['layout'];
+  if (need(layout, 'layout')) {
+    check(layout, 'layout', LAYOUT_SPEC);
+    if (isObj(layout)) {
+      const used = layout['lootUsedPerTier'];
+      check(used, 'layout.lootUsedPerTier', Object.fromEntries(LOOT_TIERS.map((t) => [t, N])));
+      if (isObj(used)) {
+        for (const t of LOOT_TIERS) {
+          const v = used[t];
+          if (isNum(v) && !(Number.isInteger(v) && v >= 0)) errors.push(`layout.lootUsedPerTier.${t} must be an integer >= 0`);
+        }
+      }
+      const f = layout['lootCandidateFactorMin'];
+      if (isNum(f) && !(f >= 1)) errors.push('layout.lootCandidateFactorMin must be >= 1');
+      const sp = layout['minLootSpacing'];
+      if (isNum(sp) && !(sp >= 0)) errors.push('layout.minLootSpacing must be >= 0');
+      const c = layout['minCoverFraction'];
+      if (isNum(c) && !(c >= 0 && c <= 1)) errors.push('layout.minCoverFraction must be in [0, 1]');
+    }
+  }
+
+  // loot.guaranteedWeapon
+  const gw = get(raw['loot'], 'guaranteedWeapon');
+  if (need(gw, 'loot.guaranteedWeapon')) {
+    if (!isObj(gw)) errors.push('loot.guaranteedWeapon must be an object');
+    else {
+      const w = gw['weights'];
+      if (!isObj(w)) errors.push('loot.guaranteedWeapon.weights must be an object');
+      else {
+        let sum = 0;
+        for (const k of dataKeys(w)) {
+          const v = w[k];
+          if (!(M2C_GUN_IDS as readonly string[]).includes(k)) errors.push(`loot.guaranteedWeapon.weights.${k} is not a gun`);
+          else if (!(isNum(v) && v >= 0)) errors.push(`loot.guaranteedWeapon.weights.${k} must be a number >= 0`);
+          else sum += v;
+        }
+        if (!(sum > 0)) errors.push('loot.guaranteedWeapon.weights must have a positive sum');
+      }
+      weights4(gw['levels'], 'loot.guaranteedWeapon.levels');
+    }
+  }
+
+  // bots.melee / rpg / smoke / scopes
+  const bots = raw['bots'];
+  const melee = get(bots, 'melee');
+  if (need(melee, 'bots.melee')) {
+    check(melee, 'bots.melee', BOT_MELEE_SPEC);
+    check(get(melee, 'lootValue'), 'bots.melee.lootValue', Object.fromEntries(['fists', ...MELEE_IDS].map((k) => [k, N])));
+  }
+  const rpg = get(bots, 'rpg');
+  if (need(rpg, 'bots.rpg')) {
+    check(rpg, 'bots.rpg', BOT_RPG_SPEC);
+    const lo = get(rpg, 'minRange');
+    const hi = get(rpg, 'maxRange');
+    if (isNum(lo) && isNum(hi) && !(lo <= hi)) errors.push('bots.rpg.minRange must be <= maxRange');
+  }
+  const smoke = get(bots, 'smoke');
+  if (need(smoke, 'bots.smoke')) check(smoke, 'bots.smoke', BOT_SMOKE_SPEC);
+  const bs = get(bots, 'scopes');
+  if (need(bs, 'bots.scopes')) {
+    check(bs, 'bots.scopes', { lootScoreScope: N });
+    check(get(bs, 'mountedMaxRangeMultiplier'), 'bots.scopes.mountedMaxRangeMultiplier', Object.fromEntries(SCOPE_IDS.map((k) => [k, N])));
+  }
 }
 
 /** Checks one override value against the base value at `path` (path without the `maps.<id>.` prefix). */
@@ -1151,8 +1669,8 @@ export const ammoFor = (balance: Balance, gun: GunId): AmmoId => balance.weapons
  * M2a: sight of the item in hand ('grenade' has none). Pure lookup; safe for render/ui (they receive Balance by
  * injection).
  */
-export const sightOf = (balance: Balance, held: WeaponId | 'grenade'): SightType =>
-  held === 'grenade' ? 'none' : balance.weapons[held].sight;
+export const sightOf = (balance: Balance, held: WeaponId | 'grenade' | 'smoke'): SightType =>
+  held === 'grenade' || held === 'smoke' ? 'none' : balance.weapons[held].sight;
 
 /**
  * M2a: true for scope_4x / scope_8x (full-screen scope view at adsProgress 1; scope glint for remotes). A type guard,
@@ -1164,3 +1682,134 @@ export const isScopeSight = (sight: SightType): sight is 'scope_4x' | 'scope_8x'
 /** M2a: balance entry of an armor piece by slot and tier. */
 export const armorBalance = (balance: Balance, slot: ArmorSlot, tier: ArmorTier): ArmorBalance =>
   balance.items[`${slot}_${tier}` as ArmorId];
+
+// ---------------------------------------------------------------------------------------------
+// M2c effective stats (ADR 0007 §2, §5). ONE rule for the sim, client prediction, the HUD and bots. Pure lookups that
+// tolerate a pre-merge balance (no `levels` / `scopes` block = L1 numbers and built-in sights).
+// ---------------------------------------------------------------------------------------------
+
+/** M2c: the balance entry of any weapon id, including the M2c ones. Throws if missing (a data bug). */
+export function weaponBalance(balance: Balance, id: M2cWeaponId): WeaponBalance {
+  const w = (balance.weapons as Partial<Record<M2cWeaponId, WeaponBalance>>)[id];
+  if (!w) throw new Error(`balance.weapons.${id} is missing`);
+  return w;
+}
+
+/** M2c (levels.md): multiplier for one field at a level: override, else class default, else 1. Fists: always 1. */
+export function levelMultiplier(balance: Balance, id: M2cWeaponId, field: LevelField, level: ItemLevel): number {
+  const lv = balance.levels;
+  if (!lv || id === 'fists') return 1;
+  const own = lv.overrides[id]?.[field];
+  if (own) return own[level - 1] ?? 1;
+  const cls = isMeleeId(id) ? lv.melee[field] : lv.gun[field];
+  return cls ? (cls[level - 1] ?? 1) : 1;
+}
+
+/** M2c: a weapon's numbers at a level with a mounted scope (levels.md "What a level changes", scopes.md). */
+export interface EffectiveWeapon extends Omit<WeaponBalance, 'sight'> {
+  id: M2cWeaponId;
+  level: ItemLevel;
+  /** The scope that applied, or null (none mounted, or it does not fit this gun). */
+  scope: ScopeId | null;
+  /** weapons.<id>.sight. */
+  builtInSight: M2cSightType;
+  /** The mounted scope's sight, else builtInSight. */
+  sight: M2cSightType;
+  /** Melee: hitFrameMs x the fireIntervalMs level multiplier. 0 for every non-melee weapon. */
+  hitFrameMs: number;
+}
+
+/**
+ * M2c: effective stats. damage, reloadMs, fireIntervalMs and spreadDeg x level multipliers (melee hitFrameMs with
+ * fireIntervalMs). With a fitting scope: sight and adsZoom from `scopes.<id>`, and adsTimeMs / adsSpreadMultiplier /
+ * adsMoveMultiplier x factor[mounted] / factor[built-in]. Hip fire, range, falloff, mag and pellets never change.
+ * Allocates one object; cache per (id, level, scope) on hot paths.
+ */
+export function effectiveWeapon(
+  balance: Balance,
+  id: M2cWeaponId,
+  level: ItemLevel = 1,
+  scope: ScopeId | null = null,
+): EffectiveWeapon {
+  const base = weaponBalance(balance, id);
+  const m = (f: LevelField): number => levelMultiplier(balance, id, f, level);
+  const fire = m('fireIntervalMs');
+  const out: EffectiveWeapon = {
+    ...base,
+    id,
+    level,
+    scope: null,
+    builtInSight: base.sight,
+    sight: base.sight,
+    damage: base.damage * m('damage'),
+    reloadMs: base.reloadMs * m('reloadMs'),
+    fireIntervalMs: base.fireIntervalMs * fire,
+    spreadDeg: base.spreadDeg * m('spreadDeg'),
+    hitFrameMs: isMeleeId(id) ? ((base as Partial<MeleeFields>).hitFrameMs ?? 0) * fire : 0,
+  };
+  const sc = balance.scopes;
+  if (scope !== null && sc && isGunWithScope(balance, id, scope)) {
+    const mounted = sc[scope];
+    const fm = sc.sightFactors[mounted.sight];
+    const fd = base.sight === 'none' ? undefined : sc.sightFactors[base.sight as ScopedSightType];
+    if (fm && fd) {
+      out.scope = scope;
+      out.sight = mounted.sight;
+      out.adsZoom = mounted.zoom;
+      out.adsTimeMs = (base.adsTimeMs * fm.adsTime) / fd.adsTime;
+      out.adsSpreadMultiplier = (base.adsSpreadMultiplier * fm.adsSpread) / fd.adsSpread;
+      out.adsMoveMultiplier = (base.adsMoveMultiplier * fm.adsMove) / fd.adsMove;
+    }
+  }
+  return out;
+}
+
+const isGunWithScope = (balance: Balance, id: M2cWeaponId, scope: ScopeId): id is M2cGunId =>
+  (M2C_GUN_IDS as readonly string[]).includes(id) && scopeFits(balance, id as M2cGunId, scope);
+
+/** M2c (rpg.md): rocket blast maxDamage at a level (scales with the rpg's damage multiplier). */
+export function rocketBlastMaxDamage(balance: Balance, level: ItemLevel): number {
+  const rpg = balance.weapons.rpg;
+  if (!rpg) throw new Error('balance.weapons.rpg is missing');
+  return rpg.rocket.blast.maxDamage * levelMultiplier(balance, 'rpg', 'damage', level);
+}
+
+/** M2c (scopes.md): the scopes a gun accepts ([] for guns not listed, melee and fists). */
+export function compatibleScopes(balance: Balance, gun: M2cWeaponId): readonly ScopeId[] {
+  return (balance.scopes?.compatible as Partial<Record<string, ScopeId[]>> | undefined)?.[gun] ?? [];
+}
+
+/** M2c: the gun accepts this scope. */
+export const scopeFits = (balance: Balance, gun: M2cWeaponId, scope: ScopeId): boolean =>
+  compatibleScopes(balance, gun).includes(scope);
+
+/** M2c: auto-mount rank of a sight (scopes.sightFactors.<sight>.rank); -1 for 'none' or without a scopes block. */
+export function sightRank(balance: Balance, sight: M2cSightType): number {
+  if (sight === 'none') return -1;
+  return balance.scopes?.sightFactors[sight]?.rank ?? -1;
+}
+
+/**
+ * M2c: the effective sight of an item in hand (PlayerState.sight, AdsView.sight, localAdsChanged.sight): 'none' for
+ * throwables, fists and melee; a fitting mounted scope's sight; else the gun's built-in sight.
+ */
+export function effectiveSight(balance: Balance, held: M2cHeldId, scope: ScopeId | null = null): M2cSightType {
+  if (held === 'grenade' || held === 'smoke') return 'none';
+  const w = weaponBalance(balance, held);
+  if (scope !== null && balance.scopes && isGunWithScope(balance, held, scope)) return balance.scopes[scope].sight;
+  return w.sight;
+}
+
+/**
+ * M2c (scopes.md "Network"): the full-screen scope overlay in first person (Ui) at full ADS: 2x, 4x and 8x.
+ * `isScopeSight` (4x / 8x) stays the rule for the remote scope glint and the bots' "scoped" behaviour.
+ */
+export const hasScopeOverlay = (sight: M2cSightType): sight is 'scope_2x' | 'scope_4x' | 'scope_8x' =>
+  sight === 'scope_2x' || sight === 'scope_4x' || sight === 'scope_8x';
+
+/** M2c: armor balance by slot and tier 1-4 (vest_4 / helmet_4 once merged). */
+export function armorBalanceM2c(balance: Balance, slot: ArmorSlot, tier: M2cArmorTier): ArmorBalance {
+  const a = (balance.items as unknown as Partial<Record<string, ArmorBalance>>)[`${slot}_${tier}`];
+  if (!a) throw new Error(`balance.items.${slot}_${tier} is missing`);
+  return a;
+}

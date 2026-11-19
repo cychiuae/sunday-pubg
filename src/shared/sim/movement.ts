@@ -3,6 +3,7 @@
  * `stepMovement` never mutates its arguments and reads nothing outside them.
  */
 import type { Balance } from '../balance';
+import { effectiveWeapon, weaponBalance } from '../balance';
 import { isIndoor } from '../maps';
 import type {
   AnyMapData,
@@ -11,14 +12,16 @@ import type {
   MovementInput,
   MovementState,
   MovementStepResult,
+  PaneId,
   PlayerInput,
+  ScopeId,
   Stance,
   StanceChange,
   StanceRefusal,
   StanceRequest,
 } from '../types';
-import { stanceTransitionKey } from '../types';
-import { buildColliders, platformHeightAt, resolveCircle, type ColliderSet, type PushOut } from './colliders';
+import { isM2cGunId, isM2cThrowableId, stanceTransitionKey } from '../types';
+import { buildColliders, platformHeightAt, resolveCircle, withBrokenPanes, type ColliderSet, type PushOut } from './colliders';
 import {
   headroomBlocked,
   hitboxHeightOf,
@@ -41,7 +44,16 @@ export interface MovementContext {
 
 /** `balance` must be the effective (per-map) balance (balanceForMap). */
 export function createMovementContext(map: AnyMapData, balance: Balance): MovementContext {
-  return { map, balance, colliders: buildColliders(map, balance.movement.stepHeight) };
+  // BUG-011: thin raised kit parts narrower than half a player's radius never support feet.
+  return { map, balance, colliders: buildColliders(map, balance.movement.stepHeight, balance.player.radius / 2) };
+}
+
+/**
+ * M2c (ADR 0007 §7): the same context with `broken` glass panes open (movement, rays, grenade flight and blast line of
+ * sight skip them). The World keeps one live set; ClientGame passes the snapshot's brokenPanes.
+ */
+export function withBrokenGlass(ctx: MovementContext, broken: ReadonlySet<PaneId>): MovementContext {
+  return { ...ctx, colliders: withBrokenPanes(ctx.colliders, broken) };
 }
 
 /**
@@ -54,12 +66,26 @@ export interface MapRuntime {
   readonly balance: Balance;
   readonly ctx: MovementContext;
   readonly nav: NavGraph | null;
+  /**
+   * M2c (ADR 0007 §1, §16.3): wall-clock build times in ms for the server's per-layout log line (colliders, nav). Logging
+   * only; never used by a decision.
+   */
+  readonly buildMs?: { colliders: number; nav: number };
 }
 
-export function prepareMap(map: AnyMapData, balance: Balance, opts: { nav?: boolean } = {}): MapRuntime {
+/**
+ * `map` is the layout-APPLIED map of a match (applyLayout, ADR 0007 §1): the sim never builds layouts itself. The server
+ * caches one runtime per (map id, layout seed). `clock` (the server passes performance.now; the sim never reads a wall
+ * clock) fills `buildMs` for the per-layout log line; absent = no timing.
+ */
+export function prepareMap(map: AnyMapData, balance: Balance, opts: { nav?: boolean; clock?: () => number } = {}): MapRuntime {
+  const clock = opts.clock;
+  const t0 = clock ? clock() : 0;
   const ctx = createMovementContext(map, balance);
+  const t1 = clock ? clock() : 0;
   const nav = isIndoor(map) && opts.nav !== false ? buildNavGraph(map, ctx.colliders, balance) : null;
-  return { map, balance, ctx, nav };
+  const t2 = clock ? clock() : 0;
+  return clock ? { map, balance, ctx, nav, buildMs: { colliders: t1 - t0, nav: t2 - t1 } } : { map, balance, ctx, nav };
 }
 
 /** @deprecated Since the C-gate `MovementState` carries the drop fields; kept as an alias for existing imports. */
@@ -78,6 +104,16 @@ export interface MovementStatus {
    * fire held + mag > 0 + settled, ADR 0004 Consequences). Applies weapons[held].fireMoveMultiplier.
    */
   fireSlowed: boolean;
+  /**
+   * M2c (scopes.md): the scope mounted on the held gun (null / absent = its built-in sight). toMovementInput turns it into
+   * MovementInput.adsSpec via effectiveWeapon, so ADS time and walk speed match the server with a scope mounted.
+   */
+  scope?: ScopeId | null;
+  /**
+   * M2c: an explicit ADS spec (client prediction may compute it from the predicted scope). When present it wins over
+   * `scope`.
+   */
+  adsSpec?: MovementInput['adsSpec'];
 }
 
 /** A valid stance request, else null (defensive: the protocol already rejects other values). */
@@ -106,7 +142,8 @@ export function toMovementInput(input: PlayerInput, status: MovementStatus, bala
       adsBlocked: true,
     };
   }
-  const fireMult = status.fireSlowed && status.held !== 'grenade' ? balance.weapons[status.held].fireMoveMultiplier : 1;
+  const heldNow = status.held;
+  const fireMult = status.fireSlowed && !isM2cThrowableId(heldNow) ? weaponBalance(balance, heldNow).fireMoveMultiplier : 1;
   return {
     moveForward: finiteOr0(input.moveForward),
     moveRight: finiteOr0(input.moveRight),
@@ -119,7 +156,16 @@ export function toMovementInput(input: PlayerInput, status: MovementStatus, bala
     ads: input.ads === true,
     held: status.held,
     adsBlocked: status.reloading || status.healing || status.swapping,
+    ...(status.adsSpec ? { adsSpec: status.adsSpec } : adsSpecFor(heldNow, status.scope ?? null, balance)),
   };
+}
+
+/** M2c: `{ adsSpec }` for a gun with a mounted scope; {} otherwise (the step then reads weapons[held], the M2b rule). */
+function adsSpecFor(held: HeldId, scope: ScopeId | null, balance: Balance): Pick<MovementInput, 'adsSpec'> {
+  if (scope === null || isM2cThrowableId(held) || !isM2cGunId(held)) return {};
+  const e = effectiveWeapon(balance, held, 1, scope);
+  if (e.scope === null) return {};
+  return { adsSpec: { sight: e.sight, adsTimeMs: e.adsTimeMs, adsMoveMultiplier: e.adsMoveMultiplier } };
 }
 
 /**
@@ -279,7 +325,8 @@ export function stepMovement(
   const stanceNow = { stance, stanceFrom, stanceMs };
 
   // ---- ADS (combat.md "ADS") ----
-  const heldW = input.held === 'grenade' ? null : b.weapons[input.held];
+  const heldIn = input.held;
+  const heldW = isM2cThrowableId(heldIn) ? null : (input.adsSpec ?? weaponBalance(b, heldIn));
   const adsEngaged =
     input.ads && heldW !== null && heldW.sight !== 'none' && !input.adsBlocked && !state.dropping && settled && stanceChanged === null;
   const adsMs = adsEngaged && heldW ? Math.min(heldW.adsTimeMs, (state.adsMs > 0 ? state.adsMs : 0) + step * 1000) : 0;

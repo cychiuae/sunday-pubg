@@ -1,6 +1,6 @@
 # System: Melee Weapons (knife, machete, paddle) (M2c)
 
-Numbers: `balance.json` `weapons.knife|machete|paddle` (staged in `_m2cPending.weapons`), level multipliers `levels.melee`, bot keys
+Numbers: `balance.json` `weapons.knife|machete|paddle` (live), level multipliers `levels.melee`, bot keys
 `bots.melee`. Server-authoritative. Related: `combat.md` (inventory, damage, armor), `levels.md`, `maps.md` (glass).
 Scope tags: **M2c**, **Later**, **Maybe**.
 
@@ -20,7 +20,10 @@ or pull the machete when someone is on top of you?
 | Paddle (beach oar) | Slow, heavy, long, pushes | 78 / 117 | 1000 ms | 350 ms | 2.8 m | 0.55 m | 7 m/s + 2.5 m/s lift | rare, epic |
 | Fists (unchanged) | Desperation | 15 / 15 | 450 ms | instant | 2.0 m (ray only) | - | - | always |
 
-(`fireIntervalMs` = the swing cycle, `range` = the reach; `levels.md` scales damage and the cycle and hit frame together.)
+(`fireIntervalMs` = the swing cycle = the swing duration the art poses use, `range` = the reach, `hitFrameMs` = the hit frame; the
+art's hit-frame fraction is `hitFrameMs / fireIntervalMs`: knife 0.29, machete 0.31, paddle 0.35. `levels.md` scales the cycle and the
+hit frame by the same factor, so the fraction never changes with level.)
+**No right-click action** for melee (decided: RMB does nothing, no prompt; a block or shove is Maybe).
 The paddle slows you to x0.7 for `combat.fireMoveWindowMs` after each hit frame (`fireMoveMultiplier` 0.7).
 The office uses the same paddle model for now (a reskin is Later).
 
@@ -117,6 +120,8 @@ fireMoveMultiplier`; `levels.melee.*`; `bots.melee.*`. Validation (tech-lead): `
   `combat.swapMs` if you hold the melee slot.
 
 ## What the UI must show (ui-ux-designer)
+Swing readout (agreed with G-client and the director): `HudLocalView.meleeRecovery` is 0 during the wind-up (click to hit frame), then
+runs 0 -> 1 over the recovery (`fireIntervalMs - hitFrameMs`, both level-scaled), reaching 1 when the next swing is allowed.
 Slot 3 shows the melee weapon icon with level band (or fists). Hip crosshair: a short arc showing the sweep (melee only). Hit markers:
 same body/head/kill markers; a "glass broken" crack flash. Pickup prompt "[E] Machete Lv2" / "[E] Swap Knife -> Paddle". Kill feed
 icon per melee weapon.

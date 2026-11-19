@@ -5,14 +5,16 @@
  * and the cooking-grenade fuse spark. Owner: graphics-engineer.
  */
 import * as THREE from 'three';
-import { isScopeSight, sightOf, type Balance } from '../shared/balance';
+import { isScopeSight, type Balance } from '../shared/balance';
 import type { PlayerView } from '../shared/contracts';
-import type { DropPhase, HeldId, PlayerAnim, PlayerDropFields, PlayerId, PlayerState, SightType, Vec3 } from '../shared/types';
+import type { DropPhase, HeldId, PlayerAnim, PlayerDropFields, PlayerId, PlayerState, M2cSightType, SightType, Vec3 } from '../shared/types';
 import { computePose, DEATH_POOF_AT_S, makePose, stanceBlend, type Pose, type PoseInput, type StanceBlend } from './characterPose';
 import { skinChibi, skinKey, type ChibiWear, type SkinnedChibi } from './chibiSkin';
+import { heldScope, type DrawnScope } from './heldItem';
+import type { ModelBatch, ModelHandle } from './ModelBatch';
 import {
-  createCharacter, createGrenadeModel, createParachute, createWeaponModel, getWeaponSight, GRENADE_DIMENSIONS,
-  setParachuteDeploy, type CharacterModel,
+  createCharacter, createGrenadeModel, createParachute, createSmokeModel, createWeaponModel, getWeaponSight, GRENADE_DIMENSIONS,
+  setParachuteDeploy, vertexColorToon, type CharacterModel,
 } from './procedural';
 import { PARTICLE_SHAPE } from './shaders/particles';
 import type { Markers } from './vfx/Markers';
@@ -77,7 +79,7 @@ export const GLINT_COS_FULL = Math.cos((8 * Math.PI) / 180);
 const GLINT_PX_MIN = 10;
 const GLINT_PX_MAX = 30;
 /** Distance from the sight's eye anchor forward to the objective lens (m), per scope. */
-const GLINT_FORWARD: Partial<Record<SightType, number>> = { scope_4x: 0.34, scope_8x: 0.54 };
+const GLINT_FORWARD: Partial<Record<M2cSightType, number>> = { scope_4x: 0.34, scope_8x: 0.54 };
 
 /** Glint is shown only on living remote players who are aiming a scoped weapon. Pure; exported for tests. */
 export function scopeGlintVisible(isLocal: boolean, alive: boolean, anim: Pick<PlayerAnim, 'ads'>, sight: SightType): boolean {
@@ -104,7 +106,12 @@ interface View {
   /** Held models by key (weapon id, 'grenade:pin', 'grenade:cook'); null = nothing in hand (fists). */
   held: Map<string, THREE.Object3D | null>;
   heldKey: string;
+  /** Anchor proxy in the hand (muzzle, sight, fuse); its toon body and hull are drawn by the shared ModelBatch. */
   heldObj: THREE.Object3D | null;
+  /** M2c: this view's instance in the shared item batch (null until it first holds an item). */
+  heldHandle: ModelHandle | null;
+  /** Batch key of the held item ('' = nothing drawn). */
+  heldBatchKey: string;
   baseKey: string;
   wear: ChibiWear;
   walkPhase: number;
@@ -194,9 +201,14 @@ export class PlayerViews {
     seed: 0, crouch: 0, prone: 0, ads: 0, deathSide: 1, dropPhase: null, chute: 0, steerX: 0, steerZ: 0,
   };
 
+  /**
+   * @param items M2c shared item batch (held weapons share it with ground loot: 2 draw calls for all of them). Optional:
+   *   without it every held item draws its own meshes (2 calls each), as before.
+   */
   constructor(
     private balance: Balance,
     private readonly events: PlayerViewsEvents,
+    private readonly items: ModelBatch | null = null,
   ) {
     this.group.name = 'players';
     this.flashMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
@@ -248,7 +260,7 @@ export class PlayerViews {
       const colourMeshes: THREE.Mesh[] = [skin.colour];
       model.root.rotation.order = 'YXZ';
       v = {
-        id: p.state.id, model, skin, outlines, colourMeshes, held: new Map(), heldKey: '', heldObj: null, baseKey,
+        id: p.state.id, model, skin, outlines, colourMeshes, held: new Map(), heldKey: '', heldObj: null, heldHandle: null, heldBatchKey: '', baseKey,
         wear: { vest: wear.vest, helmet: wear.helmet }, walkPhase: 0, lastX: 0, lastZ: 0, speed: 0, recoil: 0, hit: 0,
         hitFlash: 0, flashing: false, diedAt: -1, poofed: false, seed: 0, seen: 0, pose: makePose(),
         blend: { crouch: 0, prone: 0 }, blendInit: false, ads: 0, cookExplodesAt: 0, sparkT: 0,
@@ -296,30 +308,61 @@ export class PlayerViews {
   }
 
   private release(v: View): void {
+    if (v.heldHandle && this.items) this.items.setVisible(v.heldHandle, false);
     this.group.remove(v.model.root);
     this.views.delete(v.id);
     this.pool.push(v);
   }
 
-  private setHeld(v: View, w: HeldId, cooking: boolean): void {
-    const key = w === 'grenade' ? (cooking ? 'grenade:cook' : 'grenade:pin') : w;
+  /**
+   * M2c held item: the per-(id, level, scope) model (Addendum 2). The Object3D stays in the hand as an anchor proxy
+   * (muzzle, sight, fuse, the see-through lens) with its toon body and ink hull hidden; those are drawn by the shared
+   * `ModelBatch` (2 calls for every held and ground item; Renderer owns it), positioned from the proxy each frame.
+   * Without a batch (tests, old callers) the Object3D draws itself as before.
+   */
+  private setHeld(v: View, w: HeldId, cooking: boolean, level: number | null, sight: string | null): void {
+    const scope = heldScope(w, sight);
+    const key = w === 'grenade' || w === 'smoke'
+      ? `${w}:${cooking ? 'cook' : 'pin'}`
+      : level != null || scope ? `${w}|${level ?? '-'}|${scope ?? '-'}` : w;
     if (v.heldKey === key) return;
     if (v.heldObj) v.model.handR.remove(v.heldObj);
     let obj = v.held.get(key);
     if (obj === undefined) {
-      if (w === 'grenade') {
-        obj = createGrenadeModel({ pin: !cooking });
-        const o = GRENADE_DIMENSIONS.handOffset;
-        obj.position.set(o[0], o[1], o[2]);
-      } else {
-        obj = createWeaponModel(w);
-      }
+      obj = buildHeldModel(w, cooking, level, scope);
       v.held.set(key, obj);
-      if (obj) obj.traverse((o) => o.name === 'outline' && v.outlines.push(o));
+      if (obj) {
+        if (this.items) {
+          const k = `held:${key}`;
+          this.items.register(k, () => buildHeldModel(w, cooking, level, scope)!);
+          hideBatchedParts(obj);
+        }
+        obj.traverse((o) => o.name === 'outline' && !o.userData.batched && v.outlines.push(o));
+        obj.userData.batchKey = this.items ? `held:${key}` : '';
+      }
     }
     if (obj) v.model.handR.add(obj);
     v.heldObj = obj;
     v.heldKey = key;
+    const bk = (obj?.userData.batchKey as string | undefined) ?? '';
+    if (this.items && bk) {
+      if (!v.heldHandle) v.heldHandle = this.items.acquire(bk);
+      else this.items.swap(v.heldHandle, bk);
+    }
+    v.heldBatchKey = bk;
+  }
+
+  /** Sync the batch instance with the proxy (call after the pose and root transform are applied). */
+  private syncHeld(v: View, visible: boolean, outline: boolean): void {
+    const h = v.heldHandle;
+    if (!h || !this.items) return;
+    const obj = v.heldObj;
+    const show = visible && !!obj && !!v.heldBatchKey && obj.visible;
+    if (show && obj) {
+      obj.updateWorldMatrix(true, false);
+      this.items.setMatrix(h, obj.matrixWorld);
+    }
+    this.items.setVisible(h, show, outline);
   }
 
   /** Hit flash wins over fade; otherwise a translucent material while fading, else the shared toon material. */
@@ -416,6 +459,8 @@ export class PlayerViews {
       let v = this.views.get(s.id);
       if (!v) v = this.acquire(p);
       v.seen = this.frame;
+      // Hidden unless this frame draws the body (first-person subject, aboard, poofed paths `continue` early).
+      if (v.heldHandle && this.items) this.items.setVisible(v.heldHandle, false);
       this.setLook(v, `${s.appearance.skin}|${s.appearance.outfit}|${s.appearance.hair}`, PlayerViews.wearOf(p, _wear), p);
 
       // Revived (new match reusing an id): clear death state. The kill event arrives ~INTERP_DELAY before the
@@ -497,8 +542,8 @@ export class PlayerViews {
         continue;
       }
 
-      const cooking = s.weapon === 'grenade' && !!s.anim.cooking;
-      this.setHeld(v, s.weapon, cooking);
+      const cooking = (s.weapon === 'grenade' || s.weapon === 'smoke') && !!s.anim.cooking;
+      this.setHeld(v, s.weapon, cooking, s.weaponLevel ?? null, s.sight ?? null);
       const pi = this.poseIn;
       pi.time = time;
       pi.anim = s.anim;
@@ -520,6 +565,8 @@ export class PlayerViews {
       pi.pronePitchMin = this.pronePitchMin;
       pi.pronePitchMax = this.pronePitchMax;
       pi.dropPhase = phase;
+      // M2c melee swing (remote wind-up readable at 15 m; ClientGame fills it from meleeSwing events / prediction).
+      pi.swing = p.swing && s.alive ? p.swing : null;
       pi.chute = phase === 'chute' ? Math.min(1, (time - v.chuteAt) / CHUTE_DEPLOY_S) : 0;
       if (phase) {
         const ref = phase === 'chute' ? this.chuteSteer : this.freefallSteer;
@@ -541,12 +588,13 @@ export class PlayerViews {
       const d2 = (s.pos.x - cam.x) ** 2 + (s.pos.y - cam.y) ** 2 + (s.pos.z - cam.z) ** 2;
       const showOutline = d2 < this.outlineDist2 && fade >= 0.999;
       for (let k = 0; k < v.outlines.length; k++) v.outlines[k].visible = showOutline;
+      this.syncHeld(v, root.visible, showOutline);
 
       if (deathTime < 0 && root.visible) {
-        if (cooking && v.heldObj?.visible) this.fuseSpark(v, f);
-        if (scopeGlintVisible(p.isLocal, s.alive, s.anim, s.weapon === 'grenade' ? 'none' : sightOf(this.balance, s.weapon))) {
-          this.glint(v, s.weapon, cam, time);
-        }
+        if (cooking && s.weapon === 'grenade' && v.heldObj?.visible) this.fuseSpark(v, f);
+        const sight = s.sight as SightType;
+        // M2c: no glint through smoke (same rule as the name tags).
+        if (!p.smokeHidden && scopeGlintVisible(p.isLocal, s.alive, s.anim, sight)) this.glint(v, s.weapon, heldScope(s.weapon, s.sight), cam, time);
       }
     }
 
@@ -583,11 +631,11 @@ export class PlayerViews {
   }
 
   /** Scope glint at the objective lens (sight anchor + forward), sized in screen pixels so it reads at any range. */
-  private glint(v: View, weapon: HeldId, cam: THREE.Vector3, time: number): void {
+  private glint(v: View, weapon: HeldId, scope: DrawnScope | null, cam: THREE.Vector3, time: number): void {
     const m = this.markers;
     const obj = v.heldObj;
-    if (!m || !obj || weapon === 'grenade') return;
-    const sight = getWeaponSight(weapon);
+    if (!m || !obj || weapon === 'grenade' || weapon === 'smoke') return;
+    const sight = getWeaponSight(weapon, { scope });
     if (!sight) return;
     v.model.root.updateMatrixWorld(true);
     // Forward (-Z of the weapon frame) and the lens point in world space.
@@ -646,7 +694,10 @@ export class PlayerViews {
 
   dispose(): void {
     this.clear();
-    for (const v of this.pool) v.skin.dispose();
+    for (const v of this.pool) {
+      v.skin.dispose();
+      if (v.heldHandle && this.items) this.items.release(v.heldHandle);
+    }
     this.pool.length = 0;
     this.flashMaterial.dispose();
     this.fadeMaterial?.dispose();
@@ -665,3 +716,32 @@ export function bodyFade(feet: Vec3, height: number, cam: { x: number; y: number
   const t = Math.min(1, Math.max(0, (d - FADE_NEAR) / (FADE_FAR - FADE_NEAR)));
   return t * t * (3 - 2 * t);
 }
+
+/** Held item model (anchor proxy + meshes) for a held id; null for fists. The rpg sits on the shoulder (holdOffset). */
+function buildHeldModel(w: string, cooking: boolean, level: number | null, scope: DrawnScope | null): THREE.Object3D | null {
+  if (w === 'grenade' || w === 'smoke') {
+    const obj = w === 'grenade' ? createGrenadeModel({ pin: !cooking }) : createSmokeModel({ pin: !cooking });
+    const o = GRENADE_DIMENSIONS.handOffset;
+    obj.position.set(o[0], o[1], o[2]);
+    return obj;
+  }
+  const obj = createWeaponModel(w, { level, scope });
+  const ho = obj?.userData.holdOffset as [number, number, number] | undefined;
+  if (obj && ho) obj.position.set(ho[0], ho[1], ho[2]);
+  return obj;
+}
+
+/** Hide the meshes the shared batch draws (shared toon body, ink hulls); lenses and anchors stay. */
+function hideBatchedParts(root: THREE.Object3D): void {
+  const toon = vertexColorToon();
+  root.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    if (m.name === 'outline' || m.material === toon) {
+      m.visible = false;
+      m.userData.batched = true;
+    }
+  });
+}
+
+export { heldScope };

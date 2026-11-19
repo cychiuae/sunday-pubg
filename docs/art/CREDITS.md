@@ -30,6 +30,14 @@ designs. They do not copy any real aircraft, drone product, brand livery or anot
 The chibi forearms, mitten hands and the hold / ADS poses (`src/render/procedural/viewmodel.ts`) are original and
 procedural.
 
+## M2c: no third-party art
+The M2c models and art built from `docs/art/M2c.md` (melee tools incl. the Shucking Knife and Lifeboat Paddle, the four
+per-level variants of every levelled weapon, decor, island prop variants, the water cooler, the Double Scoop Shotgun, Sand Dollar Revolver, Sunburst Launcher and
+rocket, Candyfloss Smoke Bomb, Ship's Bell Helmet, Surfboard Vest, scopes, prop kits, look presets, the 2x reticle and
+icons) are original and procedural (`src/render/procedural/`), with pure data in `src/shared/kits/`. The level colour order borrows the idea of the public UV-index
+chart (yellow, orange, violet for "extreme"). It is a public-health convention, not an asset or another game's rarity
+scheme. Office additions are generic objects with no brands, text or people.
+
 Three.js (MIT licence) is a code dependency, not an art asset. It is listed here only for completeness.
 
 ## Future third-party assets

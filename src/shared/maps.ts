@@ -3,7 +3,8 @@
  * the server share, so each rule has one implementation. Physics (collision, raycasts, heights) stays in
  * src/shared/sim (game-developer); this file only answers questions about the data.
  */
-import type { AnyMapData, DropRoute, IndoorMapData, Rect, Vec2, WallSegment } from './types';
+import { atan2Det, hypot2 } from './detmath';
+import type { AnyMapData, DropRoute, IndoorMapData, PaneId, Rect, Vec2, WallSegment } from './types';
 
 /** Narrowing helper: `if (isIndoor(map))`. Anything that is not 'indoor' is the island. */
 export const isIndoor = (map: AnyMapData): map is IndoorMapData => map.kind === 'indoor';
@@ -29,6 +30,10 @@ export function mapExtent(map: AnyMapData): number {
 /**
  * A wall as a box: centre, half-length along the wall, half-thickness across, and rotY (Three.js convention: local
  * +X runs from (x1, z1) to (x2, z2)). Sim colliders, render meshes and the minimap all use this.
+ *
+ * Deterministic (detmath `atan2Det` / `hypot2`, REVIEW-M2c final): level data built at module load (indoorGeometry
+ * `wallSolid` for a diagonal wall) reads it, and that data feeds layout decisions on every engine. For axis-aligned walls
+ * (every wall today) the result is bit-identical to Math.atan2 / Math.hypot, signed zeros included.
  */
 export interface WallFrame {
   cx: number;
@@ -43,10 +48,10 @@ export function wallFrame(w: WallSegment): WallFrame {
   return {
     cx: (w.x1 + w.x2) / 2,
     cz: (w.z1 + w.z2) / 2,
-    halfLength: Math.hypot(dx, dz) / 2,
+    halfLength: hypot2(dx, dz) / 2,
     halfThickness: w.thickness / 2,
     // Three.js rotation.y = t maps local +X to (cos t, 0, -sin t); we want that to equal (dx, dz) / L.
-    rotY: Math.atan2(-dz, dx),
+    rotY: atan2Det(-dz, dx),
   };
 }
 
@@ -117,4 +122,39 @@ export function validateIndoorMap(map: IndoorMapData, stepHeight: number): strin
   }
   if (!(stepHeight > 0)) e.push('stepHeight must be > 0');
   return e;
+}
+
+/**
+ * M2c (ADR 0007 §8): one breakable glass pane. Either a glass wall segment (`wall` = index into map.walls) or one glass
+ * collider part of a kit prop (`prop` = index into map.props, `part` = index into that kit entry's colliders).
+ */
+export type GlassPane = { id: PaneId; wall: number } | { id: PaneId; prop: number; part: number };
+
+/**
+ * Max width of one glass WALL pane (melee.md "Glass": breaking one opens a door-sized gap). Level tests assert it for
+ * glass walls only. Glass KIT parts are exempt (ADR 0007 §7, decided at the C-gate): a kit part is already one
+ * door-sized piece of its prop (e.g. the phone-booth door, 9.54 m at office x9 scale = a 1.06 m real door), so breaking
+ * it never opens more than that prop.
+ */
+export const GLASS_PANE_MAX_WIDTH = 8.1;
+
+/**
+ * M2c: every breakable glass pane of a (layout-applied) map, with ids 0..n-1 in a fixed order: glass walls in
+ * map.walls order, then glass kit parts in map.props order and collider order. The sim (colliders, broken state,
+ * glassBroken.paneId), the renderer (broken mask) and tests all use these ids. Island maps have none.
+ */
+export function glassPanes(map: AnyMapData): GlassPane[] {
+  if (!isIndoor(map)) return [];
+  const out: GlassPane[] = [];
+  map.walls.forEach((w, i) => {
+    if (w.material === 'glass') out.push({ id: out.length, wall: i });
+  });
+  map.props.forEach((p, i) => {
+    const entry = map.kit[p.kind];
+    if (!entry) return;
+    entry.colliders.forEach((c, k) => {
+      if (c.type === 'box' && c.glass === true) out.push({ id: out.length, prop: i, part: k });
+    });
+  });
+  return out;
 }

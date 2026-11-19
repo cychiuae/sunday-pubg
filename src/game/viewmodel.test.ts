@@ -4,13 +4,13 @@ import { SIM_DT } from '../shared/constants';
 import { actionsFromSnapshot, stepActions, type PredictedActions } from './actionPrediction';
 import { input as simInput } from '../shared/sim/testkit';
 import { buildViewmodel, localVmAction, LookRate, remoteVmAction, ShotCounter, SpectateAdsClock } from './viewmodel';
-import { makeLocal, makeMovement, makePlayer } from './testFixtures';
+import { makeAmmo, makeLocal, makeMovement, makePlayer } from './testFixtures';
 
 const B = BALANCE;
 const M = makeMovement();
 const acts = (over: Parameters<typeof makeLocal>[1] = {}, hp = 50): PredictedActions =>
   actionsFromSnapshot(
-    makeLocal(1, { slots: [{ weapon: 'rifle', mag: 5 }, null], activeSlot: 0, ammo: { ammo_light: 0, ammo_heavy: 60, ammo_shell: 0, ammo_sniper: 0 }, heals: { bandage: 1, medkit: 0 }, grenades: 2, ...over }),
+    makeLocal(1, { slots: [{ weapon: 'rifle', mag: 5 }, null], activeSlot: 0, ammo: makeAmmo({ ammo_light: 0, ammo_heavy: 60, ammo_shell: 0, ammo_sniper: 0 }), heals: { bandage: 1, medkit: 0 }, grenades: 2, ...over }),
     hp,
     100,
   );

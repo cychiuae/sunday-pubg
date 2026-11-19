@@ -20,13 +20,14 @@
 import * as THREE from 'three';
 import { isIndoor } from '../shared/maps';
 import { wallFrame } from '../shared/maps';
-import type { FloorMaterial, IndoorMapData, IndoorPropPlacement, KitCollider, PropKitEntry, Rect } from '../shared/types';
+import type { DecorPlacement, FloorMaterial, IndoorMapData, IndoorPropPlacement, KitCollider, PropKitEntry, Rect } from '../shared/types';
 import { CameraObstacles } from './cameraRig';
 import { COVER_HEIGHT_STEP, createMergedOutlineMaterial, INDOOR_FX, patchIndoor, resetIndoorFx } from './indoorFx';
 import type { MapScene, MapSceneFrame } from './mapScene';
-import { MergeBucket } from './mergeBuilder';
+import { GlassDebris, paneLayout, PaneMask, patchPaneMask, type PaneRect } from './GlassLayer';
+import { MergeBucket, PANE_ID_ATTR, type TriangleTag } from './mergeBuilder';
 import {
-  buildMerged, getOfficePropParts, getOfficeWallParts, getToonGradient, OFFICE_PROP_KINDS, OFFICE_WALL_HEIGHT,
+  buildMerged, getDecorParts, getOfficePropParts, getOfficeWallParts, getToonGradient, OFFICE_PROP_KINDS, OFFICE_WALL_HEIGHT,
   officeFrostMaterial, officeGlassMaterial, officeGlowMaterial, officePalette, OUTLINE, vertexColorToon,
   type OfficePropKind, type PropPart,
 } from './procedural';
@@ -236,7 +237,7 @@ export class IndoorScene implements MapScene {
   readonly kind = 'indoor' as const;
   readonly mapId: string;
   readonly group = new THREE.Group();
-  readonly look = OFFICE_LOOK;
+  readonly look: SceneLook;
   readonly obstacles: CameraObstacles;
   readonly orbitShadowExtent: number;
   readonly cameraFar: number;
@@ -248,15 +249,29 @@ export class IndoorScene implements MapScene {
   private readonly chunks: Chunk[] = [];
   private readonly ceilingSets: CeilingSet[] = [];
   private readonly rain: RainCurtain;
+  private readonly panes: { rects: PaneRect[]; wallPane: Map<number, number>; propPane: Map<number, (x: number, y: number, z: number) => number> };
+  private readonly paneMask: PaneMask;
+  private readonly debris: GlassDebris;
+  private readonly newlyBroken: number[] = [];
+  private readonly decor: readonly DecorPlacement[];
+  /** Lit light-panel placements (After Hours row / room pattern); null = all lit. */
+  private readonly litPanels: Set<IndoorPropPlacement> | null;
   private readonly bodyMat: THREE.MeshToonMaterial;
   private readonly hullMat: THREE.MeshBasicMaterial;
   /** Triangle counts per layer (dev stats / RENDERING.md). */
-  readonly stats = { chunks: 0, propTris: 0, hullTris: 0, wallTris: 0, glassTris: 0, ceilingInstances: 0 };
+  readonly stats = { chunks: 0, propTris: 0, hullTris: 0, wallTris: 0, glassTris: 0, ceilingInstances: 0, decor: 0, litPanels: -1 };
 
-  constructor(map: IndoorMapData, quality: QualitySettings, opts: { zoneTheme: string; preset: QualityPreset; splash: (x: number, y: number, z: number) => void }) {
+  constructor(map: IndoorMapData, quality: QualitySettings, opts: {
+    zoneTheme: string; preset: QualityPreset; splash: (x: number, y: number, z: number) => void; look?: SceneLook;
+    /** M2c: client-only decor of this match's layout (paperSheets), merged into the prop chunks. */
+    decor?: readonly DecorPlacement[];
+    /** M2c: MatchLayout.lightsOn (indices into map.props of the lit light panels); null / absent = all lit. */
+    lightsOn?: readonly number[] | null;
+  }) {
     if (!isIndoor(map)) throw new Error('IndoorScene needs an indoor map');
     this.map = map;
     this.mapId = map.id;
+    this.look = opts.look ?? OFFICE_LOOK;
     this.group.name = `indoor:${map.id}`;
     const f = map.floor;
     const w = f.maxX - f.minX, d = f.maxZ - f.minZ;
@@ -280,6 +295,8 @@ export class IndoorScene implements MapScene {
     const cr = this.cover.rect;
     INDOOR_FX.uCoverRect.value.set(cr.minX, cr.minZ, 1 / (this.cover.width * this.cover.cell), 1 / (this.cover.height * this.cover.cell));
     INDOOR_FX.uCoverOn.value = 1;
+    // M2c look (art M2c §10.2): under-desk darkening per preset (day / evening 0.75, after hours 0.85).
+    INDOOR_FX.uCoverDark.value = this.look.office?.underDesk ?? 0.75;
 
     this.rain = new RainCurtain({
       ceiling: map.ceilingHeight,
@@ -288,6 +305,16 @@ export class IndoorScene implements MapScene {
       topAt: (x, z) => coverTopAt(this.cover, x, z),
       splash: opts.splash,
     });
+
+    // M2c breakable glass: pane ids, the broken mask and the debris mesh (GlassLayer.ts).
+    this.panes = paneLayout(map);
+    this.paneMask = new PaneMask(this.panes.rects.length);
+    this.textures.push(this.paneMask.texture);
+    this.debris = new GlassDebris();
+    this.group.add(this.debris.mesh);
+
+    this.decor = opts.decor ?? [];
+    this.litPanels = opts.lightsOn ? new Set(opts.lightsOn.map((i) => map.props[i]).filter(Boolean)) : null;
 
     this.buildFloor();
     this.buildWallsAndProps();
@@ -387,13 +414,14 @@ export class IndoorScene implements MapScene {
     const ceilBody = new MergeBucket(), ceilHull = new MergeBucket(true);
     const placeholderGeos: THREE.BufferGeometry[] = [];
 
-    const addParts = (parts: readonly PropPart[], m: THREE.Matrix4, body: MergeBucket, hull: MergeBucket) => {
+    const addParts = (parts: readonly PropPart[], m: THREE.Matrix4, body: MergeBucket, hull: MergeBucket, pane: TriangleTag = -1) => {
       for (const part of parts) {
         const pm = part.matrix ? _m2.multiplyMatrices(m, part.matrix).clone() : m.clone();
         switch (part.name) {
           case 'outline': hull.add(part.geometry, pm, outlineWidthOf(part.material)); break;
-          case 'glass': glass.add(part.geometry, pm); break;
-          case 'frost': frost.add(part.geometry, pm); break;
+          // M2c: glass and frost carry the pane id (broken mask, GlassLayer.ts).
+          case 'glass': glass.add(part.geometry, pm, 0, pane); break;
+          case 'frost': frost.add(part.geometry, pm, 0, pane); break;
           case 'glow': glow.add(part.geometry, pm); break;
           default: body.add(part.geometry, pm);
         }
@@ -401,19 +429,21 @@ export class IndoorScene implements MapScene {
     };
 
     // Walls (wallFrame through wallMatrix).
-    for (const w of map.walls) {
+    for (let wi = 0; wi < map.walls.length; wi++) {
+      const w = map.walls[wi];
       const len = Math.hypot(w.x2 - w.x1, w.z2 - w.z1);
       if (!(len > 0)) continue;
       const parts = getOfficeWallParts(w.material, len);
       const body = parts[0].geometry;
       if (!body.boundingBox) body.computeBoundingBox();
       const modelLen = body.boundingBox!.max.x - body.boundingBox!.min.x;
-      addParts(parts, wallMatrix(w, modelLen, _m), wallBody, wallHull);
+      addParts(parts, wallMatrix(w, modelLen, _m), wallBody, wallHull, this.panes.wallPane.get(wi) ?? -1);
     }
 
     // Kit props, by origin: 'ceiling' kinds are instanced (retractable), the rest merged per chunk.
     const ceilingByKind = new Map<string, IndoorPropPlacement[]>();
-    for (const p of map.props) {
+    for (let pi = 0; pi < map.props.length; pi++) {
+      const p = map.props[pi];
       const entry = map.kit[p.kind];
       if (!entry) continue;
       if (entry.origin === 'ceiling' && isOfficeModel(p.kind)) {
@@ -428,7 +458,22 @@ export class IndoorScene implements MapScene {
       const k = cj * nx + ci;
       placementMatrix(p, _m);
       if (entry.origin === 'ceiling') addParts(parts, _m, ceilBody, ceilHull);
-      else addParts(parts, _m, bodies[k], hulls[k]);
+      else addParts(parts, _m, bodies[k], hulls[k], this.panes.propPane.get(pi) ?? -1);
+    }
+
+    // M2c decor (paper on desks and floors): merged into the chunk bodies; 0 extra draw calls.
+    for (const d of this.decor) {
+      let parts: readonly PropPart[];
+      try {
+        parts = getDecorParts(d.kind, d.variant ?? 0);
+      } catch {
+        continue; // island-only or unknown kind
+      }
+      const ci = Math.min(nx - 1, Math.max(0, Math.floor((d.x - f.minX) / CHUNK)));
+      const cj = Math.min(nz - 1, Math.max(0, Math.floor((d.z - f.minZ) / CHUNK)));
+      placementMatrix({ x: d.x, y: d.y, z: d.z, rotY: d.rotY, scale: d.scale } as IndoorPropPlacement, _m);
+      addParts(parts, _m, bodies[cj * nx + ci], hulls[cj * nx + ci]);
+      this.stats.decor++;
     }
 
     for (let k = 0; k < bodies.length; k++) {
@@ -459,10 +504,14 @@ export class IndoorScene implements MapScene {
     if (ch) this.mesh(ch, this.hullMat, 'office:ceilingHull', false, false);
 
     const gm = glass.build('office:glass');
-    if (gm) this.mesh(gm, this.own(patchIndoor(officeGlassMaterial().clone(), 'officeGlass', { cut: true })), 'office:glass', false, false, 1);
+    const masked = <M extends THREE.Material>(geo: THREE.BufferGeometry, mat: M, key: string): M =>
+      geo.getAttribute(PANE_ID_ATTR) ? patchPaneMask(mat, this.paneMask.uniform, key) : mat;
+    if (gm) this.mesh(gm, this.own(masked(gm, patchIndoor(officeGlassMaterial().clone(), 'officeGlass', { cut: true }), 'glass')), 'office:glass', false, false, 1);
     const fm = frost.build('office:frost');
-    if (fm) this.mesh(fm, this.own(patchIndoor(officeFrostMaterial().clone(), 'officeFrost', { cut: true })), 'office:frost', false, false, 2);
+    if (fm) this.mesh(fm, this.own(masked(fm, patchIndoor(officeFrostMaterial().clone(), 'officeFrost', { cut: true }), 'frost')), 'office:frost', false, false, 2);
     const glowMat = this.own(patchIndoor(officeGlowMaterial().clone(), 'officeGlow', { cut: true }));
+    // M2c look: panel diffuser colour (evening warm white). afterHours row/room switch-off needs MatchLayout.lightsOn.
+    if (this.look.office) glowMat.color.setHex(this.look.office.panelColor);
     const gl = glow.build('office:glow');
     if (gl) this.mesh(gl, glowMat, 'office:glow', false, false);
     for (const g of placeholderGeos) g.dispose();
@@ -535,6 +584,25 @@ export class IndoorScene implements MapScene {
     for (const im of meshes) {
       im.instanceMatrix.needsUpdate = true;
       im.computeBoundingSphere();
+    }
+    // M2c After Hours (art M2c §10.2): about 60 % of the panels off by whole rows / rooms (MatchLayout.lightsOn). One
+    // glow call: the colour per instance (lit = the preset's panel colour, off = #5A6270 relative to it).
+    if (kind === 'lightPanel' && this.look.office?.panelsDimmed && this.litPanels) {
+      const glow = meshes.find((m) => m.name.endsWith(':glow'));
+      const base = (glowMat as THREE.MeshBasicMaterial).color;
+      if (glow && base) {
+        const off = new THREE.Color(0x5a6270);
+        const offRel = new THREE.Color(off.r / Math.max(1e-4, base.r), off.g / Math.max(1e-4, base.g), off.b / Math.max(1e-4, base.b));
+        const lit = new THREE.Color(1, 1, 1);
+        let on = 0;
+        list.forEach((p, i) => {
+          const isLit = this.litPanels!.has(p);
+          if (isLit) on++;
+          glow.setColorAt(i, isLit ? lit : offRel);
+        });
+        if (glow.instanceColor) glow.instanceColor.needsUpdate = true;
+        this.stats.litPanels = on;
+      }
     }
     this.stats.ceilingInstances += n;
     this.ceilingSets.push(set);
@@ -656,7 +724,26 @@ export class IndoorScene implements MapScene {
     return out;
   }
 
+  /**
+   * M2c: FrameView.brokenPanes (ascending, grows only during a match). Collapses the broken panes' glass and frost
+   * (mask texture) and rebuilds the teeth + litter mesh when the set grows. Allocation-free when unchanged.
+   */
+  setBrokenPanes(ids: readonly number[]): void {
+    const fresh = this.paneMask.set(ids, this.newlyBroken);
+    if (fresh.length > 0 || (ids.length === 0 && this.debris.mesh.visible)) this.debris.rebuild(this.panes.rects, ids, 0);
+  }
+
+  /** Pane rectangles (tests, dev). */
+  get paneRects(): readonly PaneRect[] {
+    return this.panes.rects;
+  }
+
+  isPaneBroken(id: number): boolean {
+    return this.paneMask.isBroken(id);
+  }
+
   dispose(): void {
+    this.debris.dispose();
     this.rain.dispose();
     for (const g of this.geos) g.dispose();
     for (const m of this.mats) m.dispose();

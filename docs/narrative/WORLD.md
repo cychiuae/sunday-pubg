@@ -39,7 +39,8 @@ The cruise line packed the island crates for a "Castaway Challenge" weekend that
 
 ## Gear (M2c)
 Full rationale in `docs/narrative/M2c.md`.
-- **Melee (replaces fists):** Oyster Knife, Coconut Machete, Outrigger Paddle. They came from the galley and the excursion desk.
+- **Melee (replaces fists):** Shucking Knife, Coconut Machete, Lifeboat Paddle. They came from the galley and the lifeboats.
+- **Scopes:** Cherry Red Dot, Sea Glass 2x Scope, Spyglass 4x Scope, Stargazer 8x Scope. The spare slot is the "scope pouch".
 - **Guns:** Double Scoop Shotgun (double barrel, Seashells), Sand Dollar Revolver (Coral), Sunburst Launcher (rockets, using **Fireworks** left over from the farewell gala's grand finale).
 - **Candyfloss Smoke Bomb:** from the gala's dessert cart and stage-fog kit. Mid-fight label: "Smoke".
 - **Lv.4 armor:** Surfboard Vest, Ship's Bell Helmet (both salvaged from the wreck).
@@ -59,7 +60,9 @@ Full rationale in `docs/narrative/M2c.md`.
 - **Items:** a beach object plus the plain weapon type, e.g. "Conch Pistol" or "Spritzer SMG". The shotgun is the one exception ("Scatter Clam"), and its description makes the type clear. Ammo names should hint at size or rarity: Pebbles (light), Coral (heavy), Seashells (shells), Pearls (sniper, rare), Fireworks (rockets, the one man-made exception).
 - **Tiered gear (vests, helmets):** each tier gets its own beach object, and the name always ends in the plain type ("Coconut Helmet"). The tier itself is always shown with the plain label `Lv.1` to `Lv.4` (`gear.tier.N`, where `gear.tier.0` = "None"). Descriptions start with the type and tier: "Helmet, Lv.2."
 - **Item levels (M2c, weapons and armor):** `level.N.name` = Breezy / Warm / Hot / Scorcher, at most 10 characters. Always show the numeral too (`level.label` = "Lv.4 Scorcher"), never the colour or name alone.
-- **Melee weapons:** a beach object plus the plain type ("Oyster Knife"). Descriptions end with "Takes your fists' place."
+- **Melee weapons:** a beach object plus the plain type ("Shucking Knife"). Descriptions end with "Takes your fists' place."
+- **Every weapon name starts with a consonant sound**, because feed lines say "with a {weapon}".
+- **Scopes:** a beach object plus the zoom and "Scope" ("Spyglass 4x Scope"). The red dot is "Cherry Red Dot".
 - **Look presets:** two words at most, map-specific keys `look.<map>.<presetId>`, plus an optional `.line`.
 - **Grenades:** the feed and toasts call it a pineapple for flavour, but every label the player must read mid-fight says "Grenade".
 - **Places (POIs):** a friendly adjective plus a landmark, e.g. "Rickety Dock" or "Sunburn Summit". Two words at most, so they fit the minimap.

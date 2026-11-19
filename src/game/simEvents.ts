@@ -6,9 +6,12 @@
  * M2b: dropJump -> playerJumped, chuteOpen -> parachuteOpened. The local player's ones come from prediction; the
  * server echo is dropped when `skipLocalDrop` says prediction already emitted it (an auto-eject or a jump the client did
  * not predict still reaches the bus from the server).
+ * M2c (gate prep): `kind`/`source` default to the frag, kill `weaponLevel` defaults to L1 for guns; the seven M2c sim
+ * events translate 1:1 (meleeSwing: remotes only, the local swing comes from prediction).
  */
 import type { GameEvents } from '../shared/events';
-import type { DropSimEvent, PlayerId, SimEvent, Vec3 } from '../shared/types';
+import type { DropSimEvent, ItemLevel, M2cHeldId, M2cSimEvent, PlayerId, SimEvent, Vec3 } from '../shared/types';
+import { isM2cGunId, isMeleeId } from '../shared/types';
 import type { Bus } from './derived';
 
 export interface TranslateContext {
@@ -24,6 +27,46 @@ export interface TranslateContext {
   localEye?: () => Vec3 | null;
   /** M2b: true when prediction already emitted this local drop moment (its server echo is then dropped). Absent = false. */
   skipLocalDrop?: (type: DropSimEvent['type']) => boolean;
+  /** M2c: estimated server clock now (meleeSwing.windupMs). Absent = the swing's hitAt is treated as now. */
+  serverNow?: () => number;
+  /**
+   * M2c (smoke.md, UI M2c §6.2): the local camera's line to this victim's chest crosses an opaque smoke cloud now
+   * (segmentBlockedBySmoke). Fills localHitConfirmed.obscured. Absent = false.
+   */
+  obscured?: (victimId: PlayerId) => boolean;
+  /** M2c: source of a blast entity id (`explosion.source`, one id space), null if unknown. Absent = unknown. */
+  blastSource?: (blastId: number) => 'grenade' | 'rocket' | null;
+  /** M2c: source of the last blast that damaged this victim (kill weapon 'rpg' for rocket blasts). Absent = unknown. */
+  lastBlastOf?: (victimId: PlayerId) => 'grenade' | 'rocket' | null;
+}
+
+/**
+ * M2c: the weapon of a damage event when the server did not say (ADR 0007 §8): 'rpg' for rocket impacts and rocket
+ * blasts, 'grenade' for frag blasts; undefined when it cannot be derived (guns, melee, zone, fall: the sim sends it).
+ */
+export function damageWeaponOf(ev: Extract<SimEvent, { type: 'damage' }>, ctx: TranslateContext): M2cHeldId | null | undefined {
+  if (ev.weapon !== undefined) return ev.weapon;
+  if (ev.cause === 'rocket') return 'rpg';
+  if (ev.cause === 'explosion') {
+    const src = ev.grenadeId !== undefined ? (ctx.blastSource?.(ev.grenadeId) ?? null) : null;
+    return src === 'rocket' ? 'rpg' : 'grenade';
+  }
+  if (ev.cause === 'zone' || ev.cause === 'fall') return null;
+  return undefined;
+}
+
+/** M2c: kill weapon: 'rpg' for rocket impact kills and rocket blast kills (rpg.md: both carry weapon rpg). */
+export function killWeaponOf(ev: Extract<SimEvent, { type: 'kill' }>, ctx: TranslateContext): M2cHeldId | null {
+  if (ev.cause === 'rocket' && ev.weapon === null) return 'rpg';
+  if (ev.cause === 'explosion' && (ev.weapon === null || ev.weapon === 'grenade') && ctx.lastBlastOf?.(ev.victimId) === 'rocket') return 'rpg';
+  return ev.weapon;
+}
+
+const isLeveled = (item: unknown): boolean => isM2cGunId(item) || isMeleeId(item);
+
+/** M2c: level of a weapon when the event does not say: L1 for guns and melee (absent level = L1), else null. */
+export function defaultWeaponLevel(weapon: M2cHeldId | null | undefined): ItemLevel | null {
+  return weapon !== null && weapon !== undefined && (isM2cGunId(weapon) || isMeleeId(weapon)) ? 1 : null;
 }
 
 export function buildMatchEnded(
@@ -44,8 +87,8 @@ export function buildMatchEnded(
   };
 }
 
-/** Emits the bus event(s) for one SimEvent (M2b: DropSimEvent joins SimEvent at the C-gate). */
-export function translateSimEvent(ev: SimEvent | DropSimEvent, ctx: TranslateContext, bus: Bus): void {
+/** Emits the bus event(s) for one SimEvent (M2b: DropSimEvent, M2c: M2cSimEvent join SimEvent at the C-gate). */
+export function translateSimEvent(ev: SimEvent | DropSimEvent | M2cSimEvent, ctx: TranslateContext, bus: Bus): void {
   const isLocal = (id: PlayerId | null): boolean => id !== null && id === ctx.localId;
   switch (ev.type) {
     case 'dropJump':
@@ -70,6 +113,12 @@ export function translateSimEvent(ev: SimEvent | DropSimEvent, ctx: TranslateCon
       return;
     case 'damage': {
       const isLocalAttacker = isLocal(ev.attackerId);
+      const weapon = damageWeaponOf(ev, ctx);
+      const level = ev.weaponLevel !== undefined ? ev.weaponLevel : weapon !== undefined ? defaultWeaponLevel(weapon) : undefined;
+      const weaponFields = {
+        ...(weapon !== undefined ? { weapon } : {}),
+        ...(level !== undefined ? { weaponLevel: level } : {}),
+      };
       bus.emit('playerDamaged', {
         victimId: ev.victimId,
         attackerId: ev.attackerId,
@@ -83,6 +132,7 @@ export function translateSimEvent(ev: SimEvent | DropSimEvent, ctx: TranslateCon
         helmet: ev.helmet,
         isLocalVictim: isLocal(ev.victimId),
         isLocalAttacker,
+        ...weaponFields,
       });
       if (isLocalAttacker && !isLocal(ev.victimId)) {
         bus.emit('localHitConfirmed', {
@@ -93,26 +143,34 @@ export function translateSimEvent(ev: SimEvent | DropSimEvent, ctx: TranslateCon
           vest: ev.vest,
           helmet: ev.helmet,
           cause: ev.cause,
+          ...weaponFields,
+          obscured: ctx.obscured?.(ev.victimId) ?? false,
         });
       }
       return;
     }
-    case 'kill':
+    case 'kill': {
+      const weapon = killWeaponOf(ev, ctx);
       bus.emit('playerKilled', {
         killerId: ev.killerId,
         killerName: ev.killerId === null ? null : ctx.nameOf(ev.killerId),
         victimId: ev.victimId,
         victimName: ctx.nameOf(ev.victimId) ?? '',
-        weapon: ev.weapon,
+        weapon,
         cause: ev.cause,
         victimPos: ctx.posOf(ev.victimId),
         placement: ev.placement,
         ...(ev.headshot !== undefined ? { headshot: ev.headshot } : {}),
         isLocalVictim: isLocal(ev.victimId),
         isLocalKiller: isLocal(ev.killerId),
+        weaponLevel: ev.weaponLevel !== undefined ? ev.weaponLevel : defaultWeaponLevel(weapon),
+        ...(ev.direct !== undefined ? { direct: ev.direct } : {}),
       });
       return;
-    case 'pickup':
+    }
+    case 'pickup': {
+      // M2c: weapons carry a level (absent = L1, levels.md); other items have none.
+      const level = ev.level !== undefined ? ev.level : (defaultWeaponLevel(isLeveled(ev.item) ? (ev.item as M2cHeldId) : null) ?? undefined);
       bus.emit('itemPickedUp', {
         playerId: ev.playerId,
         item: ev.item,
@@ -120,8 +178,11 @@ export function translateSimEvent(ev: SimEvent | DropSimEvent, ctx: TranslateCon
         pos: ev.pos,
         isLocal: isLocal(ev.playerId),
         ...(ev.durability !== undefined ? { durability: ev.durability } : {}),
+        ...(level !== undefined ? { level } : {}),
+        ...(ev.scope !== undefined ? { scope: ev.scope } : {}),
       });
       return;
+    }
     case 'reloadStart':
       bus.emit('reloadStarted', {
         playerId: ev.playerId,
@@ -129,6 +190,7 @@ export function translateSimEvent(ev: SimEvent | DropSimEvent, ctx: TranslateCon
         durationMs: ev.durationMs,
         pos: ctx.posOf(ev.playerId),
         isLocal: isLocal(ev.playerId),
+        ...(ev.rounds !== undefined ? { rounds: ev.rounds } : {}),
       });
       return;
     case 'reloadEnd':
@@ -174,6 +236,7 @@ export function translateSimEvent(ev: SimEvent | DropSimEvent, ctx: TranslateCon
         slot: ev.slot,
         isLocal: isLocal(ev.playerId),
         pos: ctx.posOf(ev.playerId),
+        level: ev.level !== undefined ? ev.level : defaultWeaponLevel(ev.weapon),
       });
       return;
     case 'stanceChange':
@@ -195,6 +258,7 @@ export function translateSimEvent(ev: SimEvent | DropSimEvent, ctx: TranslateCon
         pos: { ...ev.pos },
         explodesAt: ev.explodesAt,
         isLocal: isLocal(ev.playerId),
+        kind: ev.kind ?? 'grenade',
       });
       return;
     case 'grenadeThrown':
@@ -206,10 +270,11 @@ export function translateSimEvent(ev: SimEvent | DropSimEvent, ctx: TranslateCon
         explodesAt: ev.explodesAt,
         dropped: ev.dropped,
         isLocal: isLocal(ev.ownerId),
+        kind: ev.kind ?? 'grenade',
       });
       return;
     case 'grenadeBounce':
-      bus.emit('grenadeBounced', { id: ev.id, pos: { ...ev.pos }, surface: ev.surface, speed: ev.speed });
+      bus.emit('grenadeBounced', { id: ev.id, pos: { ...ev.pos }, surface: ev.surface, speed: ev.speed, kind: ev.kind ?? 'grenade' });
       return;
     case 'explosion': {
       const eye = ctx.localEye?.() ?? null;
@@ -221,6 +286,9 @@ export function translateSimEvent(ev: SimEvent | DropSimEvent, ctx: TranslateCon
         inHand: ev.inHand,
         isLocalOwner: isLocal(ev.ownerId),
         localDistance: eye ? Math.hypot(ev.pos.x - eye.x, ev.pos.y - eye.y, ev.pos.z - eye.z) : null,
+        source: ev.source,
+        ...(ev.direct !== undefined ? { direct: ev.direct } : {}),
+        ...(ev.airburst !== undefined ? { airburst: ev.airburst } : {}),
       });
       return;
     }
@@ -234,6 +302,82 @@ export function translateSimEvent(ev: SimEvent | DropSimEvent, ctx: TranslateCon
       return;
     case 'matchEnded':
       bus.emit('matchEnded', buildMatchEnded(ev, ctx));
+      return;
+    // ---- M2c (ADR 0007 §8) ----
+    case 'meleeSwing': {
+      // The local swing is emitted from prediction on the click; the server echo is dropped.
+      if (isLocal(ev.playerId)) return;
+      const now = ctx.serverNow?.() ?? ev.hitAt;
+      bus.emit('meleeSwing', {
+        playerId: ev.playerId,
+        weapon: ev.weapon,
+        level: ev.level,
+        pos: { ...ev.pos },
+        windupMs: Math.max(0, ev.hitAt - now),
+        cycleMs: ev.cycleMs,
+        isLocal: false,
+      });
+      return;
+    }
+    case 'meleeHit':
+      bus.emit('meleeHit', {
+        attackerId: ev.attackerId,
+        weapon: ev.weapon,
+        level: ev.level,
+        pos: { ...ev.pos },
+        surface: ev.surface,
+        victimId: ev.victimId,
+        headshot: ev.headshot,
+        knockback: ev.knockback,
+        isLocalAttacker: isLocal(ev.attackerId),
+        isLocalVictim: isLocal(ev.victimId),
+      });
+      return;
+    case 'rocketFired':
+      bus.emit('rocketFired', {
+        id: ev.id,
+        ownerId: ev.ownerId,
+        level: ev.level,
+        pos: { ...ev.pos },
+        vel: { ...ev.vel },
+        firedAt: ev.firedAt,
+        isLocal: isLocal(ev.ownerId),
+      });
+      return;
+    case 'rocketDud':
+      bus.emit('rocketDud', {
+        id: ev.id,
+        ownerId: ev.ownerId,
+        pos: { ...ev.pos },
+        surface: ev.surface,
+        victimId: ev.victimId,
+        isLocalOwner: isLocal(ev.ownerId),
+      });
+      return;
+    case 'smokeDeployed':
+      bus.emit('smokeDeployed', {
+        id: ev.id,
+        ownerId: ev.ownerId,
+        pos: { ...ev.pos },
+        deployedAt: ev.deployedAt,
+        fadeAt: ev.fadeAt,
+        isLocalOwner: isLocal(ev.ownerId),
+      });
+      return;
+    case 'glassBroken':
+      bus.emit('glassBroken', { paneId: ev.paneId, pos: { ...ev.pos }, byId: ev.byId, cause: ev.cause, isLocal: isLocal(ev.byId) });
+      return;
+    case 'scopeChanged':
+      bus.emit('scopeChanged', {
+        playerId: ev.playerId,
+        slot: ev.slot,
+        gun: ev.gun,
+        from: ev.from,
+        to: ev.to,
+        auto: ev.auto,
+        pos: { ...ev.pos },
+        isLocal: isLocal(ev.playerId),
+      });
       return;
     default: {
       const unknown: never = ev;

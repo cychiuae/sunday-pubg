@@ -11,7 +11,7 @@
  * - renderPosition(alpha): lerp between the last two fixed steps plus the visual offset.
  */
 import { cloneVec3, lerpVec3, vec3 } from '../shared/math';
-import type { HeldId, MovementState, MovementStepResult, PlayerInput, Vec3 } from '../shared/types';
+import type { HeldId, MovementState, MovementStepResult, PlayerInput, ScopeId, Vec3 } from '../shared/types';
 
 /**
  * Per-input status the movement step cannot see (structurally the sim's `MovementStatus`, passed to
@@ -25,6 +25,8 @@ export interface PredictStatus {
   held: HeldId;
   swapping: boolean;
   fireSlowed: boolean;
+  /** M2c: the held gun's mounted scope (MovementStatus.scope: ADS numbers via effectiveWeapon). Absent = built-in. */
+  scope?: ScopeId | null;
 }
 
 export type PredictStep = (state: MovementState, input: PlayerInput, status: PredictStatus) => MovementStepResult;

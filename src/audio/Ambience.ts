@@ -8,12 +8,17 @@
  *   the rain; for lights-out the buzz cuts outside the circle. Distant typing is one-shots from the engine; the indoor
  *   reverb is a send in the engine graph.
  *
+ * M2c (docs/audio/M2c.md §8): every match has a look preset (island morning / noon / golden / overcast, office day /
+ * evening / afterHours). The look sets the bed's colour (wave level and brightness, wind, HVAC, buzz, a server fan);
+ * a change cross-fades like a scene change. Detail one-shots (birds, crickets, chime, palms, copier, cooler, damper)
+ * are scheduled by the engine from the same look table (soundMap.lookOf).
+ *
  * All modulation runs on audio-rate LFOs, so there is no per-frame work. Owner: audio-designer.
  */
 import type { ZoneTheme } from '../shared/balance';
 import { AUDIO_TUNING } from './cues';
 import type { NoiseBank } from './noise';
-import type { AmbienceScene } from './soundMap';
+import { lookOf, resolveLookId, type AmbienceScene, type IslandLook, type OfficeLook } from './soundMap';
 
 /** One scene's node graph. Everything it creates is tracked and disconnected on dispose. */
 abstract class Bed {
@@ -112,25 +117,25 @@ abstract class Bed {
   }
 }
 
-/** The beach (M1 beds, unchanged). */
+/** The beach (M1 beds; M2c: coloured by the look, noon = the M1 bed exactly). */
 class IslandBed extends Bed {
   private readonly surf: GainNode;
   private readonly waveBoost: GainNode;
 
-  constructor(ctx: BaseAudioContext, noise: NoiseBank, dest: AudioNode) {
+  constructor(ctx: BaseAudioContext, noise: NoiseBank, dest: AudioNode, look: IslandLook) {
     super(ctx, noise, dest);
     // Swell LFO: two slow sines at incommensurate rates so the sea never loops audibly.
     const swell = this.gain(1, null);
-    this.lfoInto(swell, 0.11, 1);
-    this.lfoInto(swell, 0.071, 0.6);
+    this.lfoInto(swell, 0.11 * look.swellRate, 1);
+    this.lfoInto(swell, 0.071 * look.swellRate, 0.6);
 
     // Waves: brown noise, low-passed; the swell opens the filter and raises the level together.
     this.waveBoost = this.gain(1, this.out);
-    const waveGain = this.gain(0.5, this.waveBoost);
-    const waveLp = this.filter('lowpass', 420, 0.5, waveGain);
+    const waveGain = this.gain(0.5 * look.wave, this.waveBoost);
+    const waveLp = this.filter('lowpass', look.waveLpHz, 0.5, waveGain);
     this.loop(noise.brownLoop, 1, waveLp);
     swell.connect(this.gain(150, waveLp.frequency));
-    swell.connect(this.gain(0.2, waveGain.gain));
+    swell.connect(this.gain(0.2 * look.wave, waveGain.gain));
 
     // Foam: bright hiss that peaks ~1.4 s after each swell crest (the wave breaking on sand).
     const foamGain = this.gain(0.035, this.waveBoost);
@@ -143,11 +148,13 @@ class IslandBed extends Bed {
     delay.connect(this.gain(0.025, foamGain.gain));
 
     // Wind: band-passed pink noise drifting slowly in pitch and level.
-    const windGain = this.gain(0.05, this.out);
-    const windBp = this.filter('bandpass', 550, 0.6, windGain);
+    const windGain = this.gain(0.05 * look.wind, this.out);
+    const windBp = this.filter('bandpass', look.windHz, look.windQ, windGain);
     this.loop(noise.pinkLoop, 0.83, windBp);
     this.lfoInto(windBp.frequency, 0.05, 200);
-    this.lfoInto(windGain.gain, 0.033, 0.03);
+    // Gusts: the overcast look deepens them (and adds a faster gust swell).
+    this.lfoInto(windGain.gain, 0.033, Math.min(0.03 * look.windGust, 0.045 * look.wind));
+    if (look.windGust > 1) this.lfoInto(windGain.gain, 0.09, 0.01 * look.windGust);
 
     // Surf roar: silent until the player is in the tide.
     this.surf = this.gain(0, this.out);
@@ -174,16 +181,22 @@ class IndoorBed extends Bed {
   private readonly spray: GainNode | null;
   private readonly rainBed: GainNode | null;
 
+  private readonly hvacLevel: number;
+  private readonly buzzLevel: number;
+
   constructor(
     ctx: BaseAudioContext,
     noise: NoiseBank,
     dest: AudioNode,
     private readonly theme: ZoneTheme,
+    look: OfficeLook,
   ) {
     super(ctx, noise, dest);
+    this.hvacLevel = look.hvac;
+    this.buzzLevel = look.buzz;
 
     // HVAC: a deep brown-noise rumble plus a soft band of air rush from the ceiling vents, breathing slowly.
-    this.hvacBoost = this.gain(1, this.out);
+    this.hvacBoost = this.gain(look.hvac, this.out);
     const rumbleGain = this.gain(0.42, this.hvacBoost);
     this.loop(noise.brownLoop, 0.7, this.filter('lowpass', 150, 0.6, rumbleGain));
     const airGain = this.gain(0.05, this.hvacBoost);
@@ -198,11 +211,19 @@ class IndoorBed extends Bed {
     this.osc('sine', 116, this.gain(0.5, hum));
 
     // Fluorescent buzz: a 120 Hz saw through a narrow band-pass, with a slow flicker in level.
-    this.buzz = this.gain(1, this.out);
+    this.buzz = this.gain(look.buzz, this.out);
     const buzzGain = this.gain(0.012, this.buzz);
     this.osc('sawtooth', 120, this.filter('bandpass', 2400, 3, buzzGain));
-    this.lfoInto(buzzGain.gain, 0.07, 0.004);
+    this.lfoInto(buzzGain.gain, 0.07, 0.004 * look.flicker);
     this.lfoInto(buzzGain.gain, 11, 0.0015, 'square'); // tube flutter
+    if (look.stutter > 0) this.lfoInto(buzzGain.gain, 0.4, 0.002 * look.stutter); // after hours: fewer, tired tubes
+
+    // M2c after hours: a quiet server-room fan whir somewhere on the floor.
+    if (look.fan > 0) {
+      const fan = this.gain(look.fan, this.out);
+      this.loop(noise.pinkLoop, 1.05, this.filter('bandpass', 1100, 2, fan));
+      this.osc('sine', 210, this.gain(0.3, fan));
+    }
 
     if (theme === 'lightsOut') {
       this.spray = null;
@@ -228,8 +249,8 @@ class IndoorBed extends Bed {
   setOutside(active: boolean): void {
     if (this.theme === 'lightsOut') {
       // In the dark: the tubes go quiet and the air handling feels bigger.
-      this.target(this.buzz.gain, active ? 0 : 1, 0.08);
-      this.target(this.hvacBoost.gain, active ? 1.4 : 1, 0.6);
+      this.target(this.buzz.gain, active ? 0 : this.buzzLevel, 0.08);
+      this.target(this.hvacBoost.gain, (active ? 1.4 : 1) * this.hvacLevel, 0.6);
       return;
     }
     if (this.spray) this.target(this.spray.gain, active ? 0.35 : 0, active ? 0.12 : 0.5);
@@ -249,6 +270,8 @@ export class Ambience {
   private bed: Bed;
   private scene: AmbienceScene;
   private theme: ZoneTheme;
+  /** M2c: resolved look id (soundMap.resolveLookId). */
+  private look: string;
   private readonly dying: { bed: Bed; at: number }[] = [];
   private outside = false;
   private zoneBed = false;
@@ -259,10 +282,12 @@ export class Ambience {
     private readonly dest: AudioNode,
     scene: AmbienceScene = 'island',
     theme: ZoneTheme = 'tide',
+    look?: string,
   ) {
     this.scene = scene;
     this.theme = theme;
-    this.bed = this.build(scene, theme);
+    this.look = resolveLookId(scene, look);
+    this.bed = this.build(scene, theme, this.look);
     this.bed.fadeTo(1, 2.5);
   }
 
@@ -270,11 +295,20 @@ export class Ambience {
     return this.scene;
   }
 
-  /** Crossfades to `scene` (a no-op when neither the scene nor the theme changed). Clears the outside/zone layers. */
-  setScene(scene: AmbienceScene, theme: ZoneTheme): void {
+  /** M2c: the active look id (resolved: unknown ids are the scene default). */
+  get currentLook(): string {
+    return this.look;
+  }
+
+  /**
+   * Crossfades to `scene` with `look` (a no-op when the scene, theme and look are unchanged). Clears the outside/zone
+   * layers.
+   */
+  setScene(scene: AmbienceScene, theme: ZoneTheme, look?: string): void {
     this.outside = false;
     this.zoneBed = false;
-    if (scene === this.scene && theme === this.theme) {
+    const lookId = resolveLookId(scene, look);
+    if (scene === this.scene && theme === this.theme && lookId === this.look) {
       this.bed.setOutside(false);
       this.bed.setZoneBed(false);
       return;
@@ -284,7 +318,8 @@ export class Ambience {
     this.dying.push({ bed: this.bed, at: this.ctx.currentTime + fade + 0.1 });
     this.scene = scene;
     this.theme = theme;
-    this.bed = this.build(scene, theme);
+    this.look = lookId;
+    this.bed = this.build(scene, theme, lookId);
     this.bed.fadeTo(1, fade);
   }
 
@@ -324,8 +359,11 @@ export class Ambience {
     this.dying.length = 0;
   }
 
-  private build(scene: AmbienceScene, theme: ZoneTheme): Bed {
-    return scene === 'indoor' ? new IndoorBed(this.ctx, this.noise, this.dest, theme) : new IslandBed(this.ctx, this.noise, this.dest);
+  private build(scene: AmbienceScene, theme: ZoneTheme, look: string): Bed {
+    const l = lookOf(scene, look);
+    return l.scene === 'indoor'
+      ? new IndoorBed(this.ctx, this.noise, this.dest, theme, l)
+      : new IslandBed(this.ctx, this.noise, this.dest, l);
   }
 }
 

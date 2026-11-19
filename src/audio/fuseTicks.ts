@@ -31,12 +31,14 @@ export class FuseTicker {
   /**
    * Plays due ticks through `sink`. `fuseMs` = balance items.grenade.fuseMs (null = unknown: urgency relative to the
    * remaining fuse when the grenade was first seen).
-   * Grenades farther than AUDIO_TUNING.fuseTickRangeM are skipped but keep their schedule.
+   * Grenades farther than AUDIO_TUNING.fuseTickRangeM are skipped but keep their schedule. Smoke canisters are ignored.
    */
   update(grenades: readonly GrenadeView[], serverTime: number, listener: Vec3, fuseMs: number | null, sink: FuseTickSink): void {
     if (!Number.isFinite(serverTime)) return;
     const stamp = ++this.stamp;
     for (const g of grenades) {
+      // M2c: smoke canisters never tick (a tick would make them read as frags). Absent kind = frag.
+      if (g.kind === 'smoke') continue;
       const remaining = g.explodesAt - serverTime;
       if (!(remaining > 0)) continue;
       let e = this.next.get(g.id);

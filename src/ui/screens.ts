@@ -23,7 +23,9 @@ import {
 import type { GameEvents } from '../shared/events';
 import { Flags, h, retrigger, Shown, TextSlot } from './dom';
 import { CONFIRM_MS } from './roomLogic';
-import { deathCauseKey, validateName } from './logic';
+import { deathCauseKey, killWeaponTag, levelLabel, lookLine, validateName } from './logic';
+import { formatLayoutSeed } from '../shared/layout';
+import { icon, levelBadge, setLevelBadge } from './icons';
 import {
   ADS_SENSITIVITY_MAX,
   ADS_SENSITIVITY_MIN,
@@ -46,6 +48,7 @@ import {
  * throw (hold LMB); `jump` reads "Jump / Stand up" (Space). `cycle` (mouse wheel) shows once narrative-designer adds
  * `menu.controls.cycle.*`; rows whose strings are missing are skipped rather than showing raw keys.
  * M2b: `jumpPlane` (Space / F) and `spectateView` (V).
+ * M2c (UI M2c §10): `melee` (3), `throwable` (4 / G) + `throwableCycle` replace `grenade`, and `scope` (T).
  */
 export const CONTROL_IDS = [
   'move',
@@ -60,8 +63,11 @@ export const CONTROL_IDS = [
   'pickup',
   'switch',
   'cycle',
-  'grenade',
+  'melee',
+  'throwable',
+  'throwableCycle',
   'throw',
+  'scope',
   'heal',
   'jumpPlane',
   'spectateView',
@@ -280,6 +286,9 @@ export class LobbyScreen {
   private readonly shown: Shown;
   private readonly flags: Flags;
   private readonly mapName: TextSlot;
+  /** M2c (UI M2c §7.2): the look line of the current match's layout. */
+  private readonly look: TextSlot;
+  private readonly lookShown: Shown;
   private readonly status: TextSlot;
   private readonly big: HTMLDivElement;
   private readonly bigText: TextSlot;
@@ -290,6 +299,7 @@ export class LobbyScreen {
 
   constructor(onSettings: () => void) {
     const mapName = h('p', 'ui-lobby__map');
+    const look = h('p', 'ui-lobby__look ui-subtle');
     const status = h('p', 'ui-lobby__status', { role: 'status' });
     this.big = h('div', 'ui-lobby__big ui-num', { 'aria-hidden': 'true' });
     const count = h('p', 'ui-lobby__count');
@@ -304,6 +314,7 @@ export class LobbyScreen {
         null,
         h('h2', 'ui-heading', null, t('lobby.title')),
         mapName,
+        look,
         this.big,
         status,
         count,
@@ -316,6 +327,8 @@ export class LobbyScreen {
     this.shown = new Shown(this.el);
     this.flags = new Flags(this.el);
     this.mapName = new TextSlot(mapName);
+    this.look = new TextSlot(look);
+    this.lookShown = new Shown(look);
     this.status = new TextSlot(status);
     this.bigText = new TextSlot(this.big);
     this.count = new TextSlot(count);
@@ -327,6 +340,9 @@ export class LobbyScreen {
 
   update(hud: HudView): void {
     this.mapName.set(t(hud.minimap.map.nameKey));
+    const line = hud.layout ? lookLine(hud.minimap.map.id, hud.layout.look) : null;
+    this.lookShown.set(line !== null);
+    if (line !== null) this.look.set(line);
     let big = '';
     if (hud.phase === 'countdown' && hud.countdownSecondsLeft !== null) {
       const secs = Math.max(0, hud.countdownSecondsLeft);
@@ -374,6 +390,8 @@ export class PlayOverlay {
   private readonly leaveLabel: TextSlot;
   private readonly leaveShown: Shown;
   private leaveArmedUntil = 0;
+  /** M2c: "Layout #…" in the footer. */
+  private readonly layoutCode = new LayoutCode();
 
   constructor(onResume: () => void, onSettings: () => void, onLeaveRoom: () => void = () => {}) {
     const resume = (): void => {
@@ -414,6 +432,7 @@ export class PlayOverlay {
       h('p', 'ui-subtle', null, t('menu.pointerLock.hint')),
       controlsList(),
       h('div', 'ui-row ui-row--split', null, this.leave, gearButton(onSettings)),
+      this.layoutCode.el,
     );
     // Clicking anywhere on the dimmed backdrop also resumes (big target, still inside a user gesture).
     this.el = h('section', 'ui-screen ui-screen--play ui-interactive', null, panel);
@@ -425,7 +444,8 @@ export class PlayOverlay {
     this.primaryLabel = new TextSlot(this.primary);
   }
 
-  update(firstLock: boolean, inRoom = false): void {
+  update(firstLock: boolean, inRoom = false, hud: HudView | null = null): void {
+    if (hud) this.layoutCode.update(hud);
     this.primaryLabel.set(t(firstLock ? 'menu.pointerLock.prompt' : 'menu.resume'));
     this.flags.set('is-paused', !firstLock);
     this.leaveShown.set(inRoom);
@@ -505,10 +525,14 @@ export class DeathCard {
   private readonly cause: TextSlot;
   private readonly place: TextSlot;
   private readonly kills: TextSlot;
+  /** M2c (UI M2c §8): the killer's weapon icon + name + level badge. */
+  private readonly withLine: HTMLParagraphElement;
   private placement = 0;
 
   constructor(onSpectate: () => void) {
     const cause = h('p', 'ui-death__cause');
+    this.withLine = h('p', 'ui-death__with');
+    this.withLine.hidden = true;
     const place = h('p', 'ui-death__place ui-num');
     const kills = h('p', 'ui-death__kills');
     this.el = h(
@@ -522,6 +546,7 @@ export class DeathCard {
         h('span', 'ui-glyph ui-glyph--lifebuoy', { 'aria-hidden': 'true' }),
         h('h2', 'ui-heading ui-heading--big', { id: 'ui-death-title' }, t('death.title')),
         cause,
+        this.withLine,
         place,
         kills,
         button(t('death.spectate'), 'primary', () => onSpectate()),
@@ -537,8 +562,21 @@ export class DeathCard {
   /** `self` = the local player's own grenade (logic.isSelfGrenadeKill). */
   setDeath(e: GameEvents['playerKilled'], self = false): void {
     this.placement = e.placement;
-    const key = deathCauseKey(e.cause, e.killerName, self);
+    const key = deathCauseKey(e.cause, e.killerName, self, e.weapon);
     this.cause.set(key ? t(key, { name: e.killerName ?? '' }) : '');
+    // M2c: "With a Longshore Rifle [3]" for weapon kills (not zone, fall, frags or self-kills).
+    const tag = killWeaponTag({ weapon: e.weapon, cause: e.cause, self, killerName: e.killerName }, e.weaponLevel);
+    this.withLine.hidden = tag === null;
+    if (tag) {
+      const badge = levelBadge('ui-death__badge');
+      setLevelBadge(badge, tag.level);
+      this.withLine.replaceChildren(
+        icon(tag.weapon, 'ui-death__icon'),
+        h('span', null, null, t('death.with', { weapon: t(`item.${tag.weapon}.name`) })),
+        badge,
+        h('span', 'ui-sr', null, tag.level !== null ? ` ${levelLabel(tag.level)}` : ''),
+      );
+    }
   }
 
   update(hud: HudView): void {
@@ -561,6 +599,29 @@ export class DeathCard {
 }
 
 // ---------------------------------------------------------------------------------------------
+// M2c: layout code line (pause overlay and results footer)
+// ---------------------------------------------------------------------------------------------
+/** "Layout #0x1A2B3C4D" from HudView.layout (formatLayoutSeed, the same text LAYOUT_SEED accepts); hidden without one. */
+export class LayoutCode {
+  readonly el: HTMLParagraphElement;
+  private readonly text: TextSlot;
+  private readonly shown: Shown;
+
+  constructor() {
+    this.el = h('p', 'ui-layoutcode ui-num');
+    this.text = new TextSlot(this.el);
+    this.shown = new Shown(this.el);
+    this.shown.set(false);
+  }
+
+  update(hud: HudView): void {
+    const layout = hud.layout ?? null;
+    this.shown.set(layout !== null);
+    if (layout) this.text.set(t('layout.seed', { seed: formatLayoutSeed(layout.seed) }));
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Results
 // ---------------------------------------------------------------------------------------------
 export class ResultsScreen {
@@ -574,6 +635,8 @@ export class ResultsScreen {
   private readonly next: TextSlot;
   private readonly table: HTMLOListElement;
   private readonly playAgain: HTMLButtonElement;
+  /** M2c (UI M2c §7.2): "Layout #0x…" (selectable, for bug reports and LAYOUT_SEED). */
+  private readonly layoutCode: LayoutCode;
 
   constructor(onPlayAgain: () => void) {
     const banner = h('h2', 'ui-results__banner', { id: 'ui-results-title' });
@@ -599,6 +662,7 @@ export class ResultsScreen {
         this.table,
         next,
         this.playAgain,
+        (this.layoutCode = new LayoutCode()).el,
       ),
     );
     this.shown = new Shown(this.el);
@@ -644,6 +708,7 @@ export class ResultsScreen {
 
   update(hud: HudView): void {
     this.next.set(hud.resultsSecondsLeft !== null ? t('results.nextMatch', { seconds: hud.resultsSecondsLeft }) : '');
+    this.layoutCode.update(hud);
   }
 
   show(on: boolean): void {

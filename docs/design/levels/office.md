@@ -7,6 +7,20 @@ the Phase A text, the text below is updated and the change is listed in section 
 and `poi.<id>.short` in `en.json` (narrative-designer). References: `seat-plan.png` (layout, authoritative) and `IMG_0555.jpeg`
 (look) in the repo root. They stay there and are not copied anywhere.
 
+> **M2c: every match is different.** From M2c, each match builds its layout from a `layoutSeed`
+> ([variety.md](variety.md), data `src/game/levels/variety/office.variety.json`). This page describes the **baseline**: every
+> zone's `baseline` variant, the `day` lighting, and the layout you get with `LAYOUT_SEED=baseline`.
+> - **Fixed in every match:**
+>   - floor, walls, glass, rooms, the 16 doorways and the closed front door;
+>   - the 20 climb routes and every piece of them, both bridges, the exec desk, the Yellow table;
+>   - phone booths, pinboard, ping pong and foosball tables, and the Den, Gym, Paper Jam, Welcome Mat and pantry-counter pieces;
+>   - fire extinguishers, the ceiling, the 24 fallback spawns, the zone centres, the POIs and `DELIBERATE_GAPS`.
+> - **Varies per match:**
+>   - desk blocks (`rows` / `gaps` / `pods`), the Fishbowl, Blue Room, pantry and lounge arrangements, and the aisle cover clusters
+>     K1-K4 (section 15);
+>   - wall and corner clutter, desk dressing, the loot positions (counts stay 50 / 20 / 8);
+>   - client-only paper decor and the lighting (`day`, `evening`, `afterHours`).
+
 ## At a glance
 | | |
 |---|---|
@@ -655,6 +669,8 @@ Narrative may add ids such as `office_hotdesks` or `office_crossroads` if the mi
   and harmless.
 
 ## 12. QA checklist
+M2c: run the layout checks LV1-LV17 in [variety.md](variety.md) section 6 over 202 seeds (doors, lanes, route ends, nav stuck rate
+< 2 %, worst-seed render budget). Do the manual items below on the baseline (`LAYOUT_SEED=baseline`) and on any seed a check flags.
 - Every route in 4.3, human and bot:
   - Start to end with no stall.
   - CO-A side entry.
@@ -753,4 +769,48 @@ What the data does where Phase A was silent or had to change:
   rises (waypoints and physical kit tops), ramp waypoints per compiled step, spawn and loot clearance, reachability of every loot spot,
   spawn, zone centre and route start (floor flood plus plateau floods through the routes), the deliberate-gap list (5.3), and a
   real-name blocklist over the map data, `en.json` and this document.
+
+## 15. Per-match variety (M2c)
+Full spec: [variety.md](variety.md) section 5. Data: `src/game/levels/variety/office.variety.json`.
+
+### 15.1 Desk blocks
+Anchor desks never move. They carry route landings, perch towers and the bridges:
+- TL: S0, N0, N4, S4;
+- TR: S0, S4, N4, N3;
+- BL: S0, N0, N1, N4;
+- BR: N0, N5, S5.
+
+Blocks are never rotated or shifted, because the 25.28 m vertical aisle and the flush bridges fix them. Per block:
+
+| Variant | Weight | What happens | Fairness |
+|---|---|---|---|
+| `rows` (baseline) | 2 | Sections 3.1-3.4 | as today |
+| `gaps` | 2 | 1-2 middle desks of ONE row removed with their chair and dressing | The other row keeps the deck in one piece; skylights give floor-deck shots and grenade drops; the 12.64 m gaps are outside the 3-6 m band |
+| `pods` | 1 | One middle column (both rows) removed. Allowed columns: TL 1/3, TR 1/2, BL 2/3, BR 2/3 | Each pod keeps >= 1 route; the atrium (12.64 x 13.58) gets a box + boxSmall 3 m off the zone centre; at most 2 blocks per match; TL/BL and TR/BR never open the same x |
+
+Monitor patterns are `plan` (section 3.3) or shuffled with the same counts. Desk-top clutter is seeded per match, and every deck keeps
+at least 3 full-height cover items. The tunnel cover pair flips its diagonal per tunnel.
+
+### 15.2 Rooms, lounge, aisle
+| Zone | Variants (baseline first) |
+|---|---|
+| Fishbowl | `boardroom` (2 facing pairs), `split` (two tables, 9.9 m walkway, north chairs only), `rotated` (one table north-south, chairs east and west, box pile NW) |
+| Blue Room | `pair`, `rotated` (north-south, pushed east, one chair), `lounge` (no table: 3 loose chairs, a box pile) |
+| Pantry | `table`, `rotated` (east-west in the north half), `cleared` (box piles, a stray chair) |
+| Lounge | `open`, `pod` (back-to-back desk pod, unreachable top, east-west tunnel), `storage` (3 box piles on the back wall) |
+| Aisle K1-K4 | same 4 slots, jitter +-6 m (x) / +-3 m (z); shapes `boxPair` (baseline), `wall` (3 boxes flush, 13.5 m), `loose` (box + 3 chairs) |
+
+The Corner Office, Yellow Room, Den, Gym, Paper Jam and Welcome Mat keep their section 2.4 pieces. They only get corner clutter.
+
+### 15.3 Clutter, loot, lighting
+- **Wall bands** along the four corridors: a plant, box pair, paper stack or water cooler (kit `waterCooler`, placed flush by its collider) every 12-20 m, flush
+  to the wall, at most 3.6 m deep. The corridor lanes, door aprons (8.0 x 3.5 m both sides) and route approaches stay clear.
+- **Room corners:** 50 % filled by room theme. Never in the loos, the Shush alcove or the lounge.
+- **Loot:** 78 from about 200 candidates. Epics stay on the same climbable plateaus: exec desk 2 of 4 spots, each ping pong half 1
+  of 2, NE perch 1 of 2, SW perch 1 of 2 (both on cell p2, which keeps spawn 16 more than 30 m away), each bridge 1 of 2. 16 of the 50 commons are guaranteed weapons, one per region, so every
+  fallback spawn has a weapon within 35 m of floor path.
+- **Lighting:** `day` (baseline), `evening`, `afterHours`. In `afterHours`, 35-50 % of the panels are lit, every area keeps a
+  lit panel, and every floor point is within 20 m of one. The lighting has no sim effect.
+- **Privacy (section 10)** applies to every variant and decor kind: no names, nameplates, logos or text on paper decor, and nothing
+  copied from the seat-plan cartoon.
 

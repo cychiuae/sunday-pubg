@@ -1,4 +1,4 @@
-# Netcode (M1, M2a, M2b)
+# Netcode (M1, M2a, M2b, M2c)
 
 Owner: network-engineer. Architecture and decisions: [ARCHITECTURE.md §5-6, §15.4](ARCHITECTURE.md),
 [ADR 0001](../adr/0001-stack-and-netcode.md), [ADR 0006](../adr/0006-m2b-rooms.md) (rooms).
@@ -234,6 +234,7 @@ which also removes the match-start loot peak) and a binary encoding.
 | `MAX_ROOMS` (M2b) | 8 | concurrent rooms; over it `createRoom` gets `reject max_rooms` |
 | `MAX_CONNECTIONS` (M2b) | `MAX_ROOMS × match.maxPlayers + 32` | sockets per process (joined or not); over it the socket closes with 1013 |
 | `MAP` (M2b) | | a level id pins every room's map (votes disabled, `RoomState.pinnedMap`); an invalid value logs one warning and is ignored (maps.md 1.4.1) |
+| `LAYOUT_SEED` (M2c) | | pins every match's layout seed on every map: decimal uint32, `0x` hex, or `baseline` / `0` (the baseline layout); never re-rolled by repeat avoidance. An invalid value logs one warning and is ignored (layouts then vary per match). Used by the layout lock (N2) |
 | `MAX_CONNS_PER_IP` | 128 | 0 = unlimited. M2b (director): raised from 32 because the players are an office behind one NAT IP; 128 covers 8 full rooms plus browser tabs |
 | `ALLOWED_ORIGINS` | production: `self`; dev: `*` | WebSocket Origin policy: comma list of `*`, `self` and exact origins (`https://play.example.com`). Invalid entries fail startup. See "Origin policy" |
 | `TRUST_PROXY` | | `1` to use `X-Forwarded-For` for the per-IP cap and accept `X-Forwarded-Host` for `self` |
@@ -420,3 +421,114 @@ per room plus sim bots, vote maps, carrier drop), bots and server on the same ma
 Office only (`--rooms 2 --clients 6 --map office`): RTT p50 155 ms, input ack p50 200 ms, largest delta 2.0 KB,
 wire 3.1 KB/s, tick avg 0.95 ms. Targets met (p99 < 10 ms, tick < 2.5 ms, no dropped ticks, wire unchanged from M2a).
 The worst ticks (about 30 ms) are single match-start ticks; they are absorbed by the catch-up loop.
+
+## M2c protocol (ADR 0007 §9-§10; N1, 2026-11-18)
+Code: `src/shared/protocol/rows.ts` (new), `messages.ts`, `delta.ts`; tests `src/shared/protocol/m2c.test.ts`.
+
+### Rows (capability `rows1`)
+Full-format entity lists travel as JSON arrays in a fixed column order (`PLAYER_COLUMNS`, `GRENADE_COLUMNS`,
+`ROCKET_COLUMNS`, `SMOKE_COLUMNS` in rows.ts; **append only, bump `PROTOCOL_VERSION`**): complete players in a snapshot
+without `base`, and the `grenades`, `rockets` and `smokes` lists in every snapshot. Booleans are 0/1, `weaponLevel`
+0 = null, `dropPhase` 0/1/2 = null/freefall/chute, `anim` the ANIM_BITS mask (ANIM_BITS stays in messages.ts), `pos`,
+`vel` and `appearance` flattened. A field absent on the sender (an M2c field before the C-gate) is `null` in its
+column and absent after decoding. Delta patches (and new players inside a delta) stay keyed objects.
+`decodeServerMessage` turns rows back into objects before the shape check, so consumers never see a row; a row of the
+wrong length stays an array and fails the check.
+
+Rows (and the local patch below) go only to sessions whose `hello.caps` has `rows1` (`CAP_ROWS`): NetClient and
+`server/testClient.ts` (with `delta1`). Others (the QA E2E observer, the M1-format test clients, an older cached
+bundle) keep the object format and a whole `local`, which the decoder also accepts. `encodeQuantized(msg, { rows })` picks the format (default rows).
+
+### Carry-forward and the local patch
+- `rockets`, `smokes`, `brokenPanes`: omitted from a delta while equal to the base (the `route` rule); the decoder
+  restores them. Required in a full snapshot after the gate. A changed `rockets` / `smokes` list rides as
+  `rocketsDelta` / `smokesDelta` = `{ add, remove }` by id (add = new or replaced records, as rows for `rows1`) when
+  that is smaller than the whole list, else whole (REVIEW-M2c SF4; one new rocket costs about 75 B instead of the list).
+  Delta snapshots only, never together with the list; a remove of an unknown id fails and asks for a resync.
+- `local` (about 0.9 KB, previously whole in every snapshot): in a delta, omitted when the base's `local` is the same
+  player and the session has `rows1`; `localPatch` then carries the changed top-level fields (nested objects whole; absent = unchanged). `null`, a
+  new local player, or a local that lost a key are sent whole. A patch without a base local fails and asks for a
+  resync.
+
+### Validators and the C-gate
+`M2C_FIELDS_REQUIRED = PROTOCOL_VERSION >= 4`, so the gate commit's version bump flips it. Gated (optional now,
+required after): `PlayerState.weaponLevel/sight`, the LocalPlayerState M2c block and `ammo.ammo_rocket`,
+`GrenadeState.kind`, full-snapshot `rockets/smokes/brokenPanes`, `welcome.layout`, `kind` on grenadeCook/Thrown/Bounce,
+`explosion.source`. Always optional, checked when present: slot and loot `level/scope`, `damage.weapon/weaponLevel`,
+`kill.weaponLevel/direct`, `pickup.level/scope`, `reloadStart.rounds`, `weaponSwitch.level`, `explosion.direct/airburst`,
+`RoomState.map.layout` (`{ seed uint32, look }`). Enum lists are keyed by the `M2c*` unions (new ids decode now); armor
+tier 1-4; brokenPanes strictly ascending non-negative integers; smoke `fadeAt >= deployedAt`. New events: `meleeSwing`,
+`meleeHit`, `rocketFired`, `rocketDud`, `smokeDeployed`, `glassBroken`, `scopeChanged` (all public). `welcome.layout`:
+uint32 `seed` and `hash`, integer `version`, a known `look`. Input `cycleScope` (T edge): only `true` counts, always
+present after decoding; `sanitizeInput` repeats it and `mergeInputs` OR-s it like the other edges.
+
+Without a layout generator (room tests with stub maps) the server sends `welcome.layout = { seed: 0, version,
+hash: layoutHash(base props, base loot points), look: baseline }`, the truth about what the World runs, and no
+`RoomState.map.layout`.
+
+### Budget (measured with the M2a worst-case method; `SNAP_SIZES=1 npx vitest run src/shared/protocol/m2c.test.ts`)
+| Scenario | Rows | Objects | Budget |
+|---|---|---|---|
+| Full, 24 players, 16 grenades, 16 rockets, 12 clouds, 12 panes, M2c fields, busy local | 7,959 B | 16,619 B | < 8,192 |
+| Full, 16 players, 10 grenades, M2c fields (the M2b worst case) | 4,634 B | 9,114 B | < 6,500 |
+| Delta, 24 players moving mid-transition, 16 grenades in flight, lists carried | 3,464 B | 4,882 B | < 4,096 |
+| Delta, the same on the tick a 16th rocket fires (`rocketsDelta`) | 3,568 B | 5,059 B | < 4,096 |
+| Delta, 16 players (maxPlayers) moving and aiming (pos, velY, yaw, pitch) | 3,525 B | 4,943 B | < 4,096 |
+| Delta, 16 players moving and aiming on a rocket-fire tick | 3,629 B | 5,120 B | < 4,096 |
+| Delta, 24 players moving and aiming | 4,455 B | 5,873 B | bound 6,144 |
+| Delta, every player field changes at once | 6,968 B | 8,386 B | bound 8,192 |
+
+The 4 KB delta target holds only with the local patch, which saves about 0.9 KB per delta.
+
+**Raising maxPlayers above 16 (REVIEW-M2c SF4).** At `match.maxPlayers` 16 every realistic delta fits 4 KB with about
+470 B to spare. At 24 the full snapshot has 233 B left and an all-moving-and-aiming delta is 4,455 B. Before raising
+`maxPlayers`, add more compaction first, e.g. carry `zone` / `match` while unchanged (about 380 B), patch rows for
+players (column index + value), or grenade deltas for resting grenades; then re-run `m2c.test.ts` at the new count.
+
+`server/tools/measure-snapshot.ts` reports rows and objects side by side (new flags `--synthetic-rockets`,
+`--synthetic-smokes`, `--synthetic-panes`). 16 players, 120 s, 10 grenades + 8 rockets + 12 clouds + 12 panes
+always live: rows 36.6 KB/s JSON / 6.11 KB/s wire, objects 54.4 / 6.80 (snapshots only); largest delta 2,966 B rows vs
+4,481 B objects; busiest full without loot 5,241 B rows vs 11,240 B objects.
+
+Headless check under lag (`LATENCY_MS=120 JITTER_MS=30 LAYOUT_SEED=baseline`, `bots.ts --rooms 2 --clients 6
+--seconds 40`, then `--map office --clients 4`): no rejected frame (testClient throws on one), RTT p50 147-154 ms,
+input ack p50 184-191 ms, wire 2.7-3.0 KB/s per client, largest delta 1.6 KB, tick avg 0.61-1.14 ms, no dropped ticks.
+
+## M2c layout lock (N2; `server/layoutLock.ts`)
+At each room's map lock (ARCHITECTURE §16.3), `GameRoom.lock` calls `MatchDeps.lockLayout(mapId, worldSeed, previous)`
+(implemented by the process-wide `LayoutService` in RoomManager):
+1. **Seed.** The `LAYOUT_SEED` pin if set (never re-rolled). Otherwise `layoutSeedFor(worldSeed, attempt)` with repeat
+   avoidance: `previous` is the `pickVariants` of this room's previous match **on the same map** (another map, or the
+   first match, means attempt 0). Attempts 0..8; the first with at most half of its zones repeating wins, else the
+   fewest repeats (ties: lowest attempt). Only the final seed is sent.
+2. **Build.** `buildMatchLayout(base, seed, { decor: false })` then `applyLayout` (the level generator, injected from
+   `app.ts` as `LEVEL_LAYOUTS`), then `balanceForMap` (one object per map id) and `prepareMap(applied)` (colliders,
+   and the nav graph indoors). Cached in an LRU of 4 keyed `${mapId}:${seed}:${LAYOUT_FORMAT_VERSION}` shared by all
+   rooms (a pin always hits after the first build).
+3. **World.** `createWorld({ map: applied, balance, runtime })`: the World already takes the per-match map and reuses
+   the runtime when `runtime.map === map` and the balance object matches.
+4. **Wire.** `welcome.layout = { seed, version, hash, look }` (also to mid-match joiners), `RoomState.map.layout =
+   { seed, look }` from the lock to the end of the match (only for a generated layout).
+5. **Log** (variety.md §2.3), one line per match:
+   `[room r2] match 1 map office layout 0x9BA07ACF v1 look day picks TL=rows TR=gaps(N.1,N.2) ... | layoutMs 30.6
+   navMs 66.1, attempt 0, repeats 0/12, fallbacks 1, hash 0x514BA8C5` (`cached` instead of the timing on an LRU hit).
+   A build over 250 ms (layout + nav) logs a warning: it blocked every room's loop. `/healthz` reports
+   `layouts: { builds, cacheHits, avg/max layoutMs, avg/max navMs }`. The startup line shows the `LAYOUT_SEED` pin.
+
+`startServer({ layouts: false })` keeps every match on the base map (tests).
+
+### Load run with layouts (2026-11-18)
+`LATENCY_MS=120 JITTER_MS=30 MAX_CONNS_PER_IP=0` with a fast-cycling `BALANCE_OVERRIDE` (3 s countdown, one 14 s zone
+phase, 2 s results, on both maps), `bots.ts --rooms 4 --clients 16 --seconds 120 --map island01` and the same with
+`--map office`, at the same time (8 rooms, 32 humans plus sim bots). 57 locks (29 island, 28 office), every one built
+(distinct seeds, 0 LRU hits):
+
+| Map | layoutMs p50 / p95 / max | navMs p50 / p95 / max | Total max | Re-rolls | Max repeats |
+|---|---|---|---|---|---|
+| island01 | 3.4 / 7.6 / 8.9 | 0.4 / 0.7 / 1.1 | 10 ms | 8 of 29 used attempt 1 | 3 of 7 zones |
+| office | 19.8 / 28.6 / 30.6 | 47.7 / 66.1 / 70.2 | 97 ms | 2 of 28 used attempt 1 | 6 of 12 zones |
+
+No warning (all < 250 ms). Event loop p99 2.1 ms, max 90 ms (an office build); tick avg 0.46-0.58 ms per room, max
+12 ms; 2 dropped ticks in one room in 120 s (caught up by the loop). Per client: wire 2.6-3.0 KB/s, JSON 23 KB/s,
+largest delta 1.7 KB, RTT p50 about 153 ms, input ack p50 about 207 ms. No rejected frame. The worker_threads step
+(ADR 0007 §1.7) is not needed: the office p95 is about 95 ms, under the 150 ms trigger.

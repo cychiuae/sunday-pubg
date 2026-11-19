@@ -8,6 +8,8 @@
  * - M2b: the room browser, create dialog and waiting room (HudView.rooms; intents through UiCallbacks.on*Room*), the
  *   `?room=` / `?map=` deep links and the `?room=` URL sync, the drop HUD and flight announcer, zone strings by theme,
  *   first-person settings (Settings.fovDeg plus the EFFECTIVE headBob / reducedMotion).
+ * - M2c (docs/ui/M2c.md): levels in the feed, prompt and toasts; hit markers hidden through smoke (kills still show);
+ *   rocket / melee feed routing; the throwable cycle and scope events; the M2c one-time hints; sight-chip taps.
  *
  * Owner: ui-ux-designer. Design spec: docs/ui/UI.md.
  */
@@ -26,7 +28,7 @@ import type {
 } from '../shared/contracts';
 import type { ZoneTheme } from '../shared/balance';
 import type { EventBus, GameEvents } from '../shared/events';
-import type { MapId, MatchPhase, PlayerId } from '../shared/types';
+import { isMeleeId, type ItemLevel, type M2cHeldId, type M2cItemId, type MapId, type MatchPhase, type PlayerId } from '../shared/types';
 import { ScopeOverlay } from './ads';
 import { h } from './dom';
 import { KillFeed, MessageSlot, type Message } from './feed';
@@ -37,9 +39,12 @@ import {
   connectionErrorKey,
   flightCue,
   graphicsStatusView,
+  hitMarkerVisible,
   hitVariant,
-  isSelfGrenadeKill,
+  isBlastCause,
+  isSelfBlastKill,
   itemCategory,
+  pouchModel,
   roomInResults,
   selectScreen,
   zoneKey,
@@ -110,7 +115,14 @@ type HintId =
   // M2b
   | 'hint.lightsOut'
   | 'hint.sprinklers'
-  | 'hint.spectateView';
+  | 'hint.spectateView'
+  // M2c (narrative M2c §6, §8)
+  | 'hint.level'
+  | 'hint.melee'
+  | 'hint.smoke'
+  | 'hint.throwableCycle'
+  | 'hint.rocket'
+  | 'hint.scope';
 
 export class Ui implements IUi {
   private readonly el: HTMLDivElement;
@@ -168,6 +180,8 @@ export class Ui implements IUi {
   private lastHud: HudView | null = null;
   private currentMapId: MapId | null = null;
   private prevDrop: HudDropView | null = null;
+  /** M2c: last melee-slot item (the "Fists are back" toast). */
+  private prevMelee: M2cHeldId | null = null;
 
   // Flow state
   private joinRequested = false;
@@ -231,6 +245,8 @@ export class Ui implements IUi {
     });
     this.lobby = new LobbyScreen(openSettings);
     this.hud = new Hud(coastlineRadius);
+    // M2c (UI M2c §16.4): sight-chip tap / click does what T does.
+    this.hud.onCycleScope = () => this.callbacks.onCycleScope?.();
     this.scope = new ScopeOverlay();
     this.play = new PlayOverlay(
       () => this.callbacks.onResume(),
@@ -394,7 +410,7 @@ export class Ui implements IUi {
 
     const showPlay = this.shouldShowPlayOverlay(screen, hud);
     this.play.show(showPlay);
-    if (showPlay) this.play.update(!this.lockedThisMatch, this.inRoom);
+    if (showPlay) this.play.update(!this.lockedThisMatch, this.inRoom, hud);
     this.menuToasts.update(now);
     this.lastHud = hud;
   }
@@ -607,6 +623,18 @@ export class Ui implements IUi {
       if (local.outsideZone) this.showHint(this.zoneHint());
       // M2a: first time a gun with a sight is in hand after landing.
       if (!local.dropping && hud.ads && hud.ads.sight !== 'none') this.showHint('hint.ads');
+      // M2c: both throwable types carried; a gun in hand with a fitting spare scope in the pouch.
+      if ((local.throwables?.grenade ?? 0) > 0 && (local.throwables?.smoke ?? 0) > 0) this.showHint('hint.throwableCycle');
+      const active = local.activeSlot <= 1 ? local.slots[local.activeSlot] : null;
+      if (active && pouchModel(local.scopeStash, active).some((c) => c.fits)) this.showHint('hint.scope');
+      // Melee weapon lost: "Fists are back" (the melee slot went from a melee id to fists).
+      const melee = (local.slots[2]?.weapon ?? null) as M2cHeldId | null;
+      if (this.prevMelee !== null && isMeleeId(this.prevMelee) && melee === 'fists') {
+        this.hud.infoToast(t('hud.melee.dropped'), 'fists', now);
+      }
+      this.prevMelee = melee;
+    } else {
+      this.prevMelee = null;
     }
 
     this.feed.update(now);
@@ -663,11 +691,11 @@ export class Ui implements IUi {
     this.banner.push(`${id}#${this.msgSeq++}`, msg);
   }
 
-  private showHint(id: HintId): void {
+  private showHint(id: HintId, vars: Message['vars'] = {}): void {
     if (this.hintsSeen.has(id)) return;
     this.hintsSeen.add(id);
     writeItem(this.storage, HINTS_STORAGE_KEY, JSON.stringify([...this.hintsSeen]));
-    this.hint.push(id, { key: id, vars: {}, tone: 'normal' });
+    this.hint.push(id, { key: id, vars, tone: 'normal' });
   }
 
   // ------------------------------------------------------------------------------------------
@@ -738,6 +766,17 @@ export class Ui implements IUi {
     on('mapChanged', (e) => {
       this.currentMapId = e.mapId;
       this.hud.zoneTheme = e.zoneTheme;
+      // M2c: per-map balance (scope compatibility for the prompt's "Fits: …").
+      this.hud.balance = e.balance;
+    });
+    // ---- M2c
+    on('throwableCycled', (e) => {
+      this.hud.throwableCycled(e.to);
+    });
+    on('scopeChanged', (e) => {
+      // Auto-mount on pickup: "Sea Glass 2x Scope on Longshore Rifle". A T switch already shows "Sight: …" (Hud).
+      if (!e.isLocal || !e.auto || e.to === null) return;
+      this.hud.infoToast(t('hud.scope.mounted', { scope: t(`item.${e.to}.name`), weapon: t(`item.${e.gun}.name`) }), e.to, performance.now());
     });
     on('carrierDeparted', (e) => {
       this.currentMapId = e.route.mapId;
@@ -803,7 +842,8 @@ export class Ui implements IUi {
 
     on('playerDamaged', (e) => {
       this.lastHeadshot.set(e.victimId, e.headshot);
-      if (e.cause === 'explosion') this.lastBlastAttacker.set(e.victimId, e.attackerId);
+      // M2c: rocket impacts count as blasts for the self-kill check (isSelfBlastKill).
+      if (isBlastCause(e.cause)) this.lastBlastAttacker.set(e.victimId, e.attackerId);
       if (e.isLocalVictim) {
         this.hud.localDamaged(e);
         const now = performance.now();
@@ -815,6 +855,8 @@ export class Ui implements IUi {
     });
 
     on('localHitConfirmed', (e) => {
+      // M2c (UI M2c §6.2): no body / head / armor marker through smoke; the kill marker always shows.
+      if (!hitMarkerVisible(e.obscured, e.killed)) return;
       this.hud.hitConfirmed(hitVariant(e));
     });
 
@@ -830,7 +872,8 @@ export class Ui implements IUi {
 
     on('playerKilled', (e) => {
       const now = performance.now();
-      const self = isSelfGrenadeKill(e.cause, e.killerId, e.victimId, this.lastBlastAttacker.get(e.victimId));
+      const self = isSelfBlastKill(e.cause, e.killerId, e.victimId, this.lastBlastAttacker.get(e.victimId));
+      const cause: string = e.cause;
       this.feed.add(
         {
           killerName: e.killerName,
@@ -838,7 +881,10 @@ export class Ui implements IUi {
           weapon: e.weapon,
           cause: e.cause,
           self,
-          headshot: e.cause === 'weapon' && (e.headshot ?? this.lastHeadshot.get(e.victimId) === true),
+          direct: e.direct === true,
+          throughSmoke: e.throughSmoke === true,
+          weaponLevel: e.weaponLevel ?? null,
+          headshot: (cause === 'weapon' || cause === 'melee') && (e.headshot ?? this.lastHeadshot.get(e.victimId) === true),
           isLocalKiller: e.isLocalKiller,
           isLocalVictim: e.isLocalVictim,
         },
@@ -856,9 +902,16 @@ export class Ui implements IUi {
 
     on('itemPickedUp', (e) => {
       if (!e.isLocal) return;
-      this.hud.pickupToast(e.item, e.qty, performance.now());
-      if (itemCategory(e.item) === 'gun') this.showHint('hint.switch');
-      if (e.item === 'grenade') this.showHint('hint.grenade');
+      const item = e.item as M2cItemId;
+      const level: ItemLevel | null = e.level ?? null;
+      this.hud.pickupToast(item, e.qty, performance.now(), level);
+      const cat = itemCategory(item);
+      if (cat === 'gun') this.showHint('hint.switch');
+      if (item === 'grenade') this.showHint('hint.grenade');
+      // M2c one-time hints (narrative M2c §6).
+      if (item === 'smoke') this.showHint('hint.smoke');
+      if (item === 'rpg') this.showHint('hint.rocket');
+      if (cat === 'melee') this.showHint('hint.melee', { item: t(`item.${item}.name`) });
     });
 
     on('actionFailed', (e) => {
@@ -868,9 +921,15 @@ export class Ui implements IUi {
     });
 
     on('interactPromptChanged', (e) => {
-      // durability / refusal are M2a fields; `?? null` keeps an older producer working.
-      this.hud.setPrompt(e.lootId !== null ? e.item : null, e.qty, e.durability ?? null, e.refusal ?? null, e.maxDurability ?? null);
+      // durability / refusal are M2a fields; `?? null` keeps an older producer working. M2c fields are optional too.
+      this.hud.setPrompt(e.lootId !== null ? e.item : null, e.qty, e.durability ?? null, e.refusal ?? null, e.maxDurability ?? null, {
+        level: e.level ?? null,
+        scope: e.scope ?? null,
+        replacesSlot: e.replacesSlot ?? null,
+        scopeTarget: e.scopeTarget ?? null,
+      });
       if (e.lootId !== null) this.showHint('hint.loot');
+      if (e.lootId !== null && (e.level ?? 1) > 1) this.showHint('hint.level');
     });
 
     on('zoneWarning', (e) => {
