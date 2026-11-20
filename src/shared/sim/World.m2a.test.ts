@@ -61,30 +61,33 @@ describe('combat (combat.md M2a acceptance)', () => {
         click(d.w, d.s, head ? d.head : d.body);
         return d.tp;
       };
-      expect(shoot(() => {}, false).hp).toBeCloseTo(20, 9);
+      expect(shoot(() => {}, false).hp).toBeCloseTo(12, 9);
       const v2 = shoot((t) => (t.vest = { tier: 2, durability: 55 }), false);
-      expect(v2.hp).toBeCloseTo(52, 9);
-      expect(v2.vest!.durability).toBeCloseTo(23, 9);
-      expect(shoot((t) => (t.helmet = { tier: 1, durability: 30 }), true).alive).toBe(false);
-      expect(shoot((t) => (t.helmet = { tier: 2, durability: 45 }), true).alive).toBe(false);
-      const h3 = shoot((t) => (t.helmet = { tier: 3, durability: 75 }), true);
-      expect(h3.hp).toBeCloseTo(15, 9);
-      expect(h3.helmet).toBeNull();
-      expect(shoot((t) => (t.helmet = { tier: 3, durability: 60 }), true).alive).toBe(false);
-      expect(shoot((t) => (t.helmet = { tier: 3, durability: 61 }), true).hp).toBeCloseTo(1, 9);
+      expect(v2.hp).toBeCloseTo(47.2, 9);
+      expect(v2.vest!.durability).toBeCloseTo(19.8, 9);
+      // A bare head dies; any helmet caps the head loss at combat.helmetHeadshotCap.maxHpLoss (70).
+      expect(shoot(() => {}, true).alive).toBe(false);
+      for (const [tier, dur] of [[1, 30], [2, 45], [3, 75], [3, 1]] as const) {
+        const t = shoot((p) => (p.helmet = { tier, durability: dur }), true);
+        expect(t.hp, `helmet_${tier}@${dur}`).toBeCloseTo(30, 9);
+        expect(t.helmet, `helmet_${tier}@${dur}`).toBeNull();
+      }
+      const h4 = shoot((t) => (t.helmet = { tier: 4, durability: 100 }), true);
+      expect(h4.hp).toBeCloseTo(30, 9);
+      expect(h4.helmet!.durability).toBeCloseTo(3.2, 9);
     }
   });
 
   it('AT19: shots-to-kill table (forced 0 spread, 5 m)', () => {
     // [gun, no armor body, no armor head, vest_2 body, helmet_2 head, vest_3 body, helmet_3 head]
     const table: [GunId, number, number, number, number, number, number][] = [
-      ['pistol', 5, 3, 8, 5, 9, 5],
-      ['smg', 8, 5, 12, 7, 13, 9],
-      ['shotgun', 2, 1, 2, 1, 2, 2],
-      ['rifle', 6, 3, 9, 5, 10, 6],
-      ['lmg', 6, 4, 10, 6, 11, 7],
-      ['dmr', 3, 2, 4, 2, 5, 3],
-      ['sniper', 2, 1, 2, 1, 3, 2],
+      ['pistol', 5, 3, 7, 4, 8, 5],
+      ['smg', 6, 4, 10, 6, 11, 7],
+      ['shotgun', 1, 1, 2, 1, 2, 1],
+      ['rifle', 5, 3, 7, 4, 8, 5],
+      ['lmg', 5, 4, 8, 5, 9, 6],
+      ['dmr', 2, 2, 4, 2, 4, 2],
+      ['sniper', 2, 1, 2, 2, 2, 2],
     ];
     const columns: { head: boolean; armor: 'vest' | 'helmet' | null; tier: 2 | 3 }[] = [
       { head: false, armor: null, tier: 2 },
@@ -132,14 +135,14 @@ describe('combat (combat.md M2a acceptance)', () => {
     expect(found).toBe(true);
   });
 
-  it('AT20: DMR body 42 / head 73.5 at 40 m; body 33.6 at 180 m+', () => {
+  it('AT20: DMR body 50 / head 87.5 at 40 m; body 40 at 180 m+', () => {
     const at = (dist: number, head: boolean) => {
       const d = duel(dist + BALANCE.player.radius, 'dmr');
       return ofType(click(d.w, d.s, head ? pitchTo(EYE_Y, GROUND + 1.0, dist) : pitchTo(EYE_Y, GROUND + 0.5, dist)), 'damage')[0]!.amount;
     };
-    expect(at(40, false)).toBeCloseTo(42, 6);
-    expect(at(40, true)).toBeCloseTo(73.5, 6);
-    expect(at(185, false)).toBeCloseTo(33.6, 6);
+    expect(at(40, false)).toBeCloseTo(50, 6);
+    expect(at(40, true)).toBeCloseTo(87.5, 6);
+    expect(at(185, false)).toBeCloseTo(40, 6);
   });
 
   it('AT17: LMG firing slows to 2.75 m/s; 300 ms after the last shot it returns to 5.0', () => {
@@ -255,11 +258,11 @@ describe('armor in the World (armor.md)', () => {
     expect(p.helmet).toEqual({ tier: 1, durability: 12 });
   });
 
-  it('AT10: rifle body hits on a full-HP vest_3 player: 9 hits leave 4 HP, the 10th kills', () => {
+  it('AT10: rifle body hits on a full-HP vest_3 player: 7 hits leave 14 HP, the 8th kills', () => {
     const d = duel(10, 'rifle');
     d.tp.vest = { tier: 3, durability: 75 };
-    for (let i = 0; i < 9; i++) click(d.w, d.s, d.body);
-    expect(d.tp.hp).toBeCloseTo(4, 6);
+    for (let i = 0; i < 7; i++) click(d.w, d.s, d.body);
+    expect(d.tp.hp).toBeCloseTo(14, 6);
     expect(d.tp.vest).toBeNull();
     click(d.w, d.s, d.body);
     expect(d.tp.alive).toBe(false);

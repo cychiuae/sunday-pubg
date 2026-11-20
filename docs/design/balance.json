@@ -99,6 +99,8 @@
     "fireMoveWindowMs": 300,
     "_throwableNote": "M2c (grenades.md 'Throwable slot'): pressing 4/G while the throwable slot is already held and ready cycles to the next carried type; the cycle takes throwableCycleMs (no fire, no throw). Selecting the slot from another slot still costs combat.swapMs.",
     "throwableCycleMs": 250,
+    "_helmetHeadshotCapNote": "Damage pass 2026-11: a headshot from a weapon in helmetHeadshotCap.weapons on a player wearing a helmet (any durability > 0) takes HP loss min(normal HP loss after the helmet, maxHpLoss). The helmet absorbs as usual (armor.md) and usually breaks or is badly damaged, so the next headshot kills. A full-HP helmeted player survives a sniper headshot at every level. systems/combat.md 'Sniper rules'.",
+    "helmetHeadshotCap": { "weapons": ["sniper"], "maxHpLoss": 70 },
     "hitbox": {
       "_note": "Stand: vertical cylinder radius player.radius, height stances.stand.height, head = top player.headZoneFraction. Crouch: same cylinder with height stances.crouch.height, head = top crouchHeadZoneFraction. Prone: level box centred on the feet (x, z), long axis along the look yaw, proneLength x proneWidth x stances.prone.height; head = the front proneHeadLength metres (toward the look direction). During a transition: the cylinder of the taller stance.",
       "crouchHeadZoneFraction": 0.55,
@@ -132,7 +134,7 @@
       "fireMoveMultiplier": 1
     },
     "pistol": {
-      "damage": 20,
+      "damage": 24,
       "headshotMultiplier": 1.75,
       "fireIntervalMs": 250,
       "magSize": 12,
@@ -154,7 +156,7 @@
       "fireMoveMultiplier": 1
     },
     "smg": {
-      "damage": 14,
+      "damage": 17,
       "headshotMultiplier": 1.5,
       "fireIntervalMs": 80,
       "magSize": 30,
@@ -176,7 +178,7 @@
       "fireMoveMultiplier": 1
     },
     "shotgun": {
-      "damage": 11,
+      "damage": 13,
       "headshotMultiplier": 1.5,
       "fireIntervalMs": 900,
       "magSize": 5,
@@ -199,7 +201,7 @@
     },
     "rifle": {
       "_m2aNote": "Nerfed (M1 rifle took most kills): damage 22 -> 19, headshotMultiplier 1.75 -> 1.8 (keeps 3 headshots = 102.6), hip spreadDeg 1.0 -> 1.6 (needs ADS for range), falloff 40/110/0.7 -> 30/90/0.65. Loot weights cut too.",
-      "damage": 19,
+      "damage": 23,
       "headshotMultiplier": 1.8,
       "fireIntervalMs": 150,
       "magSize": 25,
@@ -222,7 +224,7 @@
     },
     "lmg": {
       "_note": "Planted suppression gun: highest sustained DPS and a 60 round mag, but wide hip spread, the worst moving spread, a 5 s reload, slow ADS, and fireMoveMultiplier 0.55 while firing. Best prone (spread x 0.6).",
-      "damage": 17,
+      "damage": 20,
       "headshotMultiplier": 1.5,
       "fireIntervalMs": 120,
       "magSize": 60,
@@ -244,8 +246,8 @@
       "fireMoveMultiplier": 0.55
     },
     "dmr": {
-      "_note": "Semi-auto marksman rifle. Poor hip fire (3.0 deg), pin-point scoped (0.3 deg). 3 body / 2 head (head + body also kills).",
-      "damage": 42,
+      "_note": "Semi-auto marksman rifle. Poor hip fire (3.0 deg), pin-point scoped (0.3 deg). Damage pass 2026-11: 42 -> 50, so 2 body / 2 head unarmored (was 3 body).",
+      "damage": 50,
       "headshotMultiplier": 1.75,
       "fireIntervalMs": 400,
       "magSize": 10,
@@ -267,8 +269,8 @@
       "fireMoveMultiplier": 1
     },
     "sniper": {
-      "_note": "Bolt-action: fireIntervalMs (1400) IS the bolt cycle; the scope stays up while the bolt cycles. No falloff (falloffStart = falloffEnd = range, minDamageFactor 1) so the one-shot rules hold at every range. Body 80 never kills a full-HP player; head 160 kills through helmet_1 and helmet_2, not through a helmet_3 above 60 durability. Arithmetic in combat.md.",
-      "damage": 80,
+      "_note": "Bolt-action: fireIntervalMs (1400) IS the bolt cycle; the scope stays up while the bolt cycles. No falloff (falloffStart = falloffEnd = range, minDamageFactor 1) so the one-shot rules hold at every range. Damage pass 2026-11: base 80 -> 88; L1-L3 go up, L4 stays at 96 body / 192 head (levels.overrides.sniper). Body never kills a full-HP player at any level; an unhelmeted head kills; a helmeted head is capped by combat.helmetHeadshotCap. Arithmetic in combat.md.",
+      "damage": 88,
       "headshotMultiplier": 2.0,
       "fireIntervalMs": 1400,
       "magSize": 5,
@@ -292,8 +294,8 @@
     "_meleeNote": "M2c (systems/melee.md). Melee entries (MeleeId: knife, machete, paddle) keep the WeaponBalance shape. fireIntervalMs IS the swing cycle (click to next swing); range IS the reach (m, from the eye along the aim); hitFrameMs = time from the click to the single hit check; sweepRadius = capsule radius around the aim segment; knockbackSpeed (m/s, horizontal, along the attacker's yaw) and knockbackLift (m/s up, not applied to prone targets) are added to the target's velocity on a hit. falloffStart = falloffEnd = range and minDamageFactor 1 = no falloff. sight none, no ammo, no ADS, no right-click action. They live in slot 2 (the fists slot) and never take a gun slot.",
     "_rpgNote": "M2c (systems/rpg.md). weapons.rpg.damage IS the direct-hit impact damage (body zone, vest absorbs); range IS the rocket's max travel distance (it air-bursts there). rocket.* = projectile and blast. Blast uses the grenade blast model (grenades.md 'Explosion') with rocket.blast.*; blast maxDamage scales with the level damage multiplier. A rocket that hits anything before travelling armDistance metres is a dud: impact damage only, no blast.",
     "revolver": {
-      "_note": "M2c heavy pistol: 3 body / 2 head unarmored, 6 rounds of ammo_heavy, slow trigger. The skill sidearm of the common pool.",
-      "damage": 38,
+      "_note": "M2c heavy pistol (damage pass 2026-11: 38 -> 46): 3 body / 2 head unarmored, 6 rounds of ammo_heavy, slow trigger. The skill sidearm of the common pool.",
+      "damage": 46,
       "headshotMultiplier": 1.7,
       "fireIntervalMs": 450,
       "magSize": 6,
@@ -315,8 +317,8 @@
       "fireMoveMultiplier": 1
     },
     "dbshotgun": {
-      "_note": "M2c double barrel: 10 pellets x 12 = 120 at point blank (one-shots an unarmored body; both barrels kill any armor within ~3 m in 0.25 s). Very wide cone and steep falloff: about 15 damage per barrel at 8 m. 2 shells, slow reload. One barrel per click.",
-      "damage": 12,
+      "_note": "M2c double barrel: 10 pellets x 14 = 140 at point blank (damage pass 2026-11: 12 -> 14) (one-shots an unarmored body; both barrels kill any armor within ~3 m in 0.25 s). Very wide cone and steep falloff: about 15 damage per barrel at 8 m. 2 shells, slow reload. One barrel per click.",
+      "damage": 14,
       "headshotMultiplier": 1.5,
       "fireIntervalMs": 250,
       "magSize": 2,
@@ -338,7 +340,7 @@
       "fireMoveMultiplier": 1
     },
     "rpg": {
-      "damage": 40,
+      "damage": 48,
       "headshotMultiplier": 1,
       "fireIntervalMs": 500,
       "magSize": 1,
@@ -367,7 +369,7 @@
         "blast": {
           "radius": 5.0,
           "innerRadius": 1.0,
-          "maxDamage": 110,
+          "maxDamage": 132,
           "minDamageFactor": 0.15,
           "losHeightOffset": 0.2,
           "selfDamage": true
@@ -375,7 +377,7 @@
       }
     },
     "knife": {
-      "damage": 34,
+      "damage": 41,
       "headshotMultiplier": 1.5,
       "fireIntervalMs": 350,
       "magSize": 0,
@@ -401,7 +403,7 @@
       "knockbackLift": 0
     },
     "machete": {
-      "damage": 52,
+      "damage": 62,
       "headshotMultiplier": 1.5,
       "fireIntervalMs": 650,
       "magSize": 0,
@@ -427,7 +429,7 @@
       "knockbackLift": 0
     },
     "paddle": {
-      "damage": 78,
+      "damage": 94,
       "headshotMultiplier": 1.5,
       "fireIntervalMs": 1000,
       "magSize": 0,
@@ -628,10 +630,10 @@
     "gun": { "damage": [1, 1.08, 1.16, 1.25], "reloadMs": [1, 0.95, 0.9, 0.85] },
     "melee": { "damage": [1, 1.08, 1.16, 1.25], "fireIntervalMs": [1, 0.93, 0.86, 0.8] },
     "overrides": {
-      "_note": "shotgun: damage flat so 9 pellets (99) never one-shot a full-HP body; levels tighten the cone and the pump instead. dmr: damage capped at x1.15 so an L4 body pair (96.6) never kills a full-HP player; the trigger gets faster instead. sniper: x1.2 keeps an L4 body shot (96) below 100 and an L4 head (192) below a fresh helmet_4 kill (92 HP loss). rpg: x1.15 so an L4 direct hit (172.5) still leaves a fresh vest_3 alive.",
+      "_note": "Damage pass 2026-11 raised base damage about 20% (shotgun 11 -> 13, so all 9 pellets (117) now one-shot an unarmored body at point blank). shotgun: damage flat across levels; levels tighten the cone and the pump instead. dmr: damage capped at x1.15; the trigger gets faster instead. sniper: base 88 with [1, 1.03, 1.06, 96/88] so L1-L3 rise (88 / 90.6 / 93.3) and L4 stays exactly 96 body / 192 head, the pre-pass value. rpg: x1.15 on the direct hit and the blast (damage pass 2026-11: direct 40 -> 48, blast 110 -> 132; an L4 direct hit plus blast now kills through a fresh vest_3).",
       "shotgun": { "damage": [1, 1, 1, 1], "spreadDeg": [1, 0.92, 0.85, 0.78], "fireIntervalMs": [1, 0.95, 0.9, 0.85] },
       "dmr": { "damage": [1, 1.05, 1.1, 1.15], "fireIntervalMs": [1, 0.93, 0.86, 0.8] },
-      "sniper": { "damage": [1, 1.06, 1.12, 1.2], "fireIntervalMs": [1, 0.93, 0.86, 0.8] },
+      "sniper": { "damage": [1, 1.03, 1.06, 1.0909090909090908], "fireIntervalMs": [1, 0.93, 0.86, 0.8] },
       "rpg": { "damage": [1, 1.05, 1.1, 1.15], "reloadMs": [1, 0.93, 0.86, 0.8] }
     },
     "_lootTiersTuning": "Pacing run 1: L4 was ~3% of guns but 10-17% of island kills (winners keep the best gun from death drops). Rare L4 3 -> 2 and epic L4 20 -> 15 (about 0.56 L4 guns per match instead of 0.77); target L4 <= 12% of kills.",
@@ -740,9 +742,9 @@
     "zoneEntryFraction": 0.95,
     "zoneEntrySpread": 0.25,
     "personalities": {
-      "aggressive": { "share": 0.3, "engageRangeMultiplier": 1.25, "lootPhaseMultiplier": 0.8, "reactionMultiplier": 0.85, "retreatBelowHp": 0, "stanceChance": 0.0, "grenadeChanceMultiplier": 1.5, "jumpTimingBiasMs": -1000, "dropEpicWeightMultiplier": 1.5, "smokeChanceMultiplier": 0.5 },
-      "balanced": { "share": 0.4, "engageRangeMultiplier": 1, "lootPhaseMultiplier": 1, "reactionMultiplier": 1, "retreatBelowHp": 45, "stanceChance": 0.1, "grenadeChanceMultiplier": 1.0, "jumpTimingBiasMs": 0, "dropEpicWeightMultiplier": 1.0, "smokeChanceMultiplier": 1.0 },
-      "cautious": { "share": 0.3, "engageRangeMultiplier": 0.75, "lootPhaseMultiplier": 1.3, "reactionMultiplier": 1.15, "retreatBelowHp": 60, "stanceChance": 0.35, "grenadeChanceMultiplier": 0.6, "jumpTimingBiasMs": 1500, "dropEpicWeightMultiplier": 0.5, "smokeChanceMultiplier": 1.5 }
+      "aggressive": { "share": 0.3, "engageRangeMultiplier": 1.25, "lootPhaseMultiplier": 0.8, "reactionMultiplier": 0.85, "retreatBelowHp": 0, "stanceChance": 0.0, "grenadeChanceMultiplier": 1.5, "jumpTimingBiasMs": -1000, "dropEpicWeightMultiplier": 1.5, "smokeChanceMultiplier": 0.5, "investigateChance": 0.6 },
+      "balanced": { "share": 0.4, "engageRangeMultiplier": 1, "lootPhaseMultiplier": 1, "reactionMultiplier": 1, "retreatBelowHp": 45, "stanceChance": 0.1, "grenadeChanceMultiplier": 1.0, "jumpTimingBiasMs": 0, "dropEpicWeightMultiplier": 1.0, "smokeChanceMultiplier": 1.0, "investigateChance": 0.3 },
+      "cautious": { "share": 0.3, "engageRangeMultiplier": 0.75, "lootPhaseMultiplier": 1.3, "reactionMultiplier": 1.15, "retreatBelowHp": 60, "stanceChance": 0.35, "grenadeChanceMultiplier": 0.6, "jumpTimingBiasMs": 1500, "dropEpicWeightMultiplier": 0.5, "smokeChanceMultiplier": 1.5, "investigateChance": 0 }
     },
     "drop": {
       "_note": "M2b bot jump choice (systems/drop.md 'Bots: jump choice'). Candidates = loot spawns within auto-deploy reach x reachSafetyFraction of the in-window route; weight tierWeights[tier] (x personality dropEpicWeightMultiplier for epic); skip a candidate once maxBotsPerTarget earlier picks lie within bots.dropSpreadRange of it (a pick of the same spawn counts, distance 0). Jump when the carrier passes the closest route point + personality jumpTimingBiasMs + uniform +-jumpJitterMs, clamped to the window.",
@@ -852,6 +854,25 @@
       "_note": "M2c (scopes.md 'Bots'). Bots pick up a scope (score lootScoreScope) only when it would auto-mount on a carried gun (rank higher than that gun's current sight); they never stash spares and never press T. mountedMaxRangeMultiplier: while a gun has a MOUNTED scope, its weaponPrefs maxRange x this (default sights x1). ADS: scope_2x behaves like red_dot/iron in the bots.ads rule (ADS beyond bots.ads.minRange); scope_4x/scope_8x as today (always ADS, scopedFireMinProgress, scopedVisionRange), whether default or mounted.",
       "lootScoreScope": 16,
       "mountedMaxRangeMultiplier": { "scope_red_dot": 1.0, "scope_2x": 1.15, "scope_4x": 1.35, "scope_8x": 1.5 }
+    },
+    "tactics": {
+      "_note": "GDD 10 'Tactics' (consumer: src/shared/sim/bots.ts). COVER: a spot behind a collider (within coverSearchRadius, the coverMaxCandidates nearest, at least crouch-high and as wide as a player) that hides the bot from the threat's eye, standing or crouched; score = walk distance + coverTowardThreatPenalty x metres closer to the threat (+ a small crouch penalty). At most one search per bot per coverSearchCooldownMs (and a per-tick cap across bots). Reasons: (heal) the Retreat trigger goes to cover and heals once hidden, until healed; (reload) a reload with >= coverReloadMinMs left, within the distance it can walk before the reload ends; (under fire) hit by an enemy it cannot answer (out of sight or beyond its best fire range): hold coverHoldMs, then coverCooldownMs before the next. Any cover ends after coverMaxMs or when the threat can see the spot (a new search is tried). In cover the bot pre-aims the threat's last known position, then peeks back out (chases the last known position). RANGE PLAN: damage share(d) = myBestDps(d) / (myBestDps(d) + enemyHeldDps(d)), sampled up to the bot's best fire range; when the best share beats the current one by rangeAdvantageMargin the bot moves to the nearest distance within rangeAdvantageMargin of the best (closing in or backing off), else it keeps the weapon's preferred range. RELOADS: an empty or reloading gun with a visible enemy within swapInsteadOfReloadRange and a loaded second gun: swap; target out of sight: reload below hiddenReloadFraction of the mag; out of combat: top up the other gun too. PRESSURE: a visible enemy who is reloading or healing is pushed into the held gun's full-damage range; a target that broke sight within pushWindowMs of this bot hitting it is chased at a sprint; out of sight, bots pre-aim the last known position. EVASION: hitJukeChance to flip strafe when hit. INVESTIGATE: gunfire within hearingRange, rolled once per investigateMemoryMs with personality.investigateChance at eagerness >= investigateMinEagerness, sends an armed bot with nothing to loot toward the shot, stopping at investigateStandoffFraction x its best fire range, only inside the safe circle.",
+      "coverSearchRadius": 12,
+      "coverMaxCandidates": 8,
+      "coverSearchCooldownMs": 1500,
+      "coverMaxMs": 10000,
+      "coverHoldMs": 2500,
+      "coverCooldownMs": 5000,
+      "coverTowardThreatPenalty": 2,
+      "coverReloadMinMs": 1200,
+      "swapInsteadOfReloadRange": 20,
+      "hiddenReloadFraction": 0.7,
+      "rangeAdvantageMargin": 0.12,
+      "pushWindowMs": 2500,
+      "hitJukeChance": 0.6,
+      "investigateMemoryMs": 8000,
+      "investigateMinEagerness": 0.5,
+      "investigateStandoffFraction": 0.8
     }
   },
   "net": {

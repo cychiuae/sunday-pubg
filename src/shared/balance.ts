@@ -301,6 +301,44 @@ export interface BotScopesBalance {
   lootScoreScope: number;
   mountedMaxRangeMultiplier: Record<ScopeId, number>;
 }
+/**
+ * Bot tactics (GDD 10 "Tactics"; `bots.tactics`, required, every key required; consumer: src/shared/sim/bots.ts).
+ * Cover, range planning against the enemy's held weapon, smart reloads, pushing and investigating gunfire.
+ */
+export interface BotTacticsBalance {
+  /** Cover is searched among colliders within this many metres. */
+  coverSearchRadius: number;
+  /** At most this many nearest colliders are tested per search (each costs up to 2 sight rays). */
+  coverMaxCandidates: number;
+  /** One cover search per bot per this many ms. */
+  coverSearchCooldownMs: number;
+  /** A cover state ends after this long whatever its reason, ms. */
+  coverMaxMs: number;
+  /** Shot by an enemy the bot cannot answer: hold cover this long, ms. */
+  coverHoldMs: number;
+  /** After such an under-fire cover ends, no new one for this long, ms. */
+  coverCooldownMs: number;
+  /** Cover score: metres of walking added per metre the spot is closer to the threat than the bot is. */
+  coverTowardThreatPenalty: number;
+  /** Seek cover for a reload only with at least this much of it left, ms. */
+  coverReloadMinMs: number;
+  /** An empty or reloading gun with a visible enemy within this many metres: swap to a loaded second gun instead. */
+  swapInsteadOfReloadRange: number;
+  /** The target is out of sight: reload when the mag is below this fraction of magSize. */
+  hiddenReloadFraction: number;
+  /** Move to another fight distance only when it raises the damage share (mine / (mine + theirs)) by at least this. */
+  rangeAdvantageMargin: number;
+  /** Sprint after a target that broke line of sight within this many ms of this bot hitting it. */
+  pushWindowMs: number;
+  /** Chance to flip strafe direction when hit while fighting. */
+  hitJukeChance: number;
+  /** Heard gunfire is remembered (and an investigation lasts) this long, ms. */
+  investigateMemoryMs: number;
+  /** Investigate only at or above this eagerness. */
+  investigateMinEagerness: number;
+  /** Stop investigating at this fraction of the bot's best fire range from the heard shot. */
+  investigateStandoffFraction: number;
+}
 
 /** M2a: `movement.stances.<stance>`. */
 export interface StanceBalance {
@@ -548,6 +586,8 @@ export interface BotPersonalityBalance {
   dropEpicWeightMultiplier?: number;
   /** M2c (smoke.md "Bots"): multiplies bots.smoke retreat/zone throw chances. */
   smokeChanceMultiplier?: number;
+  /** Tactics (GDD 10): chance to go and look when it hears a fight (bots.tactics.investigate*). */
+  investigateChance?: number;
 }
 
 /**
@@ -751,6 +791,11 @@ export interface Balance {
     hitbox: HitboxBalance;
     /** M2c (grenades.md "Throwable slot"): 4 / G while the throwable slot is ready cycles frag <-> smoke. Gate: required. */
     throwableCycleMs: number;
+    /**
+     * Damage pass 2026-11 (combat.md "Sniper rules"): a headshot from one of `weapons` on a player wearing a helmet loses
+     * at most `maxHpLoss` HP from the head part of the shot (the helmet still absorbs as usual). Gate: required.
+     */
+    helmetHeadshotCap: { weapons: WeaponId[]; maxHpLoss: number };
   };
   /**
    * M2c: the new weapons are optional until the C-gate (the merged balance.json has them; WEAPONS lookups for them go
@@ -802,6 +847,8 @@ export interface Balance {
     rpg: BotRpgBalance;
     smoke: BotSmokeBalance;
     scopes: BotScopesBalance;
+    /** Tactics (GDD 10 "Tactics"): cover, range plan, smart reloads, push, investigate. Required. */
+    tactics: BotTacticsBalance;
     /** M2b: indoor navigation (maps.md §4). Required in the base; island maps ignore it. */
     nav: BotNavBalance;
     /** M2b: bot jump choice (drop.md). Required (REVIEW-M2b M1). */
@@ -936,6 +983,12 @@ const HITBOX_SPEC: Record<keyof HitboxBalance, Kind> = {
   crouchHeadZoneFraction: N, proneLength: N, proneWidth: N, proneHeadLength: N,
 };
 const BOT_WEAPON_PREF_SPEC: Record<keyof BotWeaponPrefBalance, Kind> = { minRange: N, maxRange: N, lootValue: N };
+const BOT_TACTICS_SPEC: Record<keyof BotTacticsBalance, Kind> = {
+  coverSearchRadius: N, coverMaxCandidates: N, coverSearchCooldownMs: N, coverMaxMs: N, coverHoldMs: N, coverCooldownMs: N,
+  coverTowardThreatPenalty: N, coverReloadMinMs: N, swapInsteadOfReloadRange: N, hiddenReloadFraction: N,
+  rangeAdvantageMargin: N, pushWindowMs: N, hitJukeChance: N, investigateMemoryMs: N, investigateMinEagerness: N,
+  investigateStandoffFraction: N,
+};
 const DROP_SPEC: Record<keyof DropBalance, Kind> = {
   carrierAltitude: N, carrierSpeed: N, noJumpMs: N, routeLateralFraction: N, routeEntryMargin: N, ejectInset: N,
   minJumpWindowMetres: N, routeMaxTries: N, freefallSpeed: N, freefallSteerSpeed: N, chuteDeployHeight: N,
@@ -1011,6 +1064,8 @@ const BOT_PERSONALITY_KEYS: readonly (keyof BotPersonalityBalance)[] = [
   'jumpTimingBiasMs', 'dropEpicWeightMultiplier',
   // M2c
   'smokeChanceMultiplier',
+  // Tactics
+  'investigateChance',
 ];
 const BOT_ADS_KEYS: readonly (keyof BotAdsBalance)[] = [
   'minRange', 'aimErrorMultiplier', 'scopedVisionRange', 'scopedFireMinProgress',
@@ -1292,6 +1347,17 @@ function balanceErrors(raw: unknown): string[] {
   if (isNum(sfmp) && !(sfmp >= 0 && sfmp <= 1)) errors.push('bots.ads.scopedFireMinProgress must be in [0, 1]');
   checkOptional(get(bots, 'stance'), 'bots.stance', BOT_STANCE_KEYS);
   checkOptional(get(bots, 'grenade'), 'bots.grenade', BOT_GRENADE_KEYS);
+  // Tactics (GDD 10): required block, every key required.
+  const tactics = get(bots, 'tactics');
+  check(tactics, 'bots.tactics', BOT_TACTICS_SPEC);
+  if (isObj(tactics)) {
+    for (const k of ['hiddenReloadFraction', 'hitJukeChance', 'investigateMinEagerness', 'rangeAdvantageMargin'] as const) {
+      const v = tactics[k];
+      if (isNum(v) && !(v >= 0 && v <= 1)) errors.push(`bots.tactics.${k} must be in [0, 1]`);
+    }
+    const n = tactics['coverMaxCandidates'];
+    if (isNum(n) && !(Number.isInteger(n) && n >= 0)) errors.push('bots.tactics.coverMaxCandidates must be an integer >= 0');
+  }
 
   if (isObj(player)) checkOptional({ lowHpThreshold: player['lowHpThreshold'] }, 'player', ['lowHpThreshold']);
   const medkit = get(items, 'medkit');
@@ -1431,6 +1497,20 @@ function m2cErrors(raw: Record<string, unknown>, errors: string[], check: CheckF
   // combat.throwableCycleMs
   const cycle = get(raw['combat'], 'throwableCycleMs');
   if (need(cycle, 'combat.throwableCycleMs') && !(isNum(cycle) && cycle >= 0)) errors.push('combat.throwableCycleMs must be a number >= 0');
+
+  // combat.helmetHeadshotCap
+  const hhc = get(raw['combat'], 'helmetHeadshotCap');
+  if (need(hhc, 'combat.helmetHeadshotCap')) {
+    if (!isObj(hhc)) errors.push('combat.helmetHeadshotCap must be an object');
+    else {
+      const ws = hhc['weapons'];
+      if (!Array.isArray(ws) || ws.some((w) => !(WEAPON_IDS as readonly unknown[]).includes(w))) {
+        errors.push(`combat.helmetHeadshotCap.weapons must be an array of weapon ids (${WEAPON_IDS.join(', ')})`);
+      }
+      const cap = hhc['maxHpLoss'];
+      if (!(isNum(cap) && cap >= 0)) errors.push('combat.helmetHeadshotCap.maxHpLoss must be a number >= 0');
+    }
+  }
 
   // levels
   const levels = raw['levels'];

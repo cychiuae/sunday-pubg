@@ -17,24 +17,25 @@ const B = BALANCE;
 const none = () => ({ vest: null, helmet: null });
 
 describe('levels (levels.md)', () => {
-  it('2: rifle body at 10 m: L1 19, L2 20.52, L3 22.04, L4 23.75; reload L1 2400, L4 2040', () => {
+  it('2: rifle body at 10 m: L1 23, L2 24.84, L3 26.68, L4 28.75; reload L1 2400, L4 2040', () => {
     const dmg = [1, 2, 3, 4].map((l) => effWeapon(B, 'rifle', l as 1).damage);
-    [19, 20.52, 22.04, 23.75].forEach((v, i) => expect(dmg[i]).toBeCloseTo(v, 3));
+    [23, 24.84, 26.68, 28.75].forEach((v, i) => expect(dmg[i]).toBeCloseTo(v, 3));
     expect(effWeapon(B, 'rifle', 1).reloadMs).toBe(2400);
     expect(effWeapon(B, 'rifle', 4).reloadMs).toBeCloseTo(2040, 6);
   });
 
-  it('3/4/5/6: pistol L4 25; shotgun L4 pellet 11, pump 765; sniper L4 96 and bolt 1120; dmr L4 48.3 and 320 ms', () => {
-    expect(effWeapon(B, 'pistol', 4).damage).toBeCloseTo(25, 9);
-    expect(effWeapon(B, 'shotgun', 4).damage).toBe(11);
+  it('3/4/5/6: pistol L4 30; shotgun L4 pellet 13, pump 765; sniper L1-L3 above 88, L4 96 and bolt 1120; dmr L4 57.5 and 320 ms', () => {
+    expect(effWeapon(B, 'pistol', 4).damage).toBeCloseTo(30, 9);
+    expect(effWeapon(B, 'shotgun', 4).damage).toBe(13);
     expect(effWeapon(B, 'shotgun', 4).fireIntervalMs).toBeCloseTo(765, 6);
-    expect(effWeapon(B, 'sniper', 4).damage).toBeCloseTo(96, 6);
+    // Damage pass 2026-11: L1-L3 rose, L4 stays at the pre-pass 96.
+    [88, 90.64, 93.28, 96].forEach((v, i) => expect(effWeapon(B, 'sniper', (i + 1) as 1).damage).toBeCloseTo(v, 6));
     expect(effWeapon(B, 'sniper', 4).fireIntervalMs).toBeCloseTo(1120, 6);
-    expect(effWeapon(B, 'dmr', 4).damage).toBeCloseTo(48.3, 6);
+    expect(effWeapon(B, 'dmr', 4).damage).toBeCloseTo(57.5, 6);
     expect(effWeapon(B, 'dmr', 4).fireIntervalMs).toBeCloseTo(320, 6);
   });
 
-  it('World: an L4 rifle hit deals 23.75 and the damage/kill events carry weapon and level; reload takes 2040 ms', () => {
+  it('World: an L4 rifle hit deals 28.75 and the damage/kill events carry weapon and level; reload takes 2040 ms', () => {
     const { w, ids } = playingWorld(2, { map: flatMap({ islandRadius: 300, worldRadius: 330 }), balance: noSpreadBalance() });
     const [s, t] = ids as [number, number];
     land(w, s, 0, 0);
@@ -46,7 +47,7 @@ describe('levels (levels.md)', () => {
     const pitch = Math.atan2(2 + 0.5 - (2 + B.movement.stances.stand.eyeHeight), 10);
     const ev = run(w, 1, { [s]: () => ({ fire: true, pitch }) });
     const d = ofType(ev, 'damage')[0]!;
-    expect(d.amount).toBeCloseTo(23.75, 6);
+    expect(d.amount).toBeCloseTo(28.75, 6);
     expect(d).toMatchObject({ weapon: 'rifle', weaponLevel: 4, cause: 'weapon' });
     const reload = ofType(ev, 'reloadStart')[0]!;
     expect(reload.durationMs).toBeCloseTo(2040, 6);

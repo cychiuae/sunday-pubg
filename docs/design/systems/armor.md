@@ -30,12 +30,14 @@ Each player wears at most one vest and one helmet. Armor is worn on pickup, neve
   in 5; `loot.md`).
 - Invariant check: 100 < 100 x 0.55 / 0.45 = 122.2. A fresh tier-4 piece adds exactly 100 effective HP.
 - What tier 4 buys:
-  - **helmet_4 survives one headshot from any sniper**: L1 160 - min(100, 88) = 72 HP loss; L4 192 - min(100, 105.6) = 92. (A helmet_3
-    stops one headshot only from an L1-L2 sniper: L3 179.2 - 75 = 104.2 kills.)
-  - **vest_4 survives an L4 rocket direct hit** (172.5 - 100 = 72.5 loss) and any frag (120 - 66 = 54 loss).
-  - Body TTK at L1 vs vest_4 (threshold 200): rifle 11 shots 1.50 s, SMG 15 shots 1.12 s, pistol 10 shots 2.25 s, revolver 6 shots 2.25 s,
-    DMR 5 shots 1.60 s, sniper 3 shots 2.80 s, pump 3 shots 1.80 s, double barrel 2 shells 0.25 s at point blank. Every mag still covers the
-    worst case (revolver 6 = 6 exactly, pistol 12 >= 10, rifle 25 >= 11).
+  - **Any helmet survives one sniper headshot** (damage pass 2026-11, `combat.helmetHeadshotCap`): the head HP loss is capped at 70, so
+    a full-HP wearer keeps 30 HP. helmet_1-3 are destroyed by the hit; a fresh helmet_4 keeps 3.2 durability after an L1 shot (176 x 0.55
+    = 96.8 absorbed) and breaks on an L4 shot. See `combat.md` "Sniper rules".
+  - **vest_4 survives any frag** (120 - 66 = 54 loss). Since the damage pass an L4 rocket direct hit plus blast (55.2 + 151.8) kills
+    through a fresh vest_4.
+  - Body TTK at L1 vs vest_4 (threshold 200, damage pass numbers): rifle 9 shots 1.20 s, SMG 12 shots 0.88 s, pistol 9 shots 2.00 s,
+    revolver 5 shots 1.80 s, DMR 4 shots 1.20 s, sniper 3 shots 2.80 s, pump 2 shots 0.90 s, double barrel 2 shells 0.25 s at point
+    blank. Every mag still covers the worst case (revolver 6 >= 5, pistol 12 >= 9, rifle 25 >= 9).
 - Tier 4 is visibly distinct on the chibi (shape and the L4 colour), so a fight against one is a choice.
 - Rockets: the impact and the blast are body damage through the vest (`rpg.md`); helmets never absorb rocket damage.
 
@@ -140,7 +142,7 @@ They pick up and wear better armor the same way humans do.
 
 M2c (tier 4):
 13. vest_4 at 100, body hit 50: a = min(100, 27.5) = 27.5, hp 77.5, vest 72.5.
-14. Sniper L1 headshot on a fresh helmet_4: hp 28, helmet 12. Sniper L4 headshot on a fresh helmet_4: hp 8, helmet destroyed.
+14. Sniper L1 headshot on a fresh helmet_4: hp 30 (helmet cap), helmet 3.2. Sniper L4 headshot on a fresh helmet_4: hp 30, helmet destroyed.
 15. Wearing vest_3 at 10, pick up vest_4: wearing vest_4 at 100, a vest_3 pickup at 10 at the feet. Wearing vest_4 at 5, pick up a fresh
     vest_3: refused `betterArmor`.
 16. Rifle L1 body hits (19, <= 30 m) on a fresh vest_4: after 10 hits hp = 100 - (190 - 100) = 10; the 11th kills.

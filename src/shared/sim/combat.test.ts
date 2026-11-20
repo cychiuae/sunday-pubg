@@ -8,15 +8,15 @@ const b = BALANCE;
 const rifle = b.weapons.rifle;
 
 describe('combat math', () => {
-  it('rifle falloff: 19 at 10 m, 15.675 at 60 m, 12.35 at 90 and 120 m (combat.md AT1)', () => {
-    expect(pelletDamage(rifle, 10, false)).toBeCloseTo(19, 9);
-    expect(pelletDamage(rifle, 60, false)).toBeCloseTo(15.675, 9);
-    expect(pelletDamage(rifle, 90, false)).toBeCloseTo(12.35, 9);
-    expect(pelletDamage(rifle, 120, false)).toBeCloseTo(12.35, 9);
+  it('rifle falloff: 23 at 10 m, 18.975 at 60 m, 14.95 at 90 and 120 m (combat.md AT1)', () => {
+    expect(pelletDamage(rifle, 10, false)).toBeCloseTo(23, 9);
+    expect(pelletDamage(rifle, 60, false)).toBeCloseTo(18.975, 9);
+    expect(pelletDamage(rifle, 90, false)).toBeCloseTo(14.95, 9);
+    expect(pelletDamage(rifle, 120, false)).toBeCloseTo(14.95, 9);
   });
 
   it('headshot multiplier (AT2; the head zones are covered by stance.test.ts rayHitbox)', () => {
-    expect(pelletDamage(rifle, 10, true)).toBeCloseTo(34.2, 9);
+    expect(pelletDamage(rifle, 10, true)).toBeCloseTo(41.4, 9);
   });
 
   it('armor piece: a = min(durability, dmg x f); destroyed at 0 (armor.md AT1)', () => {
@@ -74,22 +74,24 @@ describe('combat math', () => {
     expect(adsProgressOf({ adsMs: 100 }, 'fists', b)).toBe(0);
   });
 
-  it('sniper constraint: body never kills a full-HP player; head kills through helmet_1/2, not a fresh helmet_3 (combat.md)', () => {
+  it('sniper constraint: body never kills a full-HP player; a bare head kills; any helmet caps the head loss (combat.md)', () => {
     const sn = b.weapons.sniper;
     const H = sn.damage * sn.headshotMultiplier;
     expect(sn.damage).toBeLessThan(100);
-    const loss = (id: 'helmet_1' | 'helmet_2' | 'helmet_3', d = b.items[id].durability) =>
-      applyArmorPiece({ tier: b.items[id].tier, durability: d }, H, b.items[id].absorbFraction).hpLoss;
+    expect(H).toBeGreaterThanOrEqual(100);
+    const cap = b.combat.helmetHeadshotCap;
+    expect(cap.weapons).toContain('sniper');
+    expect(cap.maxHpLoss).toBeLessThan(100);
+    // Without the cap every helmet below tier 4 would still let the head shot kill.
+    const loss = (id: 'helmet_1' | 'helmet_2' | 'helmet_3') =>
+      applyArmorPiece({ tier: b.items[id].tier, durability: b.items[id].durability }, H, b.items[id].absorbFraction).hpLoss;
     expect(loss('helmet_1')).toBeGreaterThanOrEqual(100);
-    expect(loss('helmet_2')).toBeGreaterThanOrEqual(100);
-    expect(loss('helmet_3')).toBeLessThan(100);
-    expect(loss('helmet_3', 60)).toBeGreaterThanOrEqual(100);
-    expect(loss('helmet_3', 61)).toBeCloseTo(99, 9);
+    expect(Math.min(loss('helmet_1'), cap.maxHpLoss)).toBe(cap.maxHpLoss);
   });
 
-  it('shotgun point-blank all pellets = 99 (AT4)', () => {
+  it('shotgun point-blank all pellets = 117 (AT4)', () => {
     const sg = b.weapons.shotgun;
-    expect(pelletDamage(sg, 2, false) * sg.pellets).toBeCloseTo(99, 9);
+    expect(pelletDamage(sg, 2, false) * sg.pellets).toBeCloseTo(117, 9);
   });
 
   it('effective spread multiplies when moving and airborne', () => {

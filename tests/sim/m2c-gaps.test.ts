@@ -59,8 +59,8 @@ describe('armor.md M2c (tier 4)', () => {
     expect(r.piece!.durability).toBeCloseTo(72.5, 9);
   });
 
-  it('14: sniper L1 head on a fresh helmet_4: hp 28, helmet 12; L4: hp 8, helmet destroyed', () => {
-    for (const [level, hp, helmet] of [[1, 28, 12], [4, 8, null]] as const) {
+  it('14: sniper L1 head on a fresh helmet_4: hp 30 (helmet cap), helmet 3.2; L4: hp 30, helmet destroyed', () => {
+    for (const [level, hp, helmet] of [[1, 30, 3.2], [4, 30, null]] as const) {
       const d = duel('sniper', 10, level);
       d.tp.helmet = { tier: 4, durability: B.items.helmet_4.durability };
       const ev = click(d.w, d.s, d.at(HEAD_Y));
@@ -95,11 +95,11 @@ describe('armor.md M2c (tier 4)', () => {
     expect(reasons).toContain('betterArmor');
   });
 
-  it('16: rifle L1 body hits on a fresh vest_4 at 10 m: hp 10 after 10 hits, the 11th kills', () => {
+  it('16: rifle L1 body hits on a fresh vest_4 at 10 m: hp 16 after 8 hits, the 9th kills', () => {
     const d = duel('rifle', 10);
     d.tp.vest = { tier: 4, durability: B.items.vest_4.durability };
-    for (let i = 0; i < 10; i++) click(d.w, d.s, d.at(BODY_Y));
-    expect(d.tp.hp).toBeCloseTo(10, 6);
+    for (let i = 0; i < 8; i++) click(d.w, d.s, d.at(BODY_Y));
+    expect(d.tp.hp).toBeCloseTo(16, 6);
     expect(d.tp.alive).toBe(true);
     click(d.w, d.s, d.at(BODY_Y));
     expect(d.tp.alive).toBe(false);
@@ -184,7 +184,7 @@ describe('loot.md M2c and armor.md 18 (10,000 rolls, merged per-map balances)', 
 });
 
 describe('combat.md M2c', () => {
-  it('24: revolver: 3 body hits kill, 2 headshots kill; mag 6, reload 2600 ms; at 60 m+ a body hit deals 22.8', () => {
+  it('24: revolver: 3 body hits kill, 2 headshots kill; mag 6, reload 2600 ms; at 60 m+ a body hit deals 27.6', () => {
     const d = duel('revolver', 10);
     click(d.w, d.s, d.at(BODY_Y));
     click(d.w, d.s, d.at(BODY_Y));
@@ -200,14 +200,14 @@ describe('combat.md M2c', () => {
     expect(B.weapons.revolver.reloadMs).toBe(2600);
     const far = duel('revolver', 70);
     const dmg = ofType(click(far.w, far.s, far.at(BODY_Y)), 'damage')[0]!;
-    expect(dmg.amount).toBeCloseTo(22.8, 6);
+    expect(dmg.amount).toBeCloseTo(27.6, 6);
   });
 
-  it('25: double barrel: one barrel per click (>= 250 ms apart); 1 m full pellets = 120 (dead); two barrels kill a fresh vest_4; reload refills 2 in 2800 ms', () => {
+  it('25: double barrel: one barrel per click (>= 250 ms apart); 1 m full pellets = 140 (dead); two barrels kill a fresh vest_4; reload refills 2 in 2800 ms', () => {
     const d = duel('dbshotgun', 1);
     const ev = click(d.w, d.s, d.at(BODY_Y));
     expect(ofType(ev, 'shot')).toHaveLength(1);
-    expect(ofType(ev, 'damage').reduce((a, e) => a + e.amount, 0)).toBeCloseTo(120, 6);
+    expect(ofType(ev, 'damage').reduce((a, e) => a + e.amount, 0)).toBeCloseTo(140, 6);
     expect(d.tp.alive).toBe(false);
     expect(d.sp.inv.slots[0]!.mag).toBe(1);
     // Two barrels on a fresh vest_4.
@@ -459,21 +459,13 @@ describe('levels.md 12 (snapshot)', () => {
 });
 
 describe('levels.md 14: L4 design invariants on the shipped balance', () => {
-  it('sniper body, sniper head through a fresh helmet_4, DMR double body, pump all pellets, RPG direct + blast through a fresh vest_3: all < maxHp at L4', () => {
+  it('sniper: body < maxHp at every level, L4 unchanged by the damage pass (96), helmeted head capped < maxHp; RPG blast scales with level', () => {
     const max = B.player.maxHp;
-    const sn = effectiveWeapon(B, 'sniper', 4);
-    expect(sn.damage).toBeLessThan(max);
-    const head = sn.damage * sn.headshotMultiplier;
-    const h4 = B.items.helmet_4;
-    expect(head - Math.min(h4.durability, head * h4.absorbFraction)).toBeLessThan(max);
-    expect(2 * effectiveWeapon(B, 'dmr', 4).damage).toBeLessThan(max);
-    const pump = effectiveWeapon(B, 'shotgun', 4);
-    expect(pump.pellets * pump.damage).toBeLessThan(max);
-    const rpg = effectiveWeapon(B, 'rpg', 4);
-    const total = rpg.damage + rocketBlastMaxDamage(B, 4);
-    const v3 = B.items.vest_3;
-    // Impact and blast each meet the vest in turn (armor.md): the vest absorbs at most its durability overall.
-    expect(total - Math.min(v3.durability, total * v3.absorbFraction)).toBeLessThan(max);
+    for (const lv of [1, 2, 3, 4] as const) expect(effectiveWeapon(B, 'sniper', lv).damage).toBeLessThan(max);
+    expect(effectiveWeapon(B, 'sniper', 4).damage).toBeCloseTo(96, 9);
+    expect(B.combat.helmetHeadshotCap.weapons).toContain('sniper');
+    expect(B.combat.helmetHeadshotCap.maxHpLoss).toBeLessThan(max);
+    expect(rocketBlastMaxDamage(B, 4)).toBeGreaterThan(rocketBlastMaxDamage(B, 1));
   });
 });
 

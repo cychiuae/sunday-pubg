@@ -4,12 +4,14 @@
  *
  * Level colours are the "heat ladder" (Breezy, Warm, Hot, Scorcher). They are ALWAYS paired with a numeral or pips.
  *
- * Per-level model rule (Addendum 2, docs/art/M2c.md §15), applied by `levelDressPieces` to every levelled weapon:
- *   L1 makeshift  worn: family colour dulled toward driftwood, 2 tape wraps, a frayed cord loop
+ * Per-level model rule (Addendum 2 + Addendum 4, docs/art/M2c.md §15 / §17). Every level is its own BODY (bespoke
+ * per weapon, `WeaponDesign.levels` in weapons.ts / melee.ts). On top of that body, `levelDressPieces` adds the small
+ * shared "level language" that is the same on every weapon:
+ *   L1 salvaged   family colour dulled toward driftwood, 2 tape wraps, a frayed cord loop
  *   L2 standard   the clean M2b model (no extras)
- *   L3 upgraded   + muzzle device / blade guard, + ribbed rubber grip wrap
- *   L4 sleek      L3 + a swept fin, chrome side trims and a star badge; family colour a touch brighter
- * Anchors never move between levels (muzzle, sight eye, rail, hand points); extras stay inside the weapon's length.
+ *   L3 upgraded   ribbed rubber grip wrap (+ a muzzle device where the weapon lists one)
+ *   L4 premium    chrome side trims and a star badge (+ a swept fin where the weapon lists one); colour a touch brighter
+ * Anchors never move between levels (muzzle, sight eye, rail, hand points); extras stay within ±10 % of the length.
  */
 import * as THREE from 'three';
 import type { ItemLevel } from '../../shared/types';
@@ -89,9 +91,9 @@ export interface LevelDress {
   wraps?: CollarSpec[];
   /** L1: frayed cord loop hanging from this point (stock end / pommel). */
   loop?: V3;
-  /** L3+: muzzle device (round): centre, radius and length. Must end behind the toy tip / muzzle. */
+  /** L3: muzzle device (round): centre, radius and length. Must end behind the toy tip / muzzle. */
   brake?: { c: V3; r: number; len: number; /** Y squash (flat blade caps). */ flatY?: number };
-  /** L3+: ribbed rubber grip wrap: a box slightly bigger than the grip, centre c, size, tilt about X. */
+  /** L3: ribbed rubber grip wrap: a box slightly bigger than the grip, centre c, size, tilt about X. */
   grip?: { c: V3; w: number; h: number; d: number; rx: number };
   /** L4: a swept fin under the weapon: centre, length along Z, height (h > 0 hangs down; h < 0 stands up). */
   fin?: { c: V3; len: number; h: number; tilt?: number };
@@ -124,7 +126,7 @@ function starGeometry(r: number): THREE.BufferGeometry {
   return new THREE.ShapeGeometry(shape).rotateY(-Math.PI / 2);
 }
 
-/** The per-level extra pieces of a weapon (see the module comment for the rule). L2 has none. */
+/** The shared per-level extra pieces of a weapon (see the module comment for the rule). L2 has none. */
 export function levelDressPieces(d: LevelDress, level: ItemLevel | undefined): Piece[] {
   if (level === undefined || level === 2) return [];
   const C = LEVEL_DRESS_COLORS;
@@ -144,8 +146,7 @@ export function levelDressPieces(d: LevelDress, level: ItemLevel | undefined): P
     }
     return P;
   }
-  // L3 and L4
-  if (d.brake) {
+  if (level === 3 && d.brake) {
     const b = d.brake;
     P.push({ geo: new THREE.CylinderGeometry(b.r, b.r, b.len, 8).rotateX(Math.PI / 2), color: palette.gunDark, matrix: xf(b.c, [0, 0, 0], [1, b.flatY ?? 1, 1]) });
     // two port slots per side (decal boxes, no hull)
@@ -153,7 +154,7 @@ export function levelDressPieces(d: LevelDress, level: ItemLevel | undefined): P
       P.push({ geo: new THREE.BoxGeometry(b.r * 2 + 0.004, b.r * 0.7 * (b.flatY ?? 1), b.len * 0.18), color: palette.ink, matrix: xf([b.c[0], b.c[1], b.c[2] + dz]), outline: false });
     }
   }
-  if (d.grip) {
+  if (level === 3 && d.grip) {
     const g = d.grip;
     const tilt = xf(g.c, [g.rx, 0, 0]);
     for (const k of [-1, 0, 1]) {

@@ -373,7 +373,7 @@ describe('ADS and new-gun edge cases', () => {
     expect(speed(a.p)).toBeCloseTo(BALANCE.movement.walkSpeed, 2);
   });
 
-  it('sniper headshot vs helmet_3 at full durability leaves 15 HP and breaks the helmet; the damage event says broken', () => {
+  it('sniper headshot vs helmet_3 at full durability leaves 30 HP (helmet cap) and breaks the helmet; the damage event says broken', () => {
     const { w, ids } = playingWorld(2, { map: BIG(), balance: noSpreadBalance() });
     const [s, t] = ids as [number, number];
     land(w, s, 0, 0);
@@ -387,7 +387,7 @@ describe('ADS and new-gun edge cases', () => {
     const ev = run(w, 2, { [s]: (i) => ({ fire: i === 0, pitch }) });
     const d = ofType(ev, 'damage')[0]!;
     expect(d).toMatchObject({ headshot: true, helmet: { tier: 3, broken: true } });
-    expect(tp.hp).toBeCloseTo(15, 6);
+    expect(tp.hp).toBeCloseTo(BALANCE.player.maxHp - BALANCE.combat.helmetHeadshotCap.maxHpLoss, 6);
     expect(w.snapshotFor(s).players.find((x) => x.id === t)!.helmetTier).toBe(0);
   });
 

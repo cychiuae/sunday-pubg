@@ -18,6 +18,7 @@ import {
   M2C_ICON_SVG, MELEE_SWING_KEYS, meleeHitFraction, meleeSwingPose, PROP_KINDS, SCOPE_2X_RETICLE_SVG, SCOPE_GEOMETRY,
   SCOPE_MODEL_IDS, scopeFitsRail, VIEWMODEL_MELEE_IDS, VIEWMODEL_POSES, WEAPON_SIGHT_TYPES,
 } from './index';
+import { weaponLevelBody } from './weapons';
 
 const tris = (o: THREE.Object3D) => ({ colour: countTris(o, false), hull: countTris(o) - countTris(o, false) });
 const LEVELS: readonly (ItemLevel | undefined)[] = [undefined, 1, 2, 3, 4];
@@ -114,6 +115,91 @@ describe('M2c per-level weapon models (Addendum 2)', () => {
     expect(getWeaponGeometry('smg', { level: 3 })).toBe(getWeaponGeometry('smg', { level: 3 }));
     expect(getWeaponGeometry('smg', { level: 3, scope: 'scope_2x' })).not.toBe(getWeaponGeometry('smg', { level: 3 }));
     expect(getWeaponGeometry('smg', { level: 9 })!.level).toBe(4);
+  });
+});
+
+/**
+ * Occupied 1 cm cells of a weapon's projection: 'side' onto ZY (seen from the side), 'top' onto ZX (seen from above).
+ * A cell is filled when its centre lies inside a projected triangle.
+ */
+function silhouette(g: THREE.BufferGeometry, view: 'side' | 'top', cell = 0.01): Set<string> {
+  const P = g.getAttribute('position');
+  const out = new Set<string>();
+  const v = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+  for (let t = 0; t + 2 < P.count; t += 3) {
+    for (let k = 0; k < 3; k++) v[k].fromBufferAttribute(P, t + k);
+    const [a, b, c] = v.map((p) => [p.z, view === 'side' ? p.y : p.x]);
+    const area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+    if (Math.abs(area) < 1e-12) continue;
+    const i0 = Math.floor(Math.min(a[0], b[0], c[0]) / cell), i1 = Math.ceil(Math.max(a[0], b[0], c[0]) / cell);
+    const j0 = Math.floor(Math.min(a[1], b[1], c[1]) / cell), j1 = Math.ceil(Math.max(a[1], b[1], c[1]) / cell);
+    for (let i = i0; i <= i1; i++) {
+      for (let j = j0; j <= j1; j++) {
+        const px = (i + 0.5) * cell, py = (j + 0.5) * cell;
+        const w0 = ((b[0] - px) * (c[1] - py) - (c[0] - px) * (b[1] - py)) / area;
+        const w1 = ((c[0] - px) * (a[1] - py) - (a[0] - px) * (c[1] - py)) / area;
+        if (w0 >= 0 && w1 >= 0 && w0 + w1 <= 1) out.add(`${i},${j}`);
+      }
+    }
+  }
+  return out;
+}
+/** Fraction of cells that differ between two silhouettes (symmetric difference / union). */
+const silDiff = (a: Set<string>, b: Set<string>) => {
+  let x = 0;
+  for (const k of a) if (!b.has(k)) x++;
+  for (const k of b) if (!a.has(k)) x++;
+  return x / new Set([...a, ...b]).size;
+};
+const countVerts = (g: THREE.BufferGeometry, keep: (p: THREE.Vector3) => boolean) => {
+  const P = g.getAttribute('position'), p = new THREE.Vector3();
+  let n = 0;
+  for (let i = 0; i < P.count; i++) if (keep(p.fromBufferAttribute(P, i))) n++;
+  return n;
+};
+
+describe('Addendum 4: every item level is its own model (silhouette, not just colour)', () => {
+  const L4: readonly ItemLevel[] = [1, 2, 3, 4];
+  for (const id of LEVELLED_WEAPON_IDS) {
+    it(`${id}: L1, L3 and L4 swap in their own parts; L2 is the standard model`, () => {
+      expect(weaponLevelBody(id, 2)).toEqual({ dropped: 0, added: 0 });
+      for (const lv of [1, 3, 4] as const) {
+        const b = weaponLevelBody(id, lv)!;
+        expect(b.added, `${id} L${lv}`).toBeGreaterThanOrEqual(3);
+      }
+      // L1 and L4 rebuild a major part (stock, grip, barrel, blade...), not only add trims
+      expect(weaponLevelBody(id, 1)!.dropped, `${id} L1`).toBeGreaterThanOrEqual(1);
+      expect(weaponLevelBody(id, 4)!.dropped, `${id} L4`).toBeGreaterThanOrEqual(1);
+    });
+    it(`${id}: every pair of levels differs by >= 8 % of its 1 cm side or top silhouette`, () => {
+      const g = L4.map((lv) => getWeaponGeometry(id, { level: lv })!.merged.geometry);
+      const side = g.map((x) => silhouette(x, 'side'));
+      const top = g.map((x) => silhouette(x, 'top'));
+      for (let a = 0; a < 4; a++) {
+        for (let b = a + 1; b < 4; b++) {
+          const d = Math.max(silDiff(side[a], side[b]), silDiff(top[a], top[b]));
+          expect(d, `${id} L${a + 1} vs L${b + 1}`).toBeGreaterThanOrEqual(0.08);
+        }
+        // and the vertex count (part list) differs too
+        for (let b = a + 1; b < 4; b++) expect(g[a].getAttribute('position').count, `${id} L${a + 1}/L${b + 1}`).not.toBe(g[b].getAttribute('position').count);
+      }
+    });
+  }
+  it('no level part rises into the sight line or above the rail inside the scope footprint', () => {
+    for (const id of LEVELLED_WEAPON_IDS) {
+      const ref = getWeaponGeometry(id, { level: 2 })!;
+      if (!ref.sight || !ref.muzzle) continue; // melee
+      const s = ref.sight, mz = ref.muzzle[2];
+      const nearLine = (p: THREE.Vector3) => p.z >= mz && p.z <= s.eye[2] && p.y > s.eye[1] - 0.006;
+      const r = ref.rail;
+      const overRail = (p: THREE.Vector3) => !!r && Math.abs(p.z - r.pos[2]) <= r.length / 2 && Math.abs(p.x) <= 0.05 && p.y > r.pos[1] + 0.008; // 8 mm: the L1 tape wrap
+      const n0 = countVerts(ref.merged.geometry, nearLine), r0 = countVerts(ref.merged.geometry, overRail);
+      for (const lv of [1, 3, 4] as const) {
+        const g = getWeaponGeometry(id, { level: lv })!.merged.geometry;
+        expect(countVerts(g, nearLine), `${id} L${lv} sight line`).toBe(n0); // only the shared sight / optic parts
+        expect(countVerts(g, overRail), `${id} L${lv} rail`).toBe(r0);
+      }
+    }
   });
 });
 

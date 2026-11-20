@@ -169,16 +169,16 @@ Body shots to kill / time to kill at full damage range (full table with headshot
 | Weapon | Sight | Role | No armor | vest_2 | vest_3 |
 |---|---|---|---|---|---|
 | Fists | - | Desperation | 7 / 2.7 s | 11 / 4.5 s | 12 / 4.95 s |
-| Pistol (semi) | iron | Early sidearm | 5 / 1.0 s | 8 / 1.75 s | 9 / 2.0 s |
-| SMG (auto) | iron | Close range, run and gun | 8 / 0.56 s | 12 / 0.88 s | 13 / 0.96 s |
-| Shotgun (pump) | iron | Point-blank burst, 99 max | 2 / 0.9 s | 2 / 0.9 s | 2 / 0.9 s |
-| Rifle (auto) | red dot | All-rounder 10-45 m, needs ADS at range | 6 / 0.75 s | 9 / 1.2 s | 10 / 1.35 s |
-| LMG (auto, M2a) | red dot | Planted suppression, 60 rounds | 6 / 0.6 s | 10 / 1.08 s | 11 / 1.2 s |
-| DMR (semi, M2a) | 4x | Long-range picks | 3 / 0.8 s | 4 / 1.2 s | 5 / 1.6 s |
-| Sniper (bolt, M2a) | 8x | One-shot headshot through helmet 1-2 | 2 / 1.4 s | 2 / 1.4 s | 3 / 2.8 s |
+| Pistol (semi) | iron | Early sidearm | 5 / 1.0 s | 7 / 1.5 s | 8 / 1.75 s |
+| SMG (auto) | iron | Close range, run and gun | 6 / 0.4 s | 10 / 0.72 s | 11 / 0.8 s |
+| Shotgun (pump) | iron | Point-blank burst, 117 max | 1 / 0 s | 2 / 0.9 s | 2 / 0.9 s |
+| Rifle (auto) | red dot | All-rounder 10-45 m, needs ADS at range | 5 / 0.6 s | 7 / 0.9 s | 8 / 1.05 s |
+| LMG (auto, M2a) | red dot | Planted suppression, 60 rounds | 5 / 0.48 s | 8 / 0.84 s | 9 / 0.96 s |
+| DMR (semi, M2a) | 4x | Long-range picks | 2 / 0.4 s | 4 / 1.2 s | 4 / 1.2 s |
+| Sniper (bolt, M2a) | 8x | One-shot headshot on a bare head; any helmet caps it at 70 HP | 2 / 1.4 s | 2 / 1.4 s | 2 / 1.4 s |
 
 Counterplay: the SMG falls off past 12 m; the rifle and LMG are inaccurate on the move; the shotgun is useless past ~15 m; the DMR and
-sniper are clumsy up close, slow to aim and show a **scope glint** while aimed. A sniper body shot never kills a full-HP player.
+sniper are clumsy up close, slow to aim and show a **scope glint** while aimed. A sniper body shot never kills a full-HP player, and a sniper headshot never kills a full-HP player who wears a helmet (the helmet breaks or is badly damaged instead; `combat.helmetHeadshotCap`). Damage pass 2026-11: every weapon does about 20% more damage than at M2c lock, except the L4 sniper, which keeps 96 / 192.
 Every shot has a tracer, so the target always knows where fire is coming from.
 
 ### 7.3b Aim down sights (M2a, `systems/combat.md` "ADS")
@@ -211,7 +211,7 @@ and zooms by `adsZoom`. No ADS while reloading, healing, swapping, dropping or c
 ### 7.7 Bigger arsenal (M2c)
 - **Item levels L1-L4** (`systems/levels.md`) on every weapon except fists, and armor tiers 1-4 (`vest_4`, `helmet_4`, epic only). L1 = the
   numbers above. Guns: damage x1.08 / 1.16 / 1.25 and reload x0.95 / 0.90 / 0.85; melee: damage as guns and a faster swing. The pump,
-  DMR, sniper and RPG have overrides so no new one-shot appears. Result: about 25-35% faster TTK at L4 on the same gun. Loot spot tier rolls the
+  DMR, sniper and RPG have overrides (since the damage pass the sniper's L4 stays at the pre-pass 96 and L1-L3 sit between 88 and 93.3). Result: about 25-35% faster TTK at L4 on the same gun. Loot spot tier rolls the
   level (common spots never give L4). One colour + numeral/pips scale shared by every HUD element, the ground glow and the weapon models.
   Picking up a higher level of a gun you carry swaps that copy.
 - **New guns**: revolver (heavy, 6 rounds, 3 body / 2 head) and double barrel (2 shells, 120 per barrel at point blank, useless past 8 m).
@@ -282,7 +282,8 @@ should usually get 1-2 minutes before a real fight, and the field should thin ou
    `zoneEntryFraction` (minus up to `zoneEntrySpread`, per bot) of its radius from the centre, so bots spread along the edge instead of
    stacking in the middle. "Safe" means at least `zoneSafetyMargin` m inside the edge. This overrides looting.
 2b. **Flee grenade (M2a)**: a visible live grenade within `bots.grenade.fleeRadius`: run directly away from it.
-3. **Retreat**: below the personality's `retreatBelowHp`, carrying a heal and facing an enemy, break off for `retreatMs` and heal.
+3. **Retreat**: below the personality's `retreatBelowHp`, carrying a heal and facing an enemy, break off for `retreatMs` and heal
+   (behind cover when there is some, see "Tactics" below; cover for reloads and for fire it cannot answer sits at the same level).
 4. **Engage**: a visible enemy (within `visionRange` and `fovDeg`, with line of sight) inside the current engagement range, or a recent attacker.
    A bot below `healBeforeFightBelowHp` that carries a heal does not start new fights. Gunfire within `hearingRange` turns the bot toward it.
    Wait `reactionMs` x personality, then fire bursts of `fireBurstMs` with `burstPauseMs` pauses at **chest height**, with error `aimErrorDeg`
@@ -316,6 +317,38 @@ Bots never cheat on information (no wallhacks) and never aim at heads deliberate
   bot sight tests treat clouds as opaque.
 - **Scopes**: picked up only to auto-mount; a mounted 2x/4x/8x stretches the gun's range band.
 - Pacing: `bots.eagernessCurve` 1.5 -> 1.75 to keep the median at 6-7 min with slightly faster M2c fights (`systems/combat.md` "Pacing").
+
+**Tactics** (numbers in `bots.tactics`, `personalities.*.investigateChance`; plumbing in `BOT_TACTICS_AI` in `src/shared/sim/bots.ts`).
+Bots play smarter, not more accurately: aim error, reaction time, bursts and chest aim are unchanged, so the difficulty note still holds
+(a scripted strafing, head-aiming human with the same gun wins about 80% of open or rock-strewn 1v1s, as before).
+- **Cover**: a spot behind a collider (within `coverSearchRadius`, the `coverMaxCandidates` nearest, at least crouch-high and a player wide)
+  that hides the bot from the threat's eye, standing or crouched. It prefers short walks that do not move toward the threat
+  (`coverTowardThreatPenalty`). Bots take cover for three reasons:
+  1. **Heal**: the Retreat trigger (state 3) runs to cover, crouches behind low cover, and heals once hidden. If no spot is found, the old
+     run-away is the fallback, and the bot keeps looking on the way.
+  2. **Reload**: a mid-fight reload with at least `coverReloadMinMs` left goes to cover the bot can reach before the reload ends, when it
+     has no loaded second gun to swap to.
+  3. **Under fire**: hit by an enemy it cannot answer (out of sight, or beyond its best fire range: a sniper vs an SMG), it breaks line of
+     sight for `coverHoldMs` (then `coverCooldownMs`) instead of charging across open ground.
+  A cover ends when its reason is over, after `coverMaxMs`, or when the threat can see the spot (it looks for another spot first). In cover
+  the bot pre-aims where the threat was; when it leaves, it peeks back out toward that position.
+- **Range plan**: against the gun in the enemy's hands, the bot compares damage share = its best DPS / (its DPS + the enemy's) at a few
+  distances up to its fire range (and 3/4 of its sight). When another distance is better by `rangeAdvantageMargin`, it closes in or backs off
+  to the nearest distance that gets most of that advantage: a rifle backs off a shotgun to about 15 m, a shotgun closes on a rifle, an SMG
+  closes on a sniper. It never backs out of the tide circle. Mirror matches keep the weapon's preferred range (`weaponPrefs` band middle).
+- **Reloads**: with the enemy in sight within `swapInsteadOfReloadRange`, an empty or reloading gun gives way to a loaded second gun. With
+  the target out of sight, the bot reloads below `hiddenReloadFraction` of the mag. Between fights it tops up both guns.
+- **Pressure**: a visible enemy who is reloading or healing (both visible animations) is pushed into the held gun's full-damage range. A
+  target that breaks line of sight within `pushWindowMs` of the bot hitting it is chased at a sprint. Out of sight, the bot pre-aims the
+  target's last known chest.
+- **Evasion**: when hit while fighting, flip strafe direction with chance `hitJukeChance`.
+- **Investigate**: gunfire within `hearingRange` (rolled once per `investigateMemoryMs`, at eagerness >= `investigateMinEagerness`, with the
+  personality's `investigateChance`: aggressive 0.6, balanced 0.3, cautious 0) sends an armed bot with nothing to loot toward the shot. It
+  stops at `investigateStandoffFraction` x its best fire range, and only if the shot is inside the safe circle (third-partying).
+- Information rule: bots use only what a player could know: the enemy's held weapon and reload/heal animations, their own hit markers,
+  damage direction and heard shots.
+- Cost: at most `BOT_TACTICS_AI.coverSearchesPerTick` (2) cover searches per tick across all bots and one per bot per
+  `coverSearchCooldownMs`, each at most 2 sight rays per candidate. The range plan is closed-form DPS math once per decision.
 
 ## 11. Feedback requirements (summary for UI, audio, VFX)
 - **Shots**: muzzle flash, tracer from muzzle toward the hit point, positional shot sound per weapon type.

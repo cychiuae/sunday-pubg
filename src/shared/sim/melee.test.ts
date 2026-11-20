@@ -47,11 +47,11 @@ function hold(w: DebugWorld, a: number, ticks: number, pitch: number, fire = tru
 }
 
 describe('melee (melee.md acceptance)', () => {
-  it('1: knife, click at t = 0 hits for 34 at 100 ms (+-1 tick); holding: 100, 450, 800 ms, the third kills', () => {
+  it('1: knife, click at t = 0 hits for 41 at 100 ms (+-1 tick); holding: 100, 450, 800 ms, the third kills', () => {
     const d = duel('knife', 1.5);
     const r = hold(d.w, d.a, 30, chestPitch(1.5));
     const dmg = damages(r.ev);
-    expect(dmg.map((e) => e.amount)).toEqual([34, 34, 34]);
+    expect(dmg.map((e) => e.amount)).toEqual([41, 41, 41]);
     expect(dmg.every((e) => e.cause === 'melee' && e.weapon === 'knife' && e.weaponLevel === 1)).toBe(true);
     const expected = [100, 450, 800];
     r.at.forEach((t, i) => expect(Math.abs(t - expected[i]!)).toBeLessThanOrEqual(TICK + 1e-6));
@@ -64,27 +64,27 @@ describe('melee (melee.md acceptance)', () => {
     expect(swings[0]).toMatchObject({ weapon: 'knife', level: 1, cycleMs: 350 });
   });
 
-  it('2: machete L1 vs vest_2: 3 hits kill; after 2: hp 37.6, vest 13.4', () => {
+  it('2: machete L1 vs vest_2: 3 hits kill; after 2: hp 25.6, vest 5.4', () => {
     const d = duel('machete', 1.5);
     d.tp.vest = { tier: 2, durability: 55 };
     const p = chestPitch(1.5);
     hold(d.w, d.a, Math.ceil(660 / TICK) + 6, p);
     hold(d.w, d.a, 2, p, false);
-    expect(d.tp.hp).toBeCloseTo(37.6, 6);
-    expect(d.tp.vest!.durability).toBeCloseTo(13.4, 6);
+    expect(d.tp.hp).toBeCloseTo(25.6, 6);
+    expect(d.tp.vest!.durability).toBeCloseTo(5.4, 6);
     hold(d.w, d.a, 30, p);
     expect(d.tp.alive).toBe(false);
   });
 
-  it('3: paddle centre ray on the head: 117 kills unarmored; helmet_1 leaves 13', () => {
+  it('3: paddle centre ray on the head: 141 kills unarmored; helmet_2 leaves 4', () => {
     for (const helmet of [false, true]) {
       const d = duel('paddle', 1.5);
-      if (helmet) d.tp.helmet = { tier: 1, durability: 30 };
+      if (helmet) d.tp.helmet = { tier: 2, durability: 45 };
       const headPitch = Math.atan2(B.movement.stances.stand.height * 0.93 - EYE, 1.5);
       const r = hold(d.w, d.a, 12, headPitch);
       const hit = damages(r.ev)[0]!;
-      expect(hit).toMatchObject({ headshot: true, amount: 117 });
-      if (helmet) expect(d.tp.hp).toBeCloseTo(13, 6);
+      expect(hit).toMatchObject({ headshot: true, amount: 141 });
+      if (helmet) expect(d.tp.hp).toBeCloseTo(4, 6);
       else expect(d.tp.alive).toBe(false);
     }
   });
@@ -112,17 +112,17 @@ describe('melee (melee.md acceptance)', () => {
     expect(Math.hypot(q.tp.move.vel.x, q.tp.move.vel.z)).toBeCloseTo(7 * k, 6);
   });
 
-  it('5: sweep: axis 0.7 m off: knife hits body 34; 0.8 m off: knife misses, machete hits 52; never a headshot', () => {
+  it('5: sweep: axis 0.7 m off: knife hits body 41; 0.8 m off: knife misses, machete hits 62; never a headshot', () => {
     const level = 0; // aim level
     const k = duel('knife', 1.6, { side: 0.7 });
     k.tp.hp = 1e6;
     const r1 = hold(k.w, k.a, 6, level);
-    expect(damages(r1.ev).map((e) => [e.amount, e.headshot])).toEqual([[34, false]]);
+    expect(damages(r1.ev).map((e) => [e.amount, e.headshot])).toEqual([[41, false]]);
     const k2 = duel('knife', 1.6, { side: 0.8 });
     expect(damages(hold(k2.w, k2.a, 6, level).ev)).toEqual([]);
     const m = duel('machete', 1.6, { side: 0.8 });
     m.tp.hp = 1e6;
-    expect(damages(hold(m.w, m.a, 10, level).ev).map((e) => [e.amount, e.headshot])).toEqual([[52, false]]);
+    expect(damages(hold(m.w, m.a, 10, level).ev).map((e) => [e.amount, e.headshot])).toEqual([[62, false]]);
   });
 
   it('6: reach: hitbox 2.1 m from the eye is outside knife reach (2.0) and inside machete reach (2.3)', () => {
@@ -181,12 +181,12 @@ describe('melee (melee.md acceptance)', () => {
     expect(d.w.debugLoot().filter((l) => l.item === 'paddle')).toHaveLength(1);
   });
 
-  it('12: knife L4: cycle 280 ms, hit frame 80 ms; a click at 0 lands at 80 ms (+-1 tick) for 42.5', () => {
+  it('12: knife L4: cycle 280 ms, hit frame 80 ms; a click at 0 lands at 80 ms (+-1 tick) for 51.25', () => {
     const d = duel('knife', 1.5, { level: 4 });
     d.tp.hp = 1e6;
     const r = hold(d.w, d.a, 12, chestPitch(1.5));
     const first = damages(r.ev)[0]!;
-    expect(first.amount).toBeCloseTo(42.5, 9);
+    expect(first.amount).toBeCloseTo(51.25, 9);
     expect(first.weaponLevel).toBe(4);
     expect(Math.abs(r.at[0]! - 80)).toBeLessThanOrEqual(TICK + 1e-6);
     expect(ofType(r.ev, 'meleeSwing')[0]).toMatchObject({ cycleMs: 280 });

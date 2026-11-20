@@ -268,24 +268,27 @@ Euler XYZ). `applyViewmodelPose(rig, id, adsAmount)` sets everything. For every 
 glTF hero characters, dusk/night palettes, emotes, cosmetics, attachments (scopes as pickups, M2b+).
 
 ## M2c (built A1; spec `docs/art/M2c.md`)
-Tris = colour + hull at scale 1. Per-level weapon models (Addendum 2): columns are the model with no level (M2b look, no
-collar) and levels 1–4 (collar + pips + per-level dressing). "Worst" = L4 + the heaviest balance-compatible scope.
-Length (Z) stays within ±10 % across levels (tested). Held: 2 draw calls (+1 red-dot lens).
-| Weapon | no level | L1 | L2 | L3 | L4 | Worst (L4 + scope) | Length |
+Tris = colour + hull at scale 1. Per-level weapon models (Addendum 2, rebuilt by Addendum 4 = M2c.md §17: each level
+has its own body, so levels differ in silhouette). Columns are the model with no level (M2b look, no collar) and
+levels 1–4 (own body + collar + pips + the shared level extras). "Worst" = the level + scope with the most tris
+(balance-compatible scopes). Length (Z) stays within ±10 % across levels (tested). Held: 2 draw calls (+1 red-dot lens).
+| Weapon | no level | L1 salvaged | L2 standard | L3 upgraded | L4 premium | Worst | Length L1–L4 |
 |---|---|---|---|---|---|---|---|
-| pistol | 104 + 56 | 200 + 92 | 140 + 68 | 244 + 100 | 288 + 112 | 368 + 140 | 0.28 m |
-| smg | 160 + 112 | 256 + 148 | 196 + 124 | 300 + 156 | 344 + 168 | 476 + 292 | 0.59 m |
-| shotgun | 192 + 144 | 308 + 200 | 228 + 156 | 332 + 188 | 376 + 200 | 456 + 228 | 1.01 m |
-| rifle (red dot) | 240 + 152 | 336 + 188 | 276 + 164 | 380 + 196 | 424 + 208 | 660 + 412 | 0.99 m |
-| lmg (red dot) | 420 + 212 | 536 + 268 | 456 + 224 | 560 + 256 | 604 + 268 | 840 + 472 | 1.12 m |
-| dmr (4x) | 500 + 368 | 596 + 404 | 536 + 380 | 640 + 412 | 684 + 424 | 684 + 424 | 1.11 m |
-| sniper (8x) | 596 + 440 | 692 + 476 | 632 + 452 | 736 + 484 | 780 + 496 | 780 + 496 | 1.33 m |
-| revolver | 300 + 200 | 444 + 284 | 364 + 240 | 468 + 272 | 512 + 284 | 592 + 312 | 0.32 m |
-| dbshotgun | 368 + 268 | 464 + 304 | 404 + 280 | 508 + 312 | 552 + 324 | 552 + 324 | 0.97 m |
-| rpg | 512 + 300 | 676 + 404 | 576 + 340 | 680 + 372 | 724 + 384 | 724 + 384 | 1.00 m |
-| knife | 164 + 140 | 328 + 244 | 228 + 180 | 332 + 212 | 376 + 224 | – | 0.31 m |
-| machete | 248 + 56 | 392 + 140 | 312 + 96 | 416 + 128 | 460 + 140 | – | 0.61 m |
-| paddle | 216 + 216 | 380 + 320 | 280 + 256 | 384 + 288 | 428 + 300 | – | 1.35 m |
+| pistol | 104 + 56 | 272 + 140 | 140 + 68 | 292 + 104 | 268 + 116 | 352 + 168 (L1 + red dot) | 0.28–0.30 m |
+| smg | 160 + 112 | 304 + 172 | 196 + 124 | 296 + 140 | 376 + 168 | 508 + 292 (L4 + 2x) | 0.59–0.62 m |
+| shotgun | 192 + 144 | 324 + 192 | 228 + 156 | 452 + 248 | 332 + 172 | 532 + 276 (L3 + red dot) | 0.99–1.03 m |
+| rifle (red dot) | 240 + 152 | 360 + 200 | 276 + 164 | 496 + 264 | 408 + 208 | 732 + 468 (L3 + 4x) | 0.99–1.04 m |
+| lmg (red dot) | 420 + 212 | 416 + 232 | 456 + 224 | 580 + 296 | 572 + 248 | 816 + 500 (L3 + 4x) | 1.11–1.15 m |
+| dmr (4x) | 500 + 368 | 692 + 428 | 536 + 380 | 732 + 468 | 628 + 416 | 732 + 468 (L3) | 1.10–1.14 m |
+| sniper (8x) | 596 + 440 | 680 + 476 | 632 + 452 | 748 + 508 | 700 + 476 | 748 + 508 (L3) | 1.30–1.34 m |
+| revolver | 300 + 200 | 444 + 260 | 364 + 240 | 516 + 284 | 480 + 240 | 596 + 312 (L3 + red dot) | 0.32–0.34 m |
+| dbshotgun | 368 + 268 | 464 + 280 | 404 + 280 | 608 + 340 | 632 + 312 | 608 + 340 (L3) | 0.97–1.00 m |
+| rpg | 512 + 300 | 696 + 360 | 576 + 340 | 688 + 372 | 616 + 336 | 688 + 372 (L3) | 1.00 m |
+| knife | 164 + 140 | 276 + 168 | 228 + 180 | 244 + 116 | 304 + 136 | – | 0.31–0.33 m |
+| machete | 248 + 56 | 288 + 120 | 312 + 96 | 456 + 120 | 340 + 116 | – | 0.60–0.62 m |
+| paddle | 216 + 216 | 300 + 216 | 280 + 256 | 520 + 424 | 404 + 304 | – | 1.35–1.43 m |
+What each level body looks like, per weapon: M2c.md §17.2. Status: done (Addendum 4), tested in `m2c.test.ts`
+("Addendum 4": own parts per level, ≥ 8 % silhouette difference between any two levels, sight line and rail clear).
 Budget (tested): worst ≤ 860 colour / ≤ 520 hull.
 
 **Rails and scopes** (`scopes.ts`, `SCOPE_GEOMETRY`; eye = rail + scope.eye). Rails: pistol (0, 0.095, −0.04) 0.10;

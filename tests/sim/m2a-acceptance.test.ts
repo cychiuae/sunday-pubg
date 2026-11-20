@@ -45,31 +45,31 @@ function click(w: DebugWorld, id: number, pitch: number): SimEvent[] {
 }
 
 describe('combat.md gaps', () => {
-  it('AT2: a standing target hit at y = 0.7 is a body hit (19); at y = 1.0 a headshot (34.2)', () => {
+  it('AT2: a standing target hit at y = 0.7 is a body hit (23); at y = 1.0 a headshot (41.4)', () => {
     const d = duel(10, 'rifle');
     const body = ofType(click(d.w, d.s, d.at(0.7)), 'damage')[0]!;
     expect(body.headshot).toBe(false);
-    expect(d.tp.hp).toBeCloseTo(100 - 19, 6);
+    expect(d.tp.hp).toBeCloseTo(100 - 23, 6);
     const e = duel(10, 'rifle');
     const head = ofType(click(e.w, e.s, e.at(1.0)), 'damage')[0]!;
     expect(head.headshot).toBe(true);
-    expect(e.tp.hp).toBeCloseTo(100 - 34.2, 6);
+    expect(e.tp.hp).toBeCloseTo(100 - 41.4, 6);
   });
 
-  it('AT3: three rifle headshots (no armor, 10 m) kill; two leave 31.6', () => {
+  it('AT3: three rifle headshots (no armor, 10 m) kill; two leave 17.2', () => {
     const d = duel(10, 'rifle');
     click(d.w, d.s, d.at(1.0));
     click(d.w, d.s, d.at(1.0));
-    expect(d.tp.hp).toBeCloseTo(31.6, 6);
+    expect(d.tp.hp).toBeCloseTo(17.2, 6);
     expect(d.tp.alive).toBe(true);
     const ev = click(d.w, d.s, d.at(1.0));
     expect(d.tp.alive).toBe(false);
     expect(ofType(ev, 'kill')[0]).toMatchObject({ victimId: d.t, killerId: d.s, weapon: 'rifle', headshot: true });
   });
 
-  it('AT5: shotgun 5 head + 4 body pellets vs helmet_2 + vest_2: helmet 33, vest 17.6, HP loss 75.9, one event', () => {
+  it('AT5: shotgun 5 head + 4 body pellets vs helmet_2 + vest_2: helmet 39, vest 20.8, HP loss 89.7, one event', () => {
     // Real spread (7 deg) aimed at the neck line at 3 m. The pellet split is random (seeded), so we shoot until a
-    // 5/4 split lands (raw 5 x 16.5 + 4 x 11 = 126.5), and check the armor arithmetic on every mixed event on the way.
+    // 5/4 split lands (raw 5 x 19.5 + 4 x 13 = 149.5), and check the armor arithmetic on every mixed event on the way.
     const d = duel(3, 'shotgun', BALANCE);
     const hb = BALANCE.items.helmet_2;
     const vb = BALANCE.items.vest_2;
@@ -92,10 +92,10 @@ describe('combat.md gaps', () => {
       expect(hp0 - d.tp.hp).toBeCloseTo(e.amount - e.helmet.absorbed - e.vest.absorbed, 6);
       expect(e.helmet.absorbed).toBeLessThanOrEqual(hb.durability + 1e-9);
       expect(e.vest.absorbed).toBeLessThanOrEqual(vb.durability + 1e-9);
-      if (Math.abs(e.amount - 126.5) < 1e-6 && Math.abs(e.helmet.absorbed - 33) < 1e-6) {
+      if (Math.abs(e.amount - 149.5) < 1e-6 && Math.abs(e.helmet.absorbed - 39) < 1e-6) {
         exact++;
-        expect(e.vest.absorbed).toBeCloseTo(17.6, 6);
-        expect(hp0 - d.tp.hp).toBeCloseTo(75.9, 6);
+        expect(e.vest.absorbed).toBeCloseTo(20.8, 6);
+        expect(hp0 - d.tp.hp).toBeCloseTo(89.7, 6);
       }
     }
     expect(mixed, 'mixed head+body shotgun events seen').toBeGreaterThan(0);

@@ -814,7 +814,9 @@ while the canopy is open; in freefall the arms spread out to the screen edges (h
 - **Scopes** (§14 of M2c.md): every gun has a `rail` anchor, and every scope has one frame, so `eye = rail + scope.eye` and
   ADS lines up for any pair. There is a new **2x overlay** ("sunrise ring", lens 46vmin) next to the §17 4x/8x overlays.
 - **Layout variety**: island and office prop kits (sim vs decor), `variant` colourways, and look presets (§3 is `noon`).
-- **A model per item level** (Addendum 2, M2c.md §15): L1 makeshift (dulled, taped, cord loop), L2 standard, L3
-  upgraded (muzzle device, ribbed grip), L4 sleek (chrome fin and trims, star badge). Anchors identical at every level.
+- **A body per item level** (Addendum 2 + 4, M2c.md §15 and §17): each level has its own silhouette. L1 salvaged
+  (driftwood, bamboo, pipe, crate and cord parts; dulled, taped, cord loop), L2 standard, L3 upgraded (dark polymer
+  rails, shrouds, long or box mags, foregrips, bipods, tube stocks; ribbed grip), L4 premium (smooth family-colour
+  shells, thumbhole / skeleton stocks, chrome and gold, star badge). Anchors identical at every level.
 - **Budgets**: island static props + decor merged per chunk (2 calls per chunk); office ≤ 150 calls in the worst view.
   Ground loot: batch item meshes by material (BatchedMesh), not by (id, level, scope) (M2c.md §15.4).

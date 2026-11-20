@@ -165,16 +165,22 @@ describe('validateBalance', () => {
     }
   });
 
-  it('sniper: body never kills, head kills through helmet_2, not through a fresh helmet_3', () => {
+  it('sniper: body never kills, a bare head kills, a helmeted head is capped below maxHp', () => {
     const b = validateBalance(clone());
     const s = b.weapons.sniper;
-    const H = s.damage * s.headshotMultiplier;
-    const loss = (dur: number, f: number): number => H - Math.min(dur, H * f);
-    const h2 = b.items.helmet_2;
-    const h3 = b.items.helmet_3;
     expect(s.damage).toBeLessThan(b.player.maxHp);
-    expect(loss(h2.durability, h2.absorbFraction)).toBeGreaterThanOrEqual(b.player.maxHp);
-    expect(loss(h3.durability, h3.absorbFraction)).toBeLessThan(b.player.maxHp);
+    expect(s.damage * s.headshotMultiplier).toBeGreaterThanOrEqual(b.player.maxHp);
+    expect(b.combat.helmetHeadshotCap.weapons).toContain('sniper');
+    expect(b.combat.helmetHeadshotCap.maxHpLoss).toBeLessThan(b.player.maxHp);
+  });
+
+  it('combat.helmetHeadshotCap is required and checked', () => {
+    const raw = cloneBase() as Record<string, Record<string, unknown>>;
+    raw['combat']!['helmetHeadshotCap'] = { weapons: ['laser'], maxHpLoss: -1 };
+    expect(() => validateBalance(raw)).toThrow(/helmetHeadshotCap\.weapons[\s\S]*helmetHeadshotCap\.maxHpLoss/);
+    const gone = cloneBase() as Record<string, Record<string, unknown>>;
+    delete gone['combat']!['helmetHeadshotCap'];
+    expect(() => validateBalance(gone)).toThrow(/combat\.helmetHeadshotCap/);
   });
 });
 

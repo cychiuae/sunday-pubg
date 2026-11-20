@@ -1,7 +1,12 @@
 /**
  * Bot brains (GDD section 10). A bot produces one PlayerInput per tick that goes through the same World input path as a
- * human's. Bots only use information a player could have: visible enemies (range + FOV + line of sight), gunfire
- * within hearing range, damage direction, the public zone state and the public loot list.
+ * human's. Bots only use information a player could have: visible enemies (range + FOV + line of sight) and what is in
+ * their hands (held weapon, reload / heal animations), their own hit markers, gunfire within hearing range, damage
+ * direction, the public zone state and the public loot list.
+ *
+ * Tactics (GDD 10 "Tactics", balance.bots.tactics): cover for heals, reloads and fire the bot cannot answer; a range
+ * plan against the enemy's held weapon; swap-instead-of-reload, hidden and idle reloads; pushing reloading / healing /
+ * just-hit targets; pre-aim of the last known position; a strafe juke when hit; investigating heard fights.
  *
  * Gameplay-facing tuning comes from balance.bots (botTuning adds the M1-fix pacing keys with defaults). BOT_AI holds
  * steering/AI plumbing (turn rates, probe distances), overridable from balance.bots.ai.
@@ -41,7 +46,15 @@ import type {
   ZoneState,
 } from '../types';
 import { BOT_PERSONALITY_IDS, FISTS_SLOT, GRENADE_SLOT, isArmorId, isM2cGunId, isMeleeId, isScopeId } from '../types';
-import { forEachColliderNear, lineOfSight, overlapsCircle, raycastColliders, raycastStatic } from './colliders';
+import {
+  boundingRadius,
+  type Collider,
+  forEachColliderNear,
+  lineOfSight,
+  overlapsCircle,
+  raycastColliders,
+  raycastStatic,
+} from './colliders';
 import { adsProgressOf, expectedBodyDps } from './combat';
 import { type GrenadeBody, stepGrenade, throwLaunch, throwSpeedFor } from './grenade';
 import { activeWeapon, armorAccepted, chooseHeal, isAmmo, isGrenade, isGun, isHeal, upgradeSlotFor } from './inventory';
@@ -82,6 +95,39 @@ export const BOT_M2C_AI = {
    * far inside the safe circle, and then ignores loot within this distance of its edge (no shuttling on the line).
    */
   zoneHysteresisMetres: 3,
+} as const;
+
+/** Tactics plumbing (geometry tolerances and cost caps, not design tuning; the design numbers are in bots.tactics). */
+export const BOT_TACTICS_AI = {
+  /** At most this many cover searches per tick across all bots (each is up to 2 x coverMaxCandidates sight rays). */
+  coverSearchesPerTick: 2,
+  /** Gap between the collider face and the player's radius at a cover spot, m. */
+  coverClearance: 0.15,
+  /** A collider is cover only when its half-width across the threat line is at least player.radius x this. */
+  coverMinHalfWidthFactor: 1,
+  /** Island: the spot's ground must be within this of the bot's feet (no cliffs), m... */
+  coverMaxRise: 1.2,
+  /** ...and no deeper than this in water, m. */
+  coverMaxWaterDepth: 0.3,
+  /** The spot must be this far inside the current tide circle, m. */
+  coverZoneMargin: 2,
+  /** The hidden test aims at this fraction of the stance height (the top of the head, nearly). */
+  coverHideFraction: 0.95,
+  /** Cover score penalty for a crouch-only spot, m. */
+  coverCrouchPenalty: 1.5,
+  /** Fight distances the range plan compares, m (plus the current distance). */
+  rangeSamples: [3, 6, 10, 15, 20, 30, 45, 60, 80] as readonly number[],
+  /** Range plan: sampled distances stay within this fraction of the bot's sight range. */
+  rangeVisionFraction: 0.75,
+  /** Range plan: back off below planned x this, close in above planned x rangeCloseFactor. */
+  rangeBackFactor: 0.75,
+  rangeCloseFactor: 1.3,
+  /** Range plan: no back-off when the point this far behind is outside the tide circle (less coverZoneMargin), m. */
+  backOffProbe: 3,
+  /** Pushing a reloading or healing target: strafe weight (normal fighting: 0.8). */
+  pushStrafeWeight: 0.3,
+  /** Pushing: close to the held gun's falloffStart x this. */
+  pushRangeFraction: 0.8,
 } as const;
 
 export const BOT_AI = {
@@ -182,6 +228,8 @@ export interface BotPersonalityTuning {
   dropEpicWeightMultiplier: number;
   /** M2c (smoke.md "Bots"): multiplies bots.smoke.retreatThrowChance and zoneCrossThrowChance. */
   smokeChanceMultiplier: number;
+  /** Tactics (GDD 10): chance to investigate heard gunfire (bots.tactics.investigate*). */
+  investigateChance: number;
 }
 
 /**
@@ -276,6 +324,7 @@ export const BOT_TUNING_DEFAULTS: BotTuning = {
       jumpTimingBiasMs: -1000,
       dropEpicWeightMultiplier: 1.5,
       smokeChanceMultiplier: 0.5,
+      investigateChance: 0.6,
     },
     balanced: {
       share: 0.4,
@@ -288,6 +337,7 @@ export const BOT_TUNING_DEFAULTS: BotTuning = {
       jumpTimingBiasMs: 0,
       dropEpicWeightMultiplier: 1,
       smokeChanceMultiplier: 1,
+      investigateChance: 0.3,
     },
     cautious: {
       share: 0.3,
@@ -300,6 +350,7 @@ export const BOT_TUNING_DEFAULTS: BotTuning = {
       jumpTimingBiasMs: 1500,
       dropEpicWeightMultiplier: 0.5,
       smokeChanceMultiplier: 1.5,
+      investigateChance: 0,
     },
   },
 };
@@ -328,6 +379,7 @@ export function botTuning(b: Balance): BotTuning {
       jumpTimingBiasMs: p?.jumpTimingBiasMs ?? def.jumpTimingBiasMs,
       dropEpicWeightMultiplier: p?.dropEpicWeightMultiplier ?? def.dropEpicWeightMultiplier,
       smokeChanceMultiplier: p?.smokeChanceMultiplier ?? def.smokeChanceMultiplier,
+      investigateChance: p?.investigateChance ?? def.investigateChance,
     };
   }
   return out;
@@ -552,6 +604,40 @@ export interface BotBrain {
   /** M2c (smoke.md "Bots"): a quick smoke throw in progress, and the next allowed one. */
   smokePlan: BotSmokePlan | null;
   nextSmokeAt: number;
+  /** Tactics (bots.tactics): the cover the bot is moving to or holding, null = none. */
+  cover: BotCover | null;
+  /** Server ms of this bot's last cover search (coverSearchCooldownMs; BOT_TACTICS_AI.coverSearchesPerTick across bots). */
+  coverSearchAt: number;
+  /** No new under-fire cover before this server ms (coverCooldownMs). */
+  coverCooldownUntil: number;
+  /** Tactics: fight distance from the range plan (decide), null = the held weapon's preferred range. */
+  fightRange: number | null;
+  /** Tactics: where to aim while the target is out of sight (its last known chest), null = nothing to pre-aim. */
+  preAim: Vec3 | null;
+  /** Tactics: lastHurtAt already reacted to (hit juke). */
+  hurtSeenAt: number;
+  /** Tactics: heard gunfire the bot decided to investigate, until `until`. */
+  investigate: { pos: Vec2; until: number } | null;
+  /** Tactics: no new investigate roll before this server ms. */
+  nextInvestigateRollAt: number;
+}
+
+/** Tactics (GDD 10): why a bot is in cover. */
+export type BotCoverReason = 'heal' | 'reload' | 'underFire';
+
+/** Tactics: a cover spot hidden from `threatId`'s eye (standing, or crouched when `crouch`). */
+export interface BotCover {
+  pos: Vec2;
+  /** Feet height at the spot. */
+  y: number;
+  crouch: boolean;
+  threatId: PlayerId;
+  reason: BotCoverReason;
+  since: number;
+  /** Server ms the cover ends at the latest (under fire: coverHoldMs; otherwise coverMaxMs). */
+  until: number;
+  /** At the spot (within BOT_AI.arriveDistance), updated each decision. */
+  arrived: boolean;
 }
 
 /** M2c: an RPG shot: swap to the rpg slot, aim with lead and a seeded offset, fire once, swap back. */
@@ -691,6 +777,14 @@ export function createBotBrain(now: number, offsetMs: number, personality: BotPe
     zoneRotatedPhase: -1,
     smokePlan: null,
     nextSmokeAt: 0,
+    cover: null,
+    coverSearchAt: -Infinity,
+    coverCooldownUntil: 0,
+    fightRange: null,
+    preAim: null,
+    hurtSeenAt: -Infinity,
+    investigate: null,
+    nextInvestigateRollAt: 0,
   };
 }
 
@@ -1102,6 +1196,266 @@ function nearestPickable(loot: readonly LootEntity[], pos: Vec3, range: number):
   return best;
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Tactics (GDD 10 "Tactics", bots.tactics): cover, range plan, smart reloads
+// ---------------------------------------------------------------------------------------------------------------
+
+/** A cover spot: feet position, and whether the bot must crouch there to be hidden. */
+export interface BotCoverSpot {
+  pos: Vec2;
+  y: number;
+  crouch: boolean;
+}
+
+/**
+ * Behind a box (local frame: `n` = the axis facing the threat, threat at tn with |tn| > hn; `t` = along the face):
+ * the point just past the far face whose segment from the threat enters the box through the near face at least `m`
+ * inside its edges (a body of radius m is in the box's 2D shadow), nearest to the bot's `bt`. Null when the face is
+ * narrower than the body.
+ */
+function boxShadow(hn: number, ht: number, tn: number, tt: number, bt: number, clear: number, m: number): { n: number; t: number } | null {
+  if (ht < m) return null;
+  const a = Math.abs(tn);
+  const s = (a - hn) / (a + hn + clear);
+  if (!(s > 1e-6)) return null;
+  const lim = ht - m;
+  const lo = Math.max(-lim, (-lim - tt * (1 - s)) / s);
+  const hi = Math.min(lim, (lim - tt * (1 - s)) / s);
+  if (lo > hi) return null;
+  return { n: -(tn >= 0 ? 1 : -1) * (hn + clear), t: Math.max(lo, Math.min(hi, bt)) };
+}
+
+/** The spot behind collider `c` as seen from `threat`, nearest the bot (see boxShadow); null when `c` is too narrow. */
+function shadowPoint(c: Collider, threat: Vec3, bot: Vec3, clear: number, minHalf: number): Vec2 | null {
+  if (c.shape === 'circle') {
+    if (c.r < minHalf) return null;
+    const ux = c.x - threat.x;
+    const uz = c.z - threat.z;
+    const l = Math.hypot(ux, uz);
+    if (l < 1e-6) return null;
+    return { x: c.x + (ux / l) * (c.r + clear), z: c.z + (uz / l) * (c.r + clear) };
+  }
+  // Box-local coordinates (colliders.ts toLocal): lx along local X = world (cos, -sin), lz along local Z = (sin, cos).
+  const loc = (p: Vec3): { lx: number; lz: number } => {
+    const dx = p.x - c.x;
+    const dz = p.z - c.z;
+    return { lx: dx * c.cos - dz * c.sin, lz: dx * c.sin + dz * c.cos };
+  };
+  const t = loc(threat);
+  const o = loc(bot);
+  let lx: number;
+  let lz: number;
+  if (Math.abs(t.lx) / Math.max(c.hx, 1e-6) >= Math.abs(t.lz) / Math.max(c.hz, 1e-6)) {
+    const r = boxShadow(c.hx, c.hz, t.lx, t.lz, o.lz, clear, minHalf);
+    if (!r) return null;
+    lx = r.n;
+    lz = r.t;
+  } else {
+    const r = boxShadow(c.hz, c.hx, t.lz, t.lx, o.lx, clear, minHalf);
+    if (!r) return null;
+    lz = r.n;
+    lx = r.t;
+  }
+  return { x: c.x + lx * c.cos + lz * c.sin, z: c.z - lx * c.sin + lz * c.cos };
+}
+
+/** A standing player of radius r at feet (x, y, z) would overlap a solid collider. */
+function spotBlocked(env: BotEnv, x: number, y: number, z: number, r: number): boolean {
+  const b = env.balance;
+  let hit = false;
+  forEachColliderNear(env.ctx.colliders, x, z, r, (c) => {
+    if (!hit && c.top > y + b.movement.stepHeight && c.bottom < y + b.player.height && overlapsCircle(c, x, z, r)) hit = true;
+  });
+  return hit;
+}
+
+/**
+ * Tactics (GDD 10 "Cover"): the best spot within `maxRadius` (and bots.tactics.coverSearchRadius) hidden from
+ * `threatEye` by a collider: one candidate behind each of the coverMaxCandidates nearest colliders at least
+ * crouch-high and a player wide; a candidate is kept when the threat cannot see the top of a standing player there
+ * (or of a crouched one: `crouch`). Score = walk distance + coverTowardThreatPenalty x metres closer to the threat
+ * (+ coverCrouchPenalty for crouch spots). Indoors the spot snaps to a nav cell on the bot's layer. Deterministic;
+ * at most 2 sight rays per candidate. Null when nothing qualifies.
+ */
+export function findCover(self: SimPlayer, threatEye: Vec3, env: BotEnv, maxRadius: number): BotCoverSpot | null {
+  const b = env.balance;
+  const t = b.bots.tactics;
+  const ai = BOT_TACTICS_AI;
+  const pos = self.move.pos;
+  const R = Math.min(maxRadius, t.coverSearchRadius);
+  if (!(R > 0) || t.coverMaxCandidates <= 0) return null;
+  const rad = b.player.radius;
+  const st = b.movement.stances;
+  const minTop = pos.y + st.crouch.height;
+  const maxBottom = pos.y + b.movement.stepHeight;
+  const seen = new Set<Collider>();
+  const near: { c: Collider; d: number }[] = [];
+  forEachColliderNear(env.ctx.colliders, pos.x, pos.z, R, (c) => {
+    if (seen.has(c)) return;
+    seen.add(c);
+    // Glass breaks and shows the player; a table top or a raised part hides nothing below it.
+    if (c.glass || c.top < minTop || c.bottom > maxBottom) return;
+    // Distance to the footprint, roughly (long walls have far-away centres).
+    const d = Math.max(0, Math.hypot(c.x - pos.x, c.z - pos.z) - boundingRadius(c));
+    if (d > R) return;
+    near.push({ c, d });
+  });
+  near.sort((p, q) => p.d - q.d);
+  const navEnv = navEnvOf(env);
+  const indoor = isIndoor(env.map);
+  const z = env.zone;
+  const threatD = Math.hypot(pos.x - threatEye.x, pos.z - threatEye.z);
+  let best: BotCoverSpot | null = null;
+  let bestScore = Infinity;
+  for (let i = 0; i < near.length && i < t.coverMaxCandidates; i++) {
+    const s = shadowPoint(near[i]!.c, threatEye, pos, rad + ai.coverClearance, rad * ai.coverMinHalfWidthFactor);
+    if (!s) continue;
+    let sx = s.x;
+    let sz = s.z;
+    let sy: number;
+    if (Math.hypot(sx - pos.x, sz - pos.z) > R) continue;
+    if (z && Math.hypot(sx - z.center.x, sz - z.center.z) > z.radius - ai.coverZoneMargin) continue;
+    if (navEnv) {
+      const n = nearestNode(navEnv.nav, { x: sx, y: pos.y, z: sz });
+      if (n < 0) continue;
+      const q = nodePos(navEnv.nav, n);
+      if (Math.hypot(q.x - sx, q.z - sz) > rad * 2 || Math.abs(q.y - pos.y) > BOT_NAV_AI.layerDy) continue;
+      sx = q.x;
+      sz = q.z;
+      sy = q.y;
+    } else {
+      sy = indoor ? pos.y : heightAt(sx, sz, env.map);
+      if (Math.abs(sy - pos.y) > ai.coverMaxRise || sy < -ai.coverMaxWaterDepth) continue;
+      if (spotBlocked(env, sx, sy, sz, rad)) continue;
+    }
+    let crouch = false;
+    if (botSees(env, threatEye, { x: sx, y: sy + b.player.height * ai.coverHideFraction, z: sz })) {
+      if (botSees(env, threatEye, { x: sx, y: sy + st.crouch.height * ai.coverHideFraction, z: sz })) continue;
+      crouch = true;
+    }
+    const closer = Math.max(0, threatD - Math.hypot(sx - threatEye.x, sz - threatEye.z));
+    const score = Math.hypot(sx - pos.x, sz - pos.z) + t.coverTowardThreatPenalty * closer + (crouch ? ai.coverCrouchPenalty : 0);
+    if (score < bestScore) {
+      bestScore = score;
+      best = { pos: { x: sx, z: sz }, y: sy, crouch };
+    }
+  }
+  return best;
+}
+
+/**
+ * Starts a cover state against `threat` when a spot exists within `maxRadius`. Throttled: one search per bot per
+ * coverSearchCooldownMs and BOT_TACTICS_AI.coverSearchesPerTick searches per tick across bots. True when in cover.
+ */
+function startCover(brain: BotBrain, self: SimPlayer, env: BotEnv, threat: SimPlayer, reason: BotCoverReason, maxRadius: number): boolean {
+  const now = env.now;
+  const t = env.balance.bots.tactics;
+  if (now - brain.coverSearchAt < t.coverSearchCooldownMs) return false;
+  let searches = 0;
+  for (const o of env.players) if (o !== self && o.brain && o.brain.coverSearchAt === now) searches++;
+  if (searches >= BOT_TACTICS_AI.coverSearchesPerTick) return false;
+  brain.coverSearchAt = now;
+  const spot = findCover(self, eyeOf(threat, env.balance), env, maxRadius);
+  if (!spot) return false;
+  brain.cover = {
+    pos: spot.pos,
+    y: spot.y,
+    crouch: spot.crouch,
+    threatId: threat.id,
+    reason,
+    since: now,
+    until: now + (reason === 'underFire' ? t.coverHoldMs : t.coverMaxMs),
+    arrived: false,
+  };
+  return true;
+}
+
+/** Leaves cover (the crouch held there ends too). */
+function endCover(brain: BotBrain, now: number, b: Balance): void {
+  if (!brain.cover) return;
+  if (brain.cover.reason === 'underFire') brain.coverCooldownUntil = now + b.bots.tactics.coverCooldownMs;
+  if (brain.cover.crouch) brain.stanceUntil = 0;
+  brain.cover = null;
+}
+
+/** Best body DPS among this bot's usable guns within their bot fire range (and melee in reach) at `dist`. */
+function bestDpsAt(self: SimPlayer, dist: number, b: Balance): number {
+  let best = 0;
+  for (const i of [0, 1] as const) {
+    const s = self.inv.slots[i];
+    if (s && usableSlot(self, i, b) && dist <= botFireRange(s.weapon, b)) best = Math.max(best, botDps(s, dist, b));
+  }
+  const m = self.inv.melee;
+  const w = m ? effWeapon(b, m.weapon, m.level) : b.weapons.fists;
+  if (dist <= w.range) best = Math.max(best, (w.damage * 1000) / Math.max(1, w.fireIntervalMs));
+  return best;
+}
+
+/**
+ * Body DPS of the weapon `p` holds (what an opponent can see in its hands) at `dist`; null when it holds a special
+ * weapon (rpg, a throwable) whose threat the DPS model does not describe.
+ */
+function heldDpsAt(p: SimPlayer, dist: number, b: Balance): number | null {
+  const a = p.inv.activeSlot;
+  if (a === 0 || a === 1) {
+    const s = p.inv.slots[a];
+    if (!s || s.weapon === 'rpg') return null;
+    return botDps(s, dist, b);
+  }
+  if (a === GRENADE_SLOT) return null;
+  const m = p.inv.melee;
+  const w = m ? effWeapon(b, m.weapon, m.level) : b.weapons.fists;
+  return dist <= w.range ? (w.damage * 1000) / Math.max(1, w.fireIntervalMs) : 0;
+}
+
+/**
+ * Tactics (GDD 10 "Range plan"): the fight distance this bot should move to against `target` at `dist`, or null to
+ * keep the held weapon's preferred range. share(d) = myBestDps(d) / (myBestDps(d) + targetHeldDps(d)) over
+ * BOT_TACTICS_AI.rangeSamples up to the bot's best fire range and BOT_TACTICS_AI.rangeVisionFraction of its sight (it
+ * must keep the target in view); when the best share beats the current one by
+ * bots.tactics.rangeAdvantageMargin, the answer is the sample nearest `dist` within that margin of the best.
+ */
+export function planFightRange(self: SimPlayer, target: SimPlayer, dist: number, b: Balance): number | null {
+  const margin = b.bots.tactics.rangeAdvantageMargin;
+  const maxR = Math.min(bestFireRange(self, b), botVisionRange(self, b) * BOT_TACTICS_AI.rangeVisionFraction);
+  const share = (d: number): number | null => {
+    const theirs = heldDpsAt(target, d, b);
+    if (theirs === null) return null;
+    const mine = bestDpsAt(self, d, b);
+    return mine + theirs > 0 ? mine / (mine + theirs) : 0;
+  };
+  const cur = share(dist);
+  if (cur === null) return null;
+  const shares: { d: number; s: number }[] = [];
+  let best = cur;
+  for (const d of BOT_TACTICS_AI.rangeSamples) {
+    if (d > maxR) break;
+    const s = share(d)!;
+    shares.push({ d, s });
+    if (s > best) best = s;
+  }
+  if (best - cur < margin) return null;
+  let pick: number | null = null;
+  for (const e of shares) if (e.s >= best - margin && (pick === null || Math.abs(e.d - dist) < Math.abs(pick - dist))) pick = e.d;
+  return pick;
+}
+
+/**
+ * Tactics (GDD 10 "Reloads"): the slot to fight with at `dist`. bestSlotFor, except that with the enemy in sight
+ * within swapInsteadOfReloadRange an empty (or reloading) pick gives way to a loaded second gun that can hit at `dist`.
+ */
+function fightSlot(self: SimPlayer, dist: number, visible: boolean, b: Balance): { slot: SlotIndex; swapForAmmo: boolean } {
+  const best = bestSlotFor(self, dist, b);
+  if (!visible || dist > b.bots.tactics.swapInsteadOfReloadRange || (best !== 0 && best !== 1)) return { slot: best, swapForAmmo: false };
+  const g = self.inv.slots[best]!;
+  const reloading = !!self.reload && self.reload.slot === best;
+  if (g.mag > 0 && !reloading) return { slot: best, swapForAmmo: false };
+  const o: 0 | 1 = best === 0 ? 1 : 0;
+  const other = self.inv.slots[o];
+  if (other && other.weapon !== 'rpg' && other.mag > 0 && botDps(other, dist, b) > 0) return { slot: o, swapForAmmo: true };
+  return { slot: best, swapForAmmo: false };
+}
+
 /** Periodic decision: perception, target, goals and one-shot actions. */
 function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
   const b = env.balance;
@@ -1260,6 +1614,29 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
     }
   }
 
+  // Tactics: juke when hit, pre-aim the last known position, remember gunfire worth investigating.
+  const tac = b.bots.tactics;
+  if (self.lastHurtAt > brain.hurtSeenAt) {
+    brain.hurtSeenAt = self.lastHurtAt;
+    if (brain.targetVisible && now - self.lastHurtAt <= b.bots.decisionIntervalMs * 2 && rng.next() < tac.hitJukeChance) {
+      brain.strafeDir = -brain.strafeDir;
+      brain.nextStrafeAt = now + b.bots.strafeChangeMs * (0.5 + rng.next());
+    }
+  }
+  brain.preAim =
+    !brain.targetVisible && brain.targetId !== null && brain.lastSeenPos
+      ? { x: brain.lastSeenPos.x, y: brain.lastSeenY + b.player.height * ai.aimHeightFraction, z: brain.lastSeenPos.z }
+      : null;
+  if (pers.investigateChance > 0 && !brain.targetVisible && now >= brain.nextInvestigateRollAt && botEagerness(brain, now, env.zone, b) >= tac.investigateMinEagerness) {
+    for (const s of env.recentShots) {
+      if (s.shooterId === self.id || s.shooterId === brain.targetId) continue;
+      if (Math.hypot(s.origin.x - pos.x, s.origin.z - pos.z) > b.bots.hearingRange) continue;
+      brain.nextInvestigateRollAt = now + tac.investigateMemoryMs;
+      if (rng.next() < pers.investigateChance) brain.investigate = { pos: { x: s.origin.x, z: s.origin.z }, until: now + tac.investigateMemoryMs };
+      break;
+    }
+  }
+
   const zi = zoneInfo(self, env, brain, true);
   const target = brain.targetId !== null ? env.players.find((o) => o.id === brain.targetId) ?? null : null;
   const armed = hasUsableGun(self, b);
@@ -1278,12 +1655,28 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
   } else if (target && target.alive) {
     const d = distXZ(p2, target.move.pos);
     // melee.md "Bots": an empty mag with the target in close range: the melee weapon instead of reloading in its face.
-    const best = bestSlotFor(self, d, b);
+    // Tactics: further out, a loaded second gun instead of the reload (fightSlot).
+    const fs = fightSlot(self, d, brain.targetVisible, b);
+    const best = fs.slot;
     const bestGun = best === 0 || best === 1 ? self.inv.slots[best] : null;
     const closeMelee =
       !!self.inv.melee && d <= b.bots.melee.closeSwitchRange && ((!!heldGun && heldGun.mag === 0) || (activeSlot === FISTS_SLOT && !!bestGun && bestGun.mag === 0));
     const want = closeMelee ? FISTS_SLOT : best;
-    if (want !== activeSlot && self.swapRemainingMs <= 0 && (!self.reload || closeMelee)) brain.pendingSlot = want;
+    if (want !== activeSlot && self.swapRemainingMs <= 0 && (!self.reload || closeMelee || fs.swapForAmmo)) {
+      brain.pendingSlot = want;
+    } else if (
+      // Tactics: the target is out of sight: reload now rather than in its face later.
+      !brain.targetVisible &&
+      want === activeSlot &&
+      heldGun &&
+      heldGun.weapon !== 'rpg' &&
+      !self.reload &&
+      !self.heal &&
+      heldGun.mag < slotWeapon(b, heldGun).magSize * tac.hiddenReloadFraction &&
+      self.inv.ammo[ammoFor(b, heldGun.weapon)] > 0
+    ) {
+      brain.pendingReload = true;
+    }
   } else if (activeSlot === GRENADE_SLOT) {
     brain.pendingSlot = bestSlotFor(self, ai.gunScoreDistance, b);
   } else if (rpgEmpty && activeSlot !== rs && !self.reload) {
@@ -1308,14 +1701,25 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
       self.inv.ammo[ammoFor(b, s.weapon)] > 0
     ) {
       brain.pendingReload = true;
+    } else if (!target && !self.reload && !self.heal && self.swapRemainingMs <= 0) {
+      // Tactics: between fights, top up the other gun too (swap; the next decision reloads it).
+      const o = activeSlot === 0 ? 1 : 0;
+      const og = self.inv.slots[o];
+      if (og && og.weapon !== 'rpg' && og.mag < slotWeapon(b, og).magSize * ai.idleReloadFraction && self.inv.ammo[ammoFor(b, og.weapon)] > 0) {
+        brain.pendingSlot = o;
+      }
     }
   }
+  // Tactics: where to fight this target from (range plan against the gun in its hands).
+  brain.fightRange = target && target.alive && brain.targetVisible && armed ? planFightRange(self, target, distXZ(p2, target.move.pos), b) : null;
 
   // 2. Escape the tide.
   if (zi && zi.urgent) {
     brain.goal = zoneEntryPoint(p2, zi, tun, self.id, env.zone ? env.zone.phaseIndex : 0);
     brain.lootId = null;
     brain.retreatUntil = 0;
+    endCover(brain, now, b);
+    brain.investigate = null;
     brain.throwPlan = null;
     brain.rpgPlan = null;
     brain.stanceUntil = 0;
@@ -1339,6 +1743,7 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
     brain.goal = { x: pos.x + ux * (m2a.grenade.fleeRadius + 2), z: pos.z + uz * (m2a.grenade.fleeRadius + 2) };
     brain.fleeUntil = now + b.bots.decisionIntervalMs * 2;
     brain.lootId = null;
+    endCover(brain, now, b);
     brain.throwPlan = null;
     brain.stanceUntil = 0;
     brain.sprint = true;
@@ -1421,6 +1826,85 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
     brain.retreatCooldownUntil = now + tun.retreatMs * 3;
     // smoke.md "Bots": entering Retreat: smoke toward the attacker.
     maybeSmoke(brain, self, env, rng, b.bots.smoke.retreatThrowChance * pers.smokeChanceMultiplier, target);
+    // Tactics: heal behind cover when there is some (else the M1 run-away below).
+    if (brain.cover) {
+      brain.cover.reason = 'heal';
+      brain.cover.threatId = target.id;
+      brain.cover.until = now + tac.coverMaxMs;
+    } else {
+      startCover(brain, self, env, target, 'heal', tac.coverSearchRadius);
+    }
+  } else if (!brain.cover && now < brain.retreatUntil && target && target.alive && canHeal) {
+    // Still running in the open (no spot yet, or the search was throttled): look again on the way.
+    startCover(brain, self, env, target, 'heal', tac.coverSearchRadius);
+  }
+  // Tactics: reload behind cover when it can be reached before the reload ends (no loaded second gun to swap to).
+  if (
+    !brain.cover &&
+    self.reload &&
+    target &&
+    target.alive &&
+    brain.targetVisible &&
+    brain.pendingSlot === -1 &&
+    self.reload.remainingMs >= tac.coverReloadMinMs
+  ) {
+    startCover(brain, self, env, target, 'reload', b.movement.walkSpeed * (self.reload.remainingMs / 1000));
+  }
+  // Tactics: hit by an enemy it cannot answer (out of sight, or beyond its best fire range): break line of sight.
+  const hitBy = self.lastDamagedBy;
+  if (!brain.cover && hitBy && now - hitBy.at <= b.bots.decisionIntervalMs * 2 && now >= brain.coverCooldownUntil) {
+    const att = env.players.find((o) => o.id === hitBy.id);
+    if (att && att.alive && !att.dying && !att.aboard) {
+      const inReach = distXZ(p2, att.move.pos) <= bestFireRange(self, b);
+      const seen = att.id === brain.targetId ? brain.targetVisible : inReach && botSees(env, eye, chestOf(att, b));
+      if (!inReach || !seen) startCover(brain, self, env, att, 'underFire', tac.coverSearchRadius);
+    }
+  }
+  if (brain.cover) {
+    const c = brain.cover;
+    const threat = env.players.find((o) => o.id === c.threatId) ?? null;
+    c.arrived = distXZ(p2, c.pos) <= ai.arriveDistance && Math.abs(pos.y - c.y) <= BOT_NAV_AI.layerDy;
+    const healedHp = Math.max(b.bots.healBelowHp, pers.retreatBelowHp, tun.healBeforeFightBelowHp);
+    let done = now >= c.until || !threat || !threat.alive || !!threat.dying;
+    if (!done && c.reason === 'heal') done = !self.heal && (!canHeal || self.hp >= healedHp);
+    if (!done && c.reason === 'reload') done = !self.reload;
+    if (!done && c.reason === 'underFire' && threat!.id === brain.targetId && brain.targetVisible) {
+      done = distXZ(p2, threat!.move.pos) <= bestFireRange(self, b); // it came into reach: fight it
+    }
+    if (!done && navEnv && brain.nav.unreachable && brain.nav.goal && distXZ(brain.nav.goal, c.pos) < 0.5) done = true;
+    if (!done && c.arrived) {
+      // The threat moved and sees the spot: look for another one, else give up the cover.
+      const exposed = threat!.id === brain.targetId ? brain.targetVisible : botSees(env, eyeOf(threat!, b), eye);
+      if (exposed) {
+        brain.cover = null;
+        if (!startCover(brain, self, env, threat!, c.reason, tac.coverSearchRadius)) {
+          brain.cover = c;
+          done = true;
+        }
+      }
+    }
+    if (done) {
+      // Healed: the M1 run-away is over too (it only remains the fallback when the cover failed).
+      if (c.reason === 'heal' && !self.heal && (!canHeal || self.hp >= healedHp)) brain.retreatUntil = 0;
+      endCover(brain, now, b);
+    } else {
+      const cv = brain.cover!;
+      brain.goal = { x: cv.pos.x, z: cv.pos.z };
+      brain.goalY = cv.y;
+      brain.lootId = null;
+      brain.sprint = !cv.arrived;
+      if (cv.arrived) {
+        // Pre-aim where the threat was, ready to peek; crouch behind low cover; heal once hidden.
+        const tp = threat!.id === brain.targetId && brain.lastSeenPos ? { ...brain.lastSeenPos, y: brain.lastSeenY } : threat!.move.pos;
+        brain.preAim = { x: tp.x, y: tp.y + b.player.height * ai.aimHeightFraction, z: tp.z };
+        if (cv.crouch && stanceAllowedAtDepth('crouch', stanceWaterDepth(env.map, pos), b)) {
+          brain.stanceWant = 'crouch';
+          brain.stanceUntil = now + b.bots.decisionIntervalMs * 2;
+        }
+        if (cv.reason === 'heal' && !self.heal && canHeal) brain.pendingHeal = true;
+      }
+      return;
+    }
   }
   if (now < brain.retreatUntil && brain.lastSeenPos) {
     const ax = pos.x - brain.lastSeenPos.x;
@@ -1446,6 +1930,9 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
         brain.goal = { x: chasePos.x, z: chasePos.z };
         brain.goalY = brain.targetVisible && target ? target.move.pos.y : brain.lastSeenY;
         brain.lootId = null;
+        // Tactics: it broke sight just after this bot hit it: push before it heals or reloads.
+        const hurt = target.lastDamagedBy;
+        brain.sprint = !brain.targetVisible && !!hurt && hurt.id === self.id && now - hurt.at <= tac.pushWindowMs;
         return;
       } else {
         // maps.md §4: bots do not chase a target up a climb route; they fight from their layer (grenades, 2c) or
@@ -1496,6 +1983,24 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
     const al = Math.max(1e-6, Math.hypot(ax, az));
     brain.goal = { x: pos.x + (ax / al) * 8, z: pos.z + (az / al) * 8 };
     return;
+  }
+
+  // 5c. Tactics: go and look at a heard fight (stop at a fraction of the bot's fire range; never out of the safe circle).
+  const inv = brain.investigate;
+  if (inv) {
+    const stand = bestFireRange(self, b) * tac.investigateStandoffFraction;
+    const d = distXZ(p2, inv.pos);
+    const safe = !zi || distXZ(inv.pos, zi.safeCenter) <= zi.safeR;
+    if (now < inv.until && armed && d > stand && safe) {
+      const k = (d - stand) / d;
+      brain.goal = { x: pos.x + (inv.pos.x - pos.x) * k, z: pos.z + (inv.pos.z - pos.z) * k };
+      brain.lookAt = { x: inv.pos.x, y: eye.y, z: inv.pos.z };
+      brain.lookUntil = now + b.bots.decisionIntervalMs * 2;
+      brain.holdUntil = 0;
+      return;
+    }
+    brain.investigate = null;
+    brain.wanderPoint = null;
   }
 
   // 6. Wander: hold the current area while it is safe; otherwise (or when roaming) head into the next circle.
@@ -2257,7 +2762,9 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
   let mz = 0;
   const target = brain.targetId !== null ? env.players.find((o) => o.id === brain.targetId) ?? null : null;
   const engaged = !!target && target.alive && !target.dying && brain.targetVisible && !self.move.dropping;
-  const retreating = now < brain.retreatUntil || fleeing;
+  // Tactics: moving to or holding cover behaves like a retreat (no strafing, no fire; path following indoors).
+  const coverArrived = !!brain.cover && brain.cover.arrived;
+  const retreating = now < brain.retreatUntil || fleeing || brain.cover !== null;
   let dist = Infinity;
   if (target) dist = distXZ(p2, target.move.pos);
 
@@ -2331,10 +2838,31 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
     );
     let ax = 0;
     let az = 0;
+    let strafeW = 0.8;
+    const ta = BOT_TACTICS_AI;
     // maps.md §4: indoors a bot never closes in on a target standing on a higher layer (plateau); it fights from here.
     const above = !!navEnv && target.move.pos.y - pos.y > BOT_NAV_AI.layerDy;
+    const plan = brain.fightRange;
     if (above) {
       // strafe only
+    } else if ((target.reload || target.heal) && !closeRange && dist > wb.falloffStart * ta.pushRangeFraction) {
+      // Tactics: it is reloading or healing (visible): push into full-damage range.
+      ax = tx;
+      az = tz;
+      strafeW = ta.pushStrafeWeight;
+    } else if (plan !== null) {
+      // Tactics: range plan against the gun in its hands. No backing out of the tide circle.
+      const z = env.zone;
+      const bx = pos.x - tx * ta.backOffProbe;
+      const bz = pos.z - tz * ta.backOffProbe;
+      const room = !z || Math.hypot(bx - z.center.x, bz - z.center.z) <= z.radius - ta.coverZoneMargin;
+      if (dist > plan * ta.rangeCloseFactor) {
+        ax = tx;
+        az = tz;
+      } else if (dist < plan * ta.rangeBackFactor && room) {
+        ax = -tx;
+        az = -tz;
+      }
     } else if (dist > preferred * 1.3 || dist > fireRange) {
       ax = tx;
       az = tz;
@@ -2346,8 +2874,8 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
     const strafe = closeRange && dist <= fireRange ? 0 : 1;
     const sx = -tz * brain.strafeDir * strafe;
     const sz = tx * brain.strafeDir * strafe;
-    let cx = ax + sx * 0.8;
-    let cz = az + sz * 0.8;
+    let cx = ax + sx * strafeW;
+    let cz = az + sz * strafeW;
     if (zi && zi.urgent && brain.goal) {
       cx = mx * 1.2 + sx * 0.4;
       cz = mz * 1.2 + sz * 0.4;
@@ -2364,7 +2892,7 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
   if (now < brain.stanceUntil) {
     const unseenHit =
       !!self.lastDamagedBy && self.lastDamagedBy.id !== brain.targetId && now - self.lastDamagedBy.at <= b.bots.decisionIntervalMs;
-    if (!engaged || retreating || unseenHit) brain.stanceUntil = 0;
+    if (!coverArrived && (!engaged || retreating || unseenHit)) brain.stanceUntil = 0;
   }
 
   // Grenade throw plan: stand still, swap to slot 3, cook cookMs, release at the solved pitch.
@@ -2562,6 +3090,13 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
     desiredPitch += bell(rng) * err * DEG2RAD;
   } else if (brain.lookAt && now < brain.lookUntil && !retreating) {
     desiredYaw = yawTo(p2, brain.lookAt);
+  } else if (brain.preAim && (!retreating || coverArrived)) {
+    // Tactics: aim at the target's last known chest (or, in cover, at the threat), ready for it to reappear.
+    const eye = eyeOf(self, b);
+    const hx = brain.preAim.x - eye.x;
+    const hz = brain.preAim.z - eye.z;
+    desiredYaw = Math.atan2(-hx, -hz);
+    desiredPitch = Math.atan2(brain.preAim.y - eye.y, Math.hypot(hx, hz));
   } else if (mx !== 0 || mz !== 0) {
     desiredYaw = Math.atan2(-mx, -mz);
   }

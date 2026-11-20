@@ -21,11 +21,11 @@ See GDD section 7 for the summary. The precise algorithms follow.
 | Fists | auto melee | - | none | Desperation | 2 m reach |
 | Pistol | semi | light | iron | Early sidearm | Low damage |
 | SMG | auto | light | iron | Close range, run and gun | Falls off past 12 m, wide cone |
-| Shotgun | pump | shell | iron | Point blank burst (99 max) | Useless past ~15 m, 0.9 s pump |
+| Shotgun | pump | shell | iron | Point blank burst (117 max, one-shots an unarmored body) | Useless past ~15 m, 0.9 s pump |
 | Rifle | auto | heavy | red_dot | All-rounder at 10-45 m | Needs ADS beyond ~20 m (hip 1.6 deg), terrible on the move (x2.5) |
 | LMG (M2a) | auto | heavy | red_dot | Planted suppression, 60 round mag | 5 s reload, wide hip cone, x0.55 move speed while firing, slow ADS |
-| DMR (M2a) | semi | heavy | scope_4x | Long-range picks, 3 body / 2 head | Poor hip fire (3 deg), 400 ms per shot |
-| Sniper (M2a) | bolt | sniper | scope_8x | One-shot headshot through helmet_1/2 | 1.4 s bolt, 5 rounds, 6 deg hip fire, 0.4 move speed scoped |
+| DMR (M2a) | semi | heavy | scope_4x | Long-range picks, 2 body / 2 head | Poor hip fire (3 deg), 400 ms per shot |
+| Sniper (M2a) | bolt | sniper | scope_8x | One-shot headshot on a bare head; a helmet turns it into a 70 HP hit | 1.4 s bolt, 5 rounds, 6 deg hip fire, 0.4 move speed scoped |
 
 ### Shot resolution (per fire event, server)
 1. **Can fire**: alive, not dropping, not reloading, not swapping, **not in a stance transition** (M2a, `stance.md`), not holding the
@@ -110,19 +110,21 @@ d <= 26 / cone_deg metres. Rifle ADS still: ~32 m; DMR ADS: ~86 m; sniper ADS: ~
 For `combat.fireMoveWindowMs` (300) after each shot, ground speed x the weapon's `fireMoveMultiplier` (LMG 0.55, every other weapon 1).
 Holding the trigger keeps the window open. Hip-firing LMG: 5 x 0.55 = 2.75 m/s; ADS + firing: 5 x 0.5 x 0.55 = 1.375 m/s.
 
-### Sniper rules (M2a)
+### Sniper rules (M2a; reworked in the damage pass 2026-11)
 - Bolt action: `fireIntervalMs` (1400) is the bolt cycle. The scope stays up between shots. No separate key.
 - No falloff, so every rule below holds at any distance up to `range` (300 m).
-- **Body shot never kills a full-HP player**, with or without armor: no armor 80 -> 20 HP left; vest_2: a = min(55, 80 x 0.4 = 32) = 32,
-  hp loss 48 -> 52 left; vest_3: a = min(75, 40) = 40, hp loss 40 -> 60 left.
-- **Headshot (160 raw) kills a full-HP player through helmet_1 and helmet_2**: helmet_1 a = min(30, 48) = 30, loss 130; helmet_2
-  a = min(45, 64) = 45, loss 115.
-- **Headshot does not kill through a helmet_3 above 60 durability**: a = min(75, 80) = 75, loss 85 -> 15 HP left. In general the loss is
-  160 - min(D, 80), which reaches 100 when D <= 60. So a helmet_3 saves you from exactly one sniper headshot (it then has 0 durability
-  and is destroyed).
-- Tuning constraint (keep it when changing numbers): with H = damage x headshotMultiplier,
-  `H - min(helmet_2.durability, H x helmet_2.absorbFraction) >= 100` and
-  `H - min(helmet_3.durability, H x helmet_3.absorbFraction) < 100` and `damage x 1 < 100`.
+- Damage by level (`levels.overrides.sniper`): L1 88, L2 90.64, L3 93.28, L4 96 body; head x2 (176 / 181.3 / 186.6 / 192). The damage
+  pass raised L1-L3 and deliberately left L4 at its old value.
+- **Body shot never kills a full-HP player** at any level, with or without armor: L1 no armor 88 -> 12 HP left; vest_2: a = min(55,
+  88 x 0.4 = 35.2) = 35.2, hp loss 52.8 -> 47.2 left.
+- **Headshot on a bare head kills** at every level (176+ raw).
+- **Helmet cap** (`combat.helmetHeadshotCap`, weapons `["sniper"]`, `maxHpLoss` 70): when a sniper headshot hits a player who wears a
+  helmet with any durability left, the helmet absorbs as usual (`armor.md`: a = min(D, H x f)) and the head HP loss is
+  `min(H - a, 70)`. A full-HP helmeted player is left on 30 HP. Every helmet below tier 4 is destroyed by the hit; a fresh helmet_4
+  keeps 3.2 durability after an L1 shot and breaks on an L4 shot. The next headshot then kills.
+- Why: a helmet should always buy the wearer one mistake against a sniper, at the cost of the helmet. Below 70 HP the capped hit
+  still kills, so the sniper stays the best finisher.
+- Tuning constraint (keep it when changing numbers): `effective damage x 1 < 100` at every level and `maxHpLoss < 100`.
 
 ### Shots to kill (M2a)
 **Method.** Every armor piece obeys the invariant `durability < 100 x f / (1 - f)` (`armor.md`). Over a series of hits on one piece
@@ -134,24 +136,23 @@ Raw damage thresholds (full HP): no armor 100 · vest_2 100 + 55 = **155** · he
 helmet_3 100 + 75 = **175**. Shots = ceil(threshold / raw per hit). Time = (shots - 1) x fireIntervalMs (ideal; the 30 Hz tick can add
 up to 33 ms per shot). All values at or below `falloffStart`; shotgun = all 9 pellets on the same zone.
 
-Raw per hit (body / head): fists 15/15 · pistol 20/35 · SMG 14/21 · shotgun 99/148.5 · rifle 19/34.2 · LMG 17/25.5 · DMR 42/73.5 ·
-sniper 80/160.
+Raw per hit at L1 (damage pass 2026-11, roughly +20% on every weapon). Sniper helmet columns use the helmet cap (above), so the
+"threshold" method does not apply to them. Generated from `balance.json` with the same rules as `World.applyWeaponDamage`:
 
-| Weapon | No armor body | No armor head | vest_2 body (155) | helmet_2 head (145) | vest_3 body (175) | helmet_3 head (175) |
-|---|---|---|---|---|---|---|
-| Fists | 100/15 -> 7 (2.70 s) | 7 (2.70 s) | 155/15 = 10.3 -> 11 (4.50 s) | 145/15 = 9.7 -> 10 (4.05 s) | 175/15 = 11.7 -> 12 (4.95 s) | 12 (4.95 s) |
-| Pistol | 100/20 = 5 (1.00 s) | 100/35 = 2.9 -> 3 (0.50 s) | 155/20 = 7.75 -> 8 (1.75 s) | 145/35 = 4.1 -> 5 (1.00 s) | 175/20 = 8.75 -> 9 (2.00 s) | 175/35 = 5 exactly (1.00 s) |
-| SMG | 100/14 = 7.1 -> 8 (0.56 s) | 100/21 = 4.8 -> 5 (0.32 s) | 155/14 = 11.1 -> 12 (0.88 s) | 145/21 = 6.9 -> 7 (0.48 s) | 175/14 = 12.5 -> 13 (0.96 s) | 175/21 = 8.3 -> 9 (0.64 s) |
-| Shotgun | 100/99 -> 2 (0.90 s) | 1 (0 s) | 155/99 -> 2 (0.90 s) | 145/148.5 -> 1 (0 s) | 175/99 -> 2 (0.90 s) | 175/148.5 -> 2 (0.90 s) |
-| Rifle | 100/19 = 5.3 -> 6 (0.75 s) | 100/34.2 = 2.9 -> 3 (0.30 s) | 155/19 = 8.2 -> 9 (1.20 s) | 145/34.2 = 4.2 -> 5 (0.60 s) | 175/19 = 9.2 -> 10 (1.35 s) | 175/34.2 = 5.1 -> 6 (0.75 s) |
-| LMG | 100/17 = 5.9 -> 6 (0.60 s) | 100/25.5 = 3.9 -> 4 (0.36 s) | 155/17 = 9.1 -> 10 (1.08 s) | 145/25.5 = 5.7 -> 6 (0.60 s) | 175/17 = 10.3 -> 11 (1.20 s) | 175/25.5 = 6.9 -> 7 (0.72 s) |
-| DMR | 100/42 = 2.4 -> 3 (0.80 s) | 100/73.5 = 1.4 -> 2 (0.40 s) | 155/42 = 3.7 -> 4 (1.20 s) | 145/73.5 = 1.97 -> 2 (0.40 s) | 175/42 = 4.2 -> 5 (1.60 s) | 175/73.5 = 2.4 -> 3 (0.80 s) |
-| Sniper | 100/80 = 1.25 -> 2 (1.40 s) | 1 (0 s) | 155/80 = 1.9 -> 2 (1.40 s) | 145/160 -> 1 (0 s) | 175/80 = 2.2 -> 3 (2.80 s) | 175/160 -> 2 (1.40 s) |
+| Weapon | Raw body / head | No armor body | No armor head | vest_2 body | helmet_2 head | vest_3 body | helmet_3 head |
+|---|---|---|---|---|---|---|---|
+| fists | 15 / 15 | 7 (2.70 s) | 7 (2.70 s) | 11 (4.50 s) | 10 (4.05 s) | 12 (4.95 s) | 12 (4.95 s) |
+| pistol | 24 / 42 | 5 (1.00 s) | 3 (0.50 s) | 7 (1.50 s) | 4 (0.75 s) | 8 (1.75 s) | 5 (1.00 s) |
+| smg | 17 / 25.5 | 6 (0.40 s) | 4 (0.24 s) | 10 (0.72 s) | 6 (0.40 s) | 11 (0.80 s) | 7 (0.48 s) |
+| shotgun | 117 / 175.5 | 1 (0.00 s) | 1 (0.00 s) | 2 (0.90 s) | 1 (0.00 s) | 2 (0.90 s) | 1 (0.00 s) |
+| rifle | 23 / 41.4 | 5 (0.60 s) | 3 (0.30 s) | 7 (0.90 s) | 4 (0.45 s) | 8 (1.05 s) | 5 (0.60 s) |
+| lmg | 20 / 30 | 5 (0.48 s) | 4 (0.36 s) | 8 (0.84 s) | 5 (0.48 s) | 9 (0.96 s) | 6 (0.60 s) |
+| dmr | 50 / 87.5 | 2 (0.40 s) | 2 (0.40 s) | 4 (1.20 s) | 2 (0.40 s) | 4 (1.20 s) | 2 (0.40 s) |
+| sniper | 88 / 176 | 2 (1.40 s) | 1 (0.00 s) | 2 (1.40 s) | 2 (1.40 s) | 2 (1.40 s) | 2 (1.40 s) |
 
-Reading the table: armor roughly doubles body TTK at tier 3 (rifle 0.75 s -> 1.35 s), so a fight against an epic-armored player is
-long enough to react, reposition or throw a grenade, but never longer than ~1.6 s for any gun with a full mag (every mag covers its
-worst case: rifle 25 >= 10, SMG 30 >= 13, LMG 60 >= 11, DMR 10 >= 5, pistol 12 >= 9).
-The pistol vs helmet_3 entry is an exact boundary (5 x 35 = 175; all values are exact binary fractions, so it kills: hp = 0).
+Reading the table: armor still adds about 40-60% to body TTK at tier 3 (rifle 0.60 s -> 1.05 s). Every mag covers its worst case
+(rifle 25 >= 8, SMG 30 >= 11, LMG 60 >= 9, DMR 10 >= 4, pistol 12 >= 8). The pump now one-shots an unarmored body when all 9 pellets
+land (117), and the DMR kills an unarmored player with 2 body shots (100).
 
 ### Why the rifle no longer dominates (M1 finding: rifle took most kills)
 1. **Damage 22 -> 19.** Unarmored body kill 5 -> 6 hits (0.60 -> 0.75 s). Headshot multiplier 1.75 -> 1.8 keeps 3 headshots lethal
@@ -269,30 +270,35 @@ Detail specs: `levels.md` (L1-L4), `melee.md` (knife, machete, paddle, glass), `
 Thresholds: no armor 100, vest_2 155 (body), helmet_2 145 (head). Shots = ceil(threshold / per hit); time = (shots - 1) x interval.
 Level multipliers: `levels.md` (guns: damage x1.25 and reload x0.85 at L4; pump, DMR, sniper and RPG have overrides).
 
-| Weapon | L | Per hit body / head | Interval | No armor (body) | vest_2 (body) | helmet_2 (head) | L1 time / L4 time |
-|---|---|---|---|---|---|---|---|
-| Pistol | 1 | 20 / 35 | 250 | 5, 1.00 s | 8, 1.75 s | 5, 1.00 s | |
-| Pistol | 4 | 25 / 43.75 | 250 | 4, 0.75 s (exact 100) | 6.2 -> 7, 1.50 s | 3.3 -> 4, 0.75 s | 1.33 / 1.17 / 1.33 |
-| Revolver | 1 | 38 / 64.6 | 450 | 2.6 -> 3, 0.90 s | 4.1 -> 5, 1.80 s | 2.2 -> 3, 0.90 s | |
-| Revolver | 4 | 47.5 / 80.75 | 450 | 2.1 -> 3, 0.90 s | 3.3 -> 4, 1.35 s | 1.8 -> 2, 0.45 s | 1.00 / 1.33 / 2.00 |
-| SMG | 1 | 14 / 21 | 80 | 8, 0.56 s | 12, 0.88 s | 7, 0.48 s | |
-| SMG | 4 | 17.5 / 26.25 | 80 | 5.7 -> 6, 0.40 s | 8.9 -> 9, 0.64 s | 5.5 -> 6, 0.40 s | 1.40 / 1.38 / 1.20 |
-| Shotgun (pump) | 1 | 99 / 148.5 | 900 | 2, 0.90 s | 2, 0.90 s | 1, 0 s | |
-| Shotgun (pump) | 4 | 99 / 148.5 | 765 | 2, 0.77 s | 2, 0.77 s | 1, 0 s | 1.18 / 1.18 / - |
-| Double barrel | 1 | 120 / 180 | 250 | 1, 0 s | 2, 0.25 s | 1, 0 s | |
-| Double barrel | 4 | 150 / 225 | 250 | 1, 0 s | 2, 0.25 s | 1, 0 s | 1 (gains are at range and reload 2.8 -> 2.38 s) |
-| Rifle | 1 | 19 / 34.2 | 150 | 6, 0.75 s | 9, 1.20 s | 5, 0.60 s | |
-| Rifle | 4 | 23.75 / 42.75 | 150 | 4.2 -> 5, 0.60 s | 6.5 -> 7, 0.90 s | 3.4 -> 4, 0.45 s | 1.25 / 1.33 / 1.33 |
-| LMG | 1 | 17 / 25.5 | 120 | 6, 0.60 s | 10, 1.08 s | 6, 0.60 s | |
-| LMG | 4 | 21.25 / 31.875 | 120 | 4.7 -> 5, 0.48 s | 7.3 -> 8, 0.84 s | 4.5 -> 5, 0.48 s | 1.25 / 1.29 / 1.25 |
-| DMR | 1 | 42 / 73.5 | 400 | 3, 0.80 s | 4, 1.20 s | 2, 0.40 s | |
-| DMR | 4 | 48.3 / 84.5 | 320 | 2.07 -> 3, 0.64 s | 3.2 -> 4, 0.96 s | 1.7 -> 2, 0.32 s | 1.25 / 1.25 / 1.25 |
-| Sniper | 1 | 80 / 160 | 1400 | 2, 1.40 s | 2, 1.40 s | 1, 0 s | |
-| Sniper | 4 | 96 / 192 | 1120 | 2, 1.12 s | 2, 1.12 s | 1, 0 s | 1.25 / 1.25 / - |
-| Knife | 1 / 4 | 34 / 51 -> 42.5 / 63.75 | 350 -> 280 | 0.70 -> 0.56 s | 1.40 -> 0.84 s | 0.70 -> 0.56 s | 1.25 / 1.67 / 1.25 |
-| Machete | 1 / 4 | 52 / 78 -> 65 / 97.5 | 650 -> 520 | 0.65 -> 0.52 s | 1.30 -> 1.04 s | 0.65 -> 0.52 s | 1.25 / 1.25 / 1.25 |
-| Paddle | 1 / 4 | 78 / 117 -> 97.5 / 146.25 | 1000 -> 800 | 1.00 -> 0.80 s | 1.00 -> 0.80 s | 1.00 s -> one hit | 1.25 / 1.25 / one-shot |
-| RPG | 1 / 4 | impact 40 + blast 110 -> 46 + 126.5 | reload 3.8 -> 3.04 s | 1 rocket | L1: 2 (5 HP left after 1); L4: 1 | (helmets never absorb) | see `rpg.md` |
+| Weapon | L | Per hit body / head | Interval | No armor (body) | vest_2 (body) | helmet_2 (head) |
+|---|---|---|---|---|---|---|
+| pistol | 1 | 24 / 42 | 250 | 5 (1.00 s) | 7 (1.50 s) | 4 (0.75 s) |
+| pistol | 4 | 30 / 52.5 | 250 | 4 (0.75 s) | 6 (1.25 s) | 3 (0.50 s) |
+| revolver | 1 | 46 / 78.2 | 450 | 3 (0.90 s) | 4 (1.35 s) | 2 (0.45 s) |
+| revolver | 4 | 57.5 / 97.75 | 450 | 2 (0.45 s) | 3 (0.90 s) | 2 (0.45 s) |
+| smg | 1 | 17 / 25.5 | 80 | 6 (0.40 s) | 10 (0.72 s) | 6 (0.40 s) |
+| smg | 4 | 21.25 / 31.875 | 80 | 5 (0.32 s) | 8 (0.56 s) | 5 (0.32 s) |
+| shotgun | 1 | 117 / 175.5 | 900 | 1 (0.00 s) | 2 (0.90 s) | 1 (0.00 s) |
+| shotgun | 4 | 117 / 175.5 | 765 | 1 (0.00 s) | 2 (0.77 s) | 1 (0.00 s) |
+| dbshotgun | 1 | 140 / 210 | 250 | 1 (0.00 s) | 2 (0.25 s) | 1 (0.00 s) |
+| dbshotgun | 4 | 175 / 262.5 | 250 | 1 (0.00 s) | 1 (0.00 s) | 1 (0.00 s) |
+| rifle | 1 | 23 / 41.4 | 150 | 5 (0.60 s) | 7 (0.90 s) | 4 (0.45 s) |
+| rifle | 4 | 28.75 / 51.75 | 150 | 4 (0.45 s) | 6 (0.75 s) | 3 (0.30 s) |
+| lmg | 1 | 20 / 30 | 120 | 5 (0.48 s) | 8 (0.84 s) | 5 (0.48 s) |
+| lmg | 4 | 25 / 37.5 | 120 | 4 (0.36 s) | 7 (0.72 s) | 4 (0.36 s) |
+| dmr | 1 | 50 / 87.5 | 400 | 2 (0.40 s) | 4 (1.20 s) | 2 (0.40 s) |
+| dmr | 4 | 57.5 / 100.625 | 320 | 2 (0.32 s) | 3 (0.64 s) | 2 (0.32 s) |
+| sniper | 1 | 88 / 176 | 1400 | 2 (1.40 s) | 2 (1.40 s) | 2 (1.40 s) |
+| sniper | 4 | 96 / 192 | 1120 | 2 (1.12 s) | 2 (1.12 s) | 2 (1.12 s) |
+| knife | 1 | 41 / 61.5 | 350 | 3 (0.70 s) | 4 (1.05 s) | 3 (0.70 s) |
+| knife | 4 | 51.25 / 76.875 | 280 | 2 (0.28 s) | 4 (0.84 s) | 2 (0.28 s) |
+| machete | 1 | 62 / 93 | 650 | 2 (0.65 s) | 3 (1.30 s) | 2 (0.65 s) |
+| machete | 4 | 77.5 / 116.25 | 520 | 2 (0.52 s) | 2 (0.52 s) | 2 (0.52 s) |
+| paddle | 1 | 94 / 141 | 1000 | 2 (1.00 s) | 2 (1.00 s) | 2 (1.00 s) |
+| paddle | 4 | 117.5 / 176.25 | 800 | 1 (0.00 s) | 2 (0.80 s) | 1 (0.00 s) |
+| RPG | 1 / 4 | impact 48 + blast 132 -> 55.2 + 151.8 | reload 3.8 -> 3.04 s | 1 rocket | 1 (vest_2 dies to impact + blast) | (helmets never absorb) |
+
+_Regenerated for the damage pass 2026-11. Shot counts are ideal (every hit lands); time = (shots - 1) x interval. The "Reading it" notes below were written for the pre-pass numbers; the ratios between L1 and L4 are unchanged because the level multipliers did not change, except the sniper (L4 now gains only bolt speed over L1-L3)._
 
 Reading it:
 - **The +25-35% guide holds on average**: per-gun mean of the three columns: pistol 1.28, revolver 1.44, SMG 1.33, rifle 1.30, LMG 1.26,
@@ -438,12 +444,12 @@ scopes mounted, and median match length per map (request to game-developer).
 16. **Spread combination**: sniper, prone settled, ADS full, still, grounded: 6 x 0.02 x 0.6 = 0.072. Same while crawling
     (5 x 0.25 x 0.4 = 0.5 m/s < 1.0): still 0.072. LMG crouched, ADS full, walking: 2.6 x 0.45 x 0.8 x 3.0 = 2.808.
 17. **LMG fire slow**: LMG holding fire and forward (no ADS), speed settles at 2.75 m/s; 300 ms after the last shot it returns to 5.0.
-18. **Sniper rules** (no falloff, test at 10 m and 250 m): body vs 100 HP no armor -> 20 HP; body vs vest_2 (55) -> 52 HP, vest 23;
-    head vs helmet_1 (30) -> dead; head vs helmet_2 (45) -> dead; head vs helmet_3 (75) -> 15 HP and the helmet is destroyed
-    (helmetTier 0); head vs helmet_3 at 60 durability -> dead; head vs helmet_3 at 61 durability -> 1 HP.
+18. **Sniper rules** (L1, no falloff, test at 10 m and 250 m): body vs 100 HP no armor -> 12 HP; body vs vest_2 (55) -> 47.2 HP,
+    vest 19.8; head with no helmet -> dead; head vs helmet_1 (30), helmet_2 (45), helmet_3 (75) and helmet_3 at 1 durability -> 30 HP
+    and the helmet is destroyed (helmetTier 0); head vs a fresh helmet_4 -> 30 HP, helmet 3.2.
 19. **Shots-to-kill table** (forced 0 spread, at 5 m): for every row and column of the table above, the target dies on exactly the
     listed shot and not one shot earlier (parametrised test).
-20. **DMR**: semi-auto, at 40 m a body hit deals 42 and a head hit 73.5; at 180 m+ a body hit deals 33.6.
+20. **DMR**: semi-auto, at 40 m a body hit deals 50 and a head hit 87.5; at 180 m+ a body hit deals 40.
 21. Stance hitbox and transition firing rules: see `stance.md` tests. Armor rules: `armor.md`. Grenades: `grenades.md`.
 22. Pacing and weapon mix (headless, `matchReport.ts --matches 30 --variant both`): median match 330-480 s; no weapon above 35% of
     weapon kills; the rifle between 15% and 30%. Tuning target, not a unit test.

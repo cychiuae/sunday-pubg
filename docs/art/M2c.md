@@ -764,16 +764,19 @@ tint on the collar and the ground marker stay. Shape is an extra cue on top of t
 per weapon.
 
 ### 15.1 The per-level design rule (one rule, applied to all 13)
-| Level | Name | Idea | What changes (from the shared parts) | Silhouette cue |
+**Superseded in part by Addendum 4 (§17):** every level now has its own body (stock, mag, barrel, fore-end, grip,
+blade...), so levels differ in silhouette, not only by these extras. The table below is now the shared "level
+language" that rides on top of each body (`levelDressPieces`).
+| Level | Name | Idea | Shared extras on every weapon | Silhouette cue |
 |---|---|---|---|---|
-| 1 | Breezy | **makeshift / worn** | family colour dulled 38% toward driftwood `#A8957C`; 2 tape wraps (grey `#C9CED6` / `#A9AEB8`, a little crooked) on the body and grip; a frayed cord loop `#D9C49A` hanging from the stock end or pommel | the cord loop and lumpy tape |
+| 1 | Breezy | **salvaged** | family colour dulled 38% toward driftwood `#A8957C`; 2 tape wraps (grey `#C9CED6` / `#A9AEB8`, a little crooked) on the body and grip; a frayed cord loop `#D9C49A` hanging from the stock end or pommel | the cord loop and lumpy tape (+ the §17 salvaged body) |
 | 2 | Warm | **clean standard** | the M2b model as authored (no extras) | the familiar shape |
-| 3 | Hot | **upgraded parts** | + a muzzle device (dark cylinder with two port slots) just behind the toy tip; + a ribbed rubber grip wrap `#2E2B3A`. Melee: a bigger guard disc (knife), a round knuckle guard (machete), a metal tip cap (paddle) | thicker muzzle / guard |
-| 4 | Scorcher | **sleek, extra parts** | L3 + a swept chrome fin `#E9EEF5` under the fore-end (melee: a raised spine or centre rib); chrome side trims; a mango star badge on the left face; family colour 12% brighter | the fin and the chrome |
+| 3 | Hot | **upgraded** | a ribbed rubber grip wrap `#2E2B3A`; a muzzle device (dark cylinder with two port slots) where the weapon lists one (shotgun, rifle, lmg, dmr, sniper, revolver, dbshotgun choke band, paddle tip cap) | the §17 upgraded body |
+| 4 | Scorcher | **premium** | chrome side trims `#E9EEF5`; a mango star badge on the left face; a swept chrome fin where it fits (smg, sniper, lmg, rpg; melee: a raised spine or centre rib); family colour 12% brighter. No longer "L3 + extras" | the §17 premium body and the chrome |
 Rules every level keeps (unit-tested in `m2c.test.ts`): identical `muzzle`, `sight` eye, `rail`, `collar`, melee `tip` /
 `swingTrail` and the other anchors, so ADS, muzzle flash, hand poses and balance never change. The length along Z stays
-within ±10% (built: at most +3.5%, from the L1 cord loop). Every extra stays below the iron-sight line and clear of the
-rail's mount footprints. The cream toy tip stays visible at every level.
+within ±10% (built with Addendum 4: at most +7%, the paddle's L3 D-grip). Every extra stays below the iron-sight line
+and clear of the rail's mount footprints (tested since Addendum 4). The cream toy tip stays visible at every level.
 
 ### 15.2 How it is built
 - `createWeaponModel(id, { level, scope })` / `getWeaponGeometry(id, { level, scope })` (`weapons.ts`): shared design
@@ -784,9 +787,9 @@ rail's mount footprints. The cream toy tip stays visible at every level.
 - Loot: `createLootModel(item, tier, { level, scope, marker })`, `createLootMarker(level | 'supply')`.
 
 ### 15.3 Triangles (colour + hull; L2 includes the collar)
-Worst level model + its heaviest compatible scope: ≤ 860 colour / ≤ 520 hull (tested). Measured worst: lmg L4 + 4x
-840 + 472, sniper L4 (8x) 780 + 496, dmr L4 (4x) 684 + 424. Full table: ASSET_LIST "M2c". Per level the extras cost
-about: L1 +96..164, L3 +104, L4 +148..212.
+Worst level model + its heaviest compatible scope: ≤ 860 colour / ≤ 520 hull (tested, unchanged by Addendum 4).
+Measured worst after Addendum 4: lmg L3 + 4x 816 + 500, sniper L3 (8x) 748 + 508, rifle L3 + 4x 732 + 468, dmr L3
+(4x) 732 + 468. Full table: ASSET_LIST "M2c".
 
 ### 15.4 Draw calls and batching (for the graphics-engineer)
 - **Held (3P and FP):** still 2 calls per held item (merged colour + hull), +1 for the red-dot lens. Geometry is cached
@@ -807,7 +810,7 @@ about: L1 +96..164, L3 +104, L4 +148..212.
 | Area | Files | API |
 |---|---|---|
 | Levels | `levelCollar.ts` | `LEVEL_COLORS`, `LEVEL_TEXT_COLORS`, `LEVEL_GLOW_COLORS`, `LEVEL_NUMERAL_COLOR`, `SUPPLY_MARKER_COLOR`, `clampLevel`, `collarPieces`, `levelDressPieces`, `levelTone` |
-| Weapons | `weapons.ts`, `melee.ts` | `getWeaponAnchors(id, {level, scope})` (pure data: muzzle(s), sight eye/rear, rail, collar, grip, support hand, extras, hold offset), `createWeaponModel(id, {level, scope})`, `getWeaponGeometry`, `getWeaponSight(id, {scope})`, `getWeaponRail`, `weaponAcceptsScope`, `LEVELLED_WEAPON_IDS`, `WEAPON_SIGHT_TYPES`; anchors `muzzle`, `muzzleL/R`, `sight`, `rail`, `collar`, `tip`, `swingTrail`, `exhaust`, `rocketSeat`, `cylinder`; `userData.holdOffset` (rpg) |
+| Weapons | `weapons.ts`, `melee.ts` | `getWeaponAnchors(id, {level, scope})` (pure data: muzzle(s), sight eye/rear, rail, collar, grip, support hand, extras, hold offset), `createWeaponModel(id, {level, scope})`, `getWeaponGeometry`, `getWeaponSight(id, {scope})`, `getWeaponRail`, `weaponAcceptsScope`, `LEVELLED_WEAPON_IDS`, `WEAPON_SIGHT_TYPES`, `weaponLevelBody` and `LEVEL_PART_COLORS` (Addendum 4); anchors `muzzle`, `muzzleL/R`, `sight`, `rail`, `collar`, `tip`, `swingTrail`, `exhaust`, `rocketSeat`, `cylinder`; `userData.holdOffset` (rpg) |
 | Scopes | `scopes.ts` | `SCOPE_GEOMETRY`, `createScopeModel`, `getScopeGeometry`, `scopeFitsRail`, `mountedScopePieces`, `SCOPE_FOR_SIGHT` |
 | Rocket | `rocket.ts` | `createRocketModel`, `getRocketGeometry`, `ROCKET_DIMENSIONS`, `ammoRocketPieces` |
 | Smoke | `smokeCan.ts` | `createSmokeModel({pin})`, `getSmokeCanGeometry`, `SMOKE_CAN_DIMENSIONS`, `SMOKE_CLOUD_COLORS` |
@@ -820,3 +823,62 @@ about: L1 +96..164, L3 +104, L4 +148..212.
 | Icons | `icons.ts` | `M2C_ICON_SVG` (knife, machete, paddle, dbshotgun, revolver, rpg, ammo_rocket, smoke, vest_4, helmet_4, 4 scopes), `SCOPE_2X_RETICLE_SVG`, `SCOPE_2X_FRAME`, `SCOPE_RIM_COLOR` |
 Not built in A1 (spec only): the monitor `screen` split and desk lamp for After Hours (§9.2, §10.2), and the proposed
 island and office kinds that the level data does not use.
+
+---
+
+## 17. A body per item level (Addendum 4)
+Request: "an L1 rifle and an L4 rifle read as different guns, not the same body recoloured or with a few trims". Every
+levelled weapon now has four bodies with different silhouettes, built from the same anchors. Visual only: stats, loot,
+protocol and every anchor (grip, support hand, muzzle(s), sight eye, rail, collar, melee tip / swing trail, rpg
+exhaust / rocket seat, revolver cylinder) are unchanged.
+
+### 17.1 The four looks (same idea on every weapon, so players learn it once)
+| Level | Look | Typical parts |
+|---|---|---|
+| 1 Breezy | **salvaged on the island**: crude, lumpy, made from what washed up | driftwood `#D2C2A8` / `#A8957C`, wood `#B57A48`, bamboo `#D8B065`, crate wood, hex pipe barrels, cord lashings `#D9C49A`, stick bipods, rust patches `#B98A5A` |
+| 2 Warm | **standard**: the M2b model | as authored |
+| 3 Hot | **upgraded / tactical**: dark polymer add-ons, longer and bulkier | gun-dark `#3D3A4B` rails and shrouds with ink vent slots, long curved or box mags, foregrips, tube stocks with rubber pads `#2E2B3A`, deployed bipods, carry handles, saw backs |
+| 4 Scorcher | **premium / sleek**: smooth family-colour shells, open shapes, chrome and gold | tapered fairings, cooling jackets, thumbhole and skeleton stocks, fluted chrome barrels `#E9EEF5`, gold `#FFC43D` inlays, aqua gem pommels `#9FE8F0`, venturi bells |
+The family colour, the cream toy tip, the level collar with N pips and the ground marker stay on every level, so
+shape is never the only cue (colour-blind safe: collar pips + shape + the L1 tape / L4 star).
+
+### 17.2 Per weapon
+| Weapon | L1 salvaged | L3 upgraded | L4 premium |
+|---|---|---|---|
+| pistol | pipe pistol: welded box frame, bare hex pipe barrel with a hose clamp, welded front-sight lug, plank grip, spur hammer | extended mag with a mango base plate, under-slide light, slide serrations | race pistol: slim slide over a chrome frame, compensator, gold barrel window, flared chrome magwell, beavertail |
+| smg | driftwood stick stock with a butt crosspiece, lashed on; short mag | curved long mag, vented barrel shroud, skeleton folding stock with a rubber pad | PDW: teal integral suppressor with chrome rings, teal mag with a chrome plate, smooth thumbhole stock |
+| shotgun | slam-fire: hex pipe barrel in a dark sleeve, lashed driftwood plank fore-end, branch stock | long mag tube, ribbed polymer pump, pistol grip, tube stock, 4-shell side saddle | sporter: chrome vent rib, tapered red fore-end with a chrome ring, red thumbhole stock, rubber pad |
+| rifle | hunting carbine: wooden handguard with a band, wooden drop stock, stubby mag | slotted rail guard, vertical foregrip, curved long mag, tube stock with a pad | tapered green fairing with a chrome ring, barrel shroud, thumbhole stock, chrome mag plate |
+| lmg | bare barrel on a lashed plank fore-end, wooden ammo crate instead of the drum, driftwood plank stock | box mag with a tangerine stripe, carry handle on the shroud, deployed bipod, tube stock | vented tangerine cooling jacket, chrome drum hub, open skeleton stock with a raked butt |
+| dmr | bamboo rifle: bamboo fore-end and stock with dark nodes, bamboo butt crosspiece | slotted rail guard, foregrip, tube stock with a cheek riser | precision chassis: tapered fore-end, fluted chrome barrel, open skeleton stock |
+| sniper | driftwood fore-end and drop stock, cord cheek pad, crossed-stick bipod | adjustable stock with a pink cheek piece, rubber pad, rear monopod spike, deployed bipod | swept tapered fore-end, fluted chrome barrel, thumbhole stock with a raked pink butt |
+| revolver | square driftwood plank grip, bare barrel (no rib) with a brazed front blade and a wire band, big spur hammer | heavy fluted underlug, ribbed grip, ported muzzle | target: long pearl grip with a gold base cap and medallion, raised chrome rib on posts, front sight hood, hammer shroud |
+| dbshotgun | two hex pipes lashed with cord, driftwood branch stock | ribbed polymer beavertail fore-end, rubber pistol grip, tube stock with a 3-shell cuff and a short waffle-cone butt, squashed choke band | raised chrome vent rib on posts, long mint cone fore-end with a chrome ring, candy sprinkles on the waffle stock, chrome butt cap |
+| rpg | drainpipe: no coral end rings, tin-can exhaust, driftwood shoulder block lashed under the tube | dark blast flare, front heat collar, carry handle (under the sight line), side box sight on the left, rubber shoulder pad | chrome venturi bells front and back, coral dorsal and rear fins |
+| knife | shiv: driftwood stick handle with a knot pommel and a cord binding, no guard | dark crossbar guard, saw teeth on the spine, glass-breaker pommel | swept gold quillons, gold inlay fuller, chrome bands, aqua gem pommel |
+| machete | flat sheet-metal blade with rust patches, nailed driftwood plank handle | saw back, D knuckle bow | swept wide-tip blade with a chrome edge and a gold fuller, gold guard, gem pommel |
+| paddle | driftwood plank blade with a batten and a crack, knob grip | rubber edge rim on the blade, D-grip, metal tip cap | carbon shaft with chrome ferrules, wider teal blade with a chrome tip and a centre rib, teal palm grip |
+All designs are generic archetypes (pipe gun, carbine, PDW, sporter, chassis rifle, target revolver); no real-world
+model, brand or marking is copied.
+
+### 17.3 How it is built
+- `WeaponDesign.pieces` is the L2 body; parts that a level replaces carry a `tag` (`stock`, `mag`, `barrel`, `grip`,
+  `fore`, `blade`, ...). `WeaponDesign.levels[1 | 3 | 4] = { drop: tags[], add: Part[] }` swaps them. Then the shared
+  dressing (§15.1), the collar and the scope are added and everything is merged into ONE geometry per
+  `(id, level, scope)`, cached as before. No new materials; no new draw calls.
+- `weaponLevelBody(id, level)` (`weapons.ts`) reports how many parts a level drops and adds (tests, tooling).
+- Rules (tested in `m2c.test.ts` "Addendum 4"): L1, L3 and L4 each add ≥ 3 parts, L1 and L4 rebuild at least one major
+  part; every pair of levels differs in ≥ 8% of its 1 cm side or top silhouette and in vertex count; no level part comes
+  within 6 mm of the sight line between the muzzle and the eye, or more than 8 mm above the rail top inside the rail
+  span (scopes still sit flush); anchors identical; length within ±10%; ≤ 860 colour / ≤ 520 hull with any compatible
+  scope.
+- Fixes made on the way: the knife and machete L4 spine ridges sat ~1.5 cm above the blade (now on the spine); the
+  dbshotgun L3 choke band rose above the bead line and hid the front bead in ADS (now squashed to 60% height).
+
+### 17.4 For other owners
+- `graphics-engineer`: nothing to change. Same APIs, same one-material-pair batching, same number of distinct
+  geometries (already one per `(id, level, scope)`). Per geometry: at most 816 colour + 508 hull tris (was 840 + 496).
+- `ui-ux-designer`: icons stay one per weapon (the HUD shows level by the numeral / pips). Optional later: per-level icon
+  overlays (tape strip for L1, star for L4) if wanted.
+- `game-designer` / `narrative-designer`: optional flavour names per level body (e.g. "Pipe Pistol", "Race Pistol")
+  would live in `src/content/strings/en.json`; not needed for the art.

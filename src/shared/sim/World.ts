@@ -678,7 +678,10 @@ class SimWorld implements World {
     const b = this.balance;
     const players = [...this.participants.values()];
     for (const p of players) p.tickStartHpArmor = hpPlusArmor(p);
-    const shotWindow = b.bots.decisionIntervalMs;
+    // Bots decide every ceil(decisionIntervalMs / tick) ticks; keep a shot for one whole decision cycle (+ half a tick
+    // of float slack) so a shot fired on a bot's decision tick is still heard at its next decision.
+    const tickMs = SIM_DT * 1000;
+    const shotWindow = Math.ceil(b.bots.decisionIntervalMs / tickMs - 1e-9) * tickMs + tickMs / 2;
     if (this.recentShots.length > 0) this.recentShots = this.recentShots.filter((s) => now - s.at <= shotWindow);
 
     // Bots produce inputs through the same queue as humans.
@@ -1447,7 +1450,10 @@ class SimWorld implements World {
     const vr = body > 0 && vb ? applyArmorPiece(vb, body, armorBalance(b, 'vest', vb.tier).absorbFraction) : null;
     if (hr) v.helmet = hr.piece;
     if (vr) v.vest = vr.piece;
-    v.hp -= (hr ? hr.hpLoss : head) + (vr ? vr.hpLoss : body);
+    // combat.md "Sniper rules": a helmet turns a capped weapon's headshot into a heavy hit instead of a one-shot.
+    const cap = b.combat.helmetHeadshotCap;
+    const headLoss = hr ? (cap.weapons.includes(weapon) ? Math.min(hr.hpLoss, cap.maxHpLoss) : hr.hpLoss) : head;
+    v.hp -= headLoss + (vr ? vr.hpLoss : body);
     const headshot = head > 0;
     if (attacker.id !== v.id) v.lastDamagedBy = { id: attacker.id, at: this._timeMs };
     v.lastHurtAt = this._timeMs;

@@ -237,13 +237,13 @@ describe('World: combat (combat.md acceptance)', () => {
     return { w, s, t, sp, tp: w.debugPlayer(t)!, eyeY, bodyPitch: pitchTo(eyeY, 2 + 0.5, dist), headPitch: pitchTo(eyeY, 2 + 1.0, dist) };
   }
 
-  it('AT1: rifle body 19 at 10 m, 15.675 at 60 m, 12.35 at 90/120 m, miss at 151 m', () => {
+  it('AT1: rifle body 23 at 10 m, 18.975 at 60 m, 14.95 at 90/120 m, miss at 151 m', () => {
     // Distance is measured along the ray to the hit point on the cylinder surface (target centre at dist + radius).
     for (const [dist, dmg] of [
-      [10, 19],
-      [60, 15.675],
-      [90, 12.35],
-      [120, 12.35],
+      [10, 23],
+      [60, 18.975],
+      [90, 14.95],
+      [120, 14.95],
       [151, null],
     ] as const) {
       const d = duel(dist + BALANCE.player.radius, 'rifle');
@@ -259,11 +259,11 @@ describe('World: combat (combat.md acceptance)', () => {
     }
   });
 
-  it('AT2: rifle headshot at y = 1.0 deals 34.2', () => {
+  it('AT2: rifle headshot at y = 1.0 deals 41.4', () => {
     const d = duel(10, 'rifle');
     const ev = run(d.w, 1, { [d.s]: () => ({ fire: true, pitch: d.headPitch }) });
     expect(ofType(ev, 'damage')[0]).toMatchObject({ headshot: true });
-    expect(ofType(ev, 'damage')[0]!.amount).toBeCloseTo(34.2, 6);
+    expect(ofType(ev, 'damage')[0]!.amount).toBeCloseTo(41.4, 6);
     expect(ofType(ev, 'shot')[0]!.impacts[0]).toMatchObject({ surface: 'player', playerId: d.t, headshot: true });
   });
 
@@ -272,21 +272,18 @@ describe('World: combat (combat.md acceptance)', () => {
     d.tp.vest = { tier: 2, durability: 55 };
     d.tp.helmet = { tier: 3, durability: 75 };
     const ev = run(d.w, 1, { [d.s]: () => ({ fire: true, pitch: d.bodyPitch }) });
-    expect(d.tp.hp).toBeCloseTo(100 - 19 * 0.6, 6);
-    expect(d.tp.vest!.durability).toBeCloseTo(55 - 19 * 0.4, 6);
+    expect(d.tp.hp).toBeCloseTo(100 - 23 * 0.6, 6);
+    expect(d.tp.vest!.durability).toBeCloseTo(55 - 23 * 0.4, 6);
     expect(d.tp.helmet).toEqual({ tier: 3, durability: 75 }); // armor.md AT2: body hits never touch the helmet
-    expect(ofType(ev, 'damage')[0]).toMatchObject({ amount: 19, vest: { tier: 2, broken: false }, helmet: null });
+    expect(ofType(ev, 'damage')[0]).toMatchObject({ amount: 23, vest: { tier: 2, broken: false }, helmet: null });
   });
 
-  it('AT4: shotgun point-blank 0 spread leaves 1 HP; second shot kills (one damage event per shot)', () => {
+  it('AT4: shotgun point-blank 0 spread: 9 pellets (117) in one damage event kill an unarmored player', () => {
     const d = duel(2, 'shotgun');
-    const ev1 = run(d.w, 1, { [d.s]: () => ({ fire: true, pitch: d.bodyPitch }) });
-    expect(ofType(ev1, 'damage').length).toBe(1);
-    expect(ofType(ev1, 'shot')[0]!.impacts.length).toBe(9);
-    expect(d.tp.hp).toBeCloseTo(1, 6);
-    const ev2 = run(d.w, ticks(BALANCE.weapons.shotgun.fireIntervalMs) + 2, {
-      [d.s]: (i) => ({ fire: i > 0, pitch: d.bodyPitch }),
-    });
+    const ev2 = run(d.w, 2, { [d.s]: () => ({ fire: true, pitch: d.bodyPitch }) });
+    expect(ofType(ev2, 'damage').length).toBe(1);
+    expect(ofType(ev2, 'damage')[0]!.amount).toBeCloseTo(117, 6);
+    expect(ofType(ev2, 'shot')[0]!.impacts.length).toBe(9);
     const kill = ofType(ev2, 'kill')[0]!;
     expect(kill).toMatchObject({ victimId: d.t, killerId: d.s, weapon: 'shotgun', cause: 'weapon', placement: 2 });
     expect(ofType(ev2, 'matchEnded')[0]!.winnerId).toBe(d.s);
@@ -539,7 +536,7 @@ describe('World: contract revision 1 fields', () => {
     let ev = run(d.w, 1, { [d.a]: () => ({ fire: true, pitch: head }) });
     const dmg = ofType(ev, 'damage')[0]!;
     expect(dmg.helmet).toMatchObject({ tier: 1, broken: false });
-    expect(dmg.helmet!.absorbed).toBeCloseTo(34.2 * 0.3, 6);
+    expect(dmg.helmet!.absorbed).toBeCloseTo(41.4 * 0.3, 6);
     expect(dmg.vest).toBeNull();
     expect(d.pc.vest).toEqual({ tier: 1, durability: 20 });
     d.pc.hp = 1;

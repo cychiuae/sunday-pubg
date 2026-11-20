@@ -57,7 +57,7 @@ describe('rpg (rpg.md acceptance)', () => {
     expect(Math.abs(travelled - 120)).toBeLessThan(B.weapons.rpg.rocket.speed * SIM_DT + 0.2);
   });
 
-  it('3/4: direct hit at 20 m: 40 (rocket) then 110 (explosion); unarmored dead; vest_2: hp 76/vest 39 then hp 5, vest gone', () => {
+  it('3/4: direct hit at 20 m: 48 (rocket) then 132 (explosion); unarmored dead; vest_2: hp 71.2/vest 35.8 then dead, vest gone', () => {
     for (const vest of [false, true]) {
       const { w, ids, s } = shooter();
       const t = ids[1]!;
@@ -66,15 +66,15 @@ describe('rpg (rpg.md acceptance)', () => {
       if (vest) tp.vest = { tier: 2, durability: 55 };
       const ev = fireAndFly(w, s, chestPitch(20), 40);
       const dmg = ofType(ev, 'damage').filter((d) => d.victimId === t);
-      expect(dmg.map((d) => [d.cause, d.amount])).toEqual([['rocket', 40], ['explosion', 110]]);
+      expect(dmg.map((d) => [d.cause, d.amount])).toEqual([['rocket', 48], ['explosion', 132]]);
       expect(dmg.every((d) => d.weapon === 'rpg' && d.weaponLevel === 1)).toBe(true);
       const order = ev.map((e) => e.type).filter((x) => x === 'damage' || x === 'explosion');
       expect(order.slice(0, 3)).toEqual(['damage', 'explosion', 'damage']);
       expect(ofType(ev, 'explosion')[0]!.direct).toBe(true);
       if (vest) {
-        expect(dmg[0]!.hpAfter).toBeCloseTo(76, 6);
-        expect(dmg[0]!.vest!.absorbed).toBeCloseTo(16, 6);
-        expect(tp.hp).toBeCloseTo(5, 6);
+        expect(dmg[0]!.hpAfter).toBeCloseTo(71.2, 6);
+        expect(dmg[0]!.vest!.absorbed).toBeCloseTo(19.2, 6);
+        expect(tp.alive).toBe(false);
         expect(tp.vest).toBeNull();
       } else {
         expect(tp.alive).toBe(false);
@@ -83,20 +83,19 @@ describe('rpg (rpg.md acceptance)', () => {
     }
   });
 
-  it('5: L4 direct on vest_2: dead; on a fresh vest_3: hp 2.5', () => {
-    for (const [tier, dur] of [[2, 55], [3, 75]] as const) {
+  it('5: L4 direct + blast kills through a fresh vest_2, vest_3 and vest_4', () => {
+    for (const [tier, dur] of [[2, 55], [3, 75], [4, 100]] as const) {
       const { w, ids, s } = shooter({ level: 4 });
       const t = ids[1]!;
       land(w, t, 0, -20);
       const tp = w.debugPlayer(t)!;
       tp.vest = { tier, durability: dur };
       fireAndFly(w, s, chestPitch(20), 40);
-      if (tier === 2) expect(tp.alive).toBe(false);
-      else expect(tp.hp).toBeCloseTo(2.5, 6);
+      expect(tp.alive, `vest_${tier}`).toBe(false);
     }
   });
 
-  it('6: splash: chest 3 m from the blast 63.25; behind a crate 0; helmets never change', () => {
+  it('6: splash: chest 3 m from the blast 75.9; behind a crate 0; helmets never change', () => {
     // Blast at the ground 30 m ahead (rocket into the ground); bystander standing 3 m from the chest-height blast point.
     const crate: PropPlacement = { kind: 'crate', x: 20, z: -30, rotY: 0, scale: 2 };
     const { w, ids, s } = shooter({ players: 3, map: BIG([crate]) });
@@ -120,20 +119,20 @@ describe('rpg (rpg.md acceptance)', () => {
     land(w, hidden, 20, -34);
     const ev = run(w, 40, { [s]: () => ({}) });
     const dOpen = ofType(ev, 'damage').find((d) => d.victimId === open)!;
-    expect(dOpen.amount).toBeGreaterThan(60);
-    expect(dOpen.amount).toBeLessThan(66);
+    expect(dOpen.amount).toBeGreaterThan(72);
+    expect(dOpen.amount).toBeLessThan(79);
     expect(ofType(ev, 'damage').find((d) => d.victimId === hidden)).toBeUndefined();
     expect(op.helmet).toEqual({ tier: 1, durability: 30 });
   });
 
-  it('7: dud: a target 3 m ahead takes 40, no explosion, the shooter takes nothing', () => {
+  it('7: dud: a target 3 m ahead takes 48, no explosion, the shooter takes nothing', () => {
     const { w, ids, s, p } = shooter();
     const t = ids[1]!;
     land(w, t, 0, -3);
     const ev = fireAndFly(w, s, chestPitch(3), 10);
     expect(ofType(ev, 'explosion')).toEqual([]);
     expect(ofType(ev, 'rocketDud')[0]).toMatchObject({ victimId: t, surface: 'player' });
-    expect(ofType(ev, 'damage').map((d) => [d.victimId, d.amount, d.cause])).toEqual([[t, 40, 'rocket']]);
+    expect(ofType(ev, 'damage').map((d) => [d.victimId, d.amount, d.cause])).toEqual([[t, 48, 'rocket']]);
     expect(p.hp).toBe(B.player.maxHp);
   });
 
