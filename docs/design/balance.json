@@ -1,7 +1,7 @@
 {
   "_meta": {
-    "version": 9,
-    "milestone": "M2c (fully merged). v9, pending verification: zone waits P1 75 -> 60, P2 70 -> 50, P3 65 -> 45 (both maps), sniper helmet cap only for helmet tier >= 2, DMR 50 -> 44, frag maxDamage 120 -> 140, paddle 94 -> 78 (systems/combat.md 'Balance v9'). v8 (zone waits +25 s after the bot zone-entry fix) was the M2c QA baseline before it.",
+    "version": 10,
+    "milestone": "M2c (fully merged). v10, pending verification: more aggressive bots: personality shares 0.5/0.35/0.15, investigateChance 0.9/0.6/0.2, retreatBelowHp balanced 30 / cautious 45, investigateMinEagerness 0.3 (bots._aggressionNote, systems/combat.md 'Balance v10'). v9, pending verification: zone waits P1 75 -> 60, P2 70 -> 50, P3 65 -> 45 (both maps), sniper helmet cap only for helmet tier >= 2, DMR 50 -> 44, frag maxDamage 120 -> 140, paddle 94 -> 78 (systems/combat.md 'Balance v9'). v8 (zone waits +25 s after the bot zone-entry fix) was the M2c QA baseline before it.",
     "units": "Distances in metres, speeds in m/s, accelerations in m/s^2, angles in degrees, times in ms unless the key ends in Seconds. Damage and health are HP points. Keys that start with an underscore are documentation and code should ignore them.",
     "spec": "docs/design/GDD.md, docs/design/systems/*.md (M2a: combat.md, armor.md, stance.md, grenades.md, loot.md; M2b: maps.md, drop.md, rooms.md, camera.md; M2c: levels.md, melee.md, rpg.md, smoke.md, layout.md)",
     "_m2cPendingNote": "M2c (ADR 0007 section 11). v5 = merge step 1: every new M2c key and block is live (combat.throwableCycleMs, levels, scopes, layout, loot.guaranteedWeapon, weapons.revolver/dbshotgun/rpg/knife/machete/paddle, items.ammo_rocket/vest_4/helmet_4/smoke, bots.melee/rpg/smoke/scopes, bots.weaponPrefs.revolver/dbshotgun, bots.personalities.*.smokeChanceMultiplier, clientFeel.fpRecoil.revolver/dbshotgun/rpg, maps.office.layout, maps.office.loot.guaranteedWeapon). v6 = merge step 2 (loot.tiers.*, maps.office.loot.tiers.*, bots.eagernessCurve) plus tuning round 1 from the first pacing run (see the _tuning / _eagernessNote / _lootTiersTuning keys); _m2cPending is gone. L1 level multipliers are exactly 1, so every pre-M2c weapon number is its L1 value.",
@@ -742,10 +742,11 @@
     "roamEagerness": 0.5,
     "zoneEntryFraction": 0.95,
     "zoneEntrySpread": 0.25,
+    "_aggressionNote": "Balance v10 (pending verification; user asked for more aggressive bots; systems/combat.md 'Balance v10'). Personality shares 0.3/0.4/0.3 -> 0.5/0.35/0.15, investigateChance 0.6/0.3/0 -> 0.9/0.6/0.2, retreatBelowHp balanced 45 -> 30 and cautious 60 -> 45, tactics.investigateMinEagerness 0.5 -> 0.3. matchReport (30 matches x 30 layout seeds, idle / looter, after the bot gun-swap fix): island first kill median 114 / 106 s -> 25 / 24 s, match median 339 / 310 -> 315 / 313 s, alive at P4 start 4.0 / 3.0 -> 3.0 / 3.0; office first kill 18 / 16 -> 14 / 13 s, median 353 / 341 -> 340 / 329 s, fists 8.2 / 7.0% -> 8.2 / 9.3%. Rejected: eagernessCurve 1.3 + eagernessRampSeconds 240, and lootPhaseSeconds 60 + lootPhaseEngageRange 8 (both dropped alive at P4 to 2, undoing the v9 endgame fix).",
     "personalities": {
-      "aggressive": { "share": 0.3, "engageRangeMultiplier": 1.25, "lootPhaseMultiplier": 0.8, "reactionMultiplier": 0.85, "retreatBelowHp": 0, "stanceChance": 0.0, "grenadeChanceMultiplier": 1.5, "jumpTimingBiasMs": -1000, "dropEpicWeightMultiplier": 1.5, "smokeChanceMultiplier": 0.5, "investigateChance": 0.6 },
-      "balanced": { "share": 0.4, "engageRangeMultiplier": 1, "lootPhaseMultiplier": 1, "reactionMultiplier": 1, "retreatBelowHp": 45, "stanceChance": 0.1, "grenadeChanceMultiplier": 1.0, "jumpTimingBiasMs": 0, "dropEpicWeightMultiplier": 1.0, "smokeChanceMultiplier": 1.0, "investigateChance": 0.3 },
-      "cautious": { "share": 0.3, "engageRangeMultiplier": 0.75, "lootPhaseMultiplier": 1.3, "reactionMultiplier": 1.15, "retreatBelowHp": 60, "stanceChance": 0.35, "grenadeChanceMultiplier": 0.6, "jumpTimingBiasMs": 1500, "dropEpicWeightMultiplier": 0.5, "smokeChanceMultiplier": 1.5, "investigateChance": 0 }
+      "aggressive": { "share": 0.5, "engageRangeMultiplier": 1.25, "lootPhaseMultiplier": 0.8, "reactionMultiplier": 0.85, "retreatBelowHp": 0, "stanceChance": 0.0, "grenadeChanceMultiplier": 1.5, "jumpTimingBiasMs": -1000, "dropEpicWeightMultiplier": 1.5, "smokeChanceMultiplier": 0.5, "investigateChance": 0.9 },
+      "balanced": { "share": 0.35, "engageRangeMultiplier": 1, "lootPhaseMultiplier": 1, "reactionMultiplier": 1, "retreatBelowHp": 30, "stanceChance": 0.1, "grenadeChanceMultiplier": 1.0, "jumpTimingBiasMs": 0, "dropEpicWeightMultiplier": 1.0, "smokeChanceMultiplier": 1.0, "investigateChance": 0.6 },
+      "cautious": { "share": 0.15, "engageRangeMultiplier": 0.75, "lootPhaseMultiplier": 1.3, "reactionMultiplier": 1.15, "retreatBelowHp": 45, "stanceChance": 0.35, "grenadeChanceMultiplier": 0.6, "jumpTimingBiasMs": 1500, "dropEpicWeightMultiplier": 0.5, "smokeChanceMultiplier": 1.5, "investigateChance": 0.2 }
     },
     "drop": {
       "_note": "M2b bot jump choice (systems/drop.md 'Bots: jump choice'). Candidates = loot spawns within auto-deploy reach x reachSafetyFraction of the in-window route; weight tierWeights[tier] (x personality dropEpicWeightMultiplier for epic); skip a candidate once maxBotsPerTarget earlier picks lie within bots.dropSpreadRange of it (a pick of the same spawn counts, distance 0). Jump when the carrier passes the closest route point + personality jumpTimingBiasMs + uniform +-jumpJitterMs, clamped to the window.",
@@ -872,7 +873,7 @@
       "pushWindowMs": 2500,
       "hitJukeChance": 0.6,
       "investigateMemoryMs": 8000,
-      "investigateMinEagerness": 0.5,
+      "investigateMinEagerness": 0.3,
       "investigateStandoffFraction": 0.8
     }
   },

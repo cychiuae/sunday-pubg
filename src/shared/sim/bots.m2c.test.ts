@@ -108,7 +108,7 @@ describe('bots M2c', () => {
     land(w, bot.id, 0, 0);
     land(w, human, 0, -20);
     w.debugPlayer(human)!.hp = 1e6;
-    bot.hp = 30;
+    bot.hp = BALANCE.bots.personalities!.balanced!.retreatBelowHp! - 10; // below the Retreat threshold
     bot.inv.heals.bandage = 2;
     bot.inv.smokes = 1;
     bot.inv.slots[0] = { weapon: 'rifle', mag: 25, level: 1, scope: null };
@@ -160,6 +160,31 @@ describe('bots M2c', () => {
     w.debugLoot().push({ id: 503, item: 'rifle', qty: 1, mag: 25, pos: { x: 8, y: 2, z: 3 }, tier: 'rare', durability: null, level: 2 });
     steps(w, 200);
     expect(bot.inv.slots.find((s) => s?.weapon === 'rifle')).toMatchObject({ level: 2 });
+  });
+
+  // Swap ping-pong (balance v9 churn): applyPickup replaces the HELD gun, but the bot scores the upgrade against its
+  // WEAKER gun (worstGunSlot). Pressing E while still holding the better gun (e.g. mid-swap right after a pickup)
+  // dropped the better gun at its feet, which then scored as an upgrade over the weak gun again, forever.
+  it.each([
+    ['holding the better gun mid-swap', 0, true],
+    ['holding the better gun', 0, false],
+    ['holding fists (slot 0 would be replaced)', 2, false],
+  ] as const)('levels 13: [rifle L4, smg L1] + dmr L2 at the feet, %s: replaces the smg once, no ping-pong', (_n, active, midSwap) => {
+    const { w, bot } = botWorld();
+    const b = balanceOf(w);
+    land(w, bot.id, 0, 0);
+    bot.inv.slots[0] = { weapon: 'rifle', mag: 25, level: 4, scope: null };
+    bot.inv.slots[1] = { weapon: 'smg', mag: 30, level: 1, scope: null };
+    bot.inv.ammo.ammo_light = 60;
+    bot.inv.ammo.ammo_heavy = 60;
+    bot.inv.activeSlot = active;
+    if (midSwap) bot.swapRemainingMs = b.combat.swapMs;
+    w.debugLoot().push({ id: 504, item: 'dmr', qty: 1, mag: 10, pos: { x: 0.6, y: bot.move.pos.y, z: 0 }, tier: 'rare', durability: null, level: 2 });
+    const ev = steps(w, 600);
+    const mine = ofType(ev, 'pickup').filter((e) => e.playerId === bot.id && e.level !== undefined);
+    expect(mine.map((e) => `${e.item}L${e.level}`)).toEqual(['dmrL2']);
+    expect(bot.inv.slots.map((s) => s && `${s.weapon}L${s.level}`).sort()).toEqual(['dmrL2', 'rifleL4']);
+    expect(w.debugLoot().some((l) => l.item === 'smg')).toBe(true);
   });
 });
 

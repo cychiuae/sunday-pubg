@@ -274,9 +274,13 @@ should usually get 1-2 minutes before a real fight, and the field should thin ou
   is beyond engage range x `disengageRangeFactor`.
 - **Spread over targets.** Each other bot already fighting a target lowers its score by `focusPenalty`, and each bot-target pair has a random bias
   of +/- `targetBiasSpread`, so 11 bots do not converge on one player (especially the human).
-- **Personalities**, rolled per bot by `share`: `aggressive` (30%: shorter loot phase, longer reach, faster reactions, never retreats),
-  `balanced` (40%), and `cautious` (30%: longer loot phase, shorter reach, retreats to heal below 60 HP). Fields: `engageRangeMultiplier`,
-  `lootPhaseMultiplier`, `reactionMultiplier` (x `reactionMs`), `retreatBelowHp`.
+- **Personalities**, rolled per bot by `share`: `aggressive` (50%: shorter loot phase, longer reach, faster reactions, never retreats),
+  `balanced` (35%: retreats to heal below 30 HP), and `cautious` (15%: longer loot phase, shorter reach, retreats to heal below 45 HP).
+  Fields: `engageRangeMultiplier`, `lootPhaseMultiplier`, `reactionMultiplier` (x `reactionMs`), `retreatBelowHp`.
+- **Balance v10 (pending verification; the user asked for more aggressive bots):** shares were 30 / 40 / 30%, retreat thresholds balanced 45
+  and cautious 60 HP. With v10 the island's first bot-vs-bot kill comes at about 25 s (v9 about 110 s), so the goal above (a looting human
+  gets 1-2 minutes before a real fight) no longer holds for bot-vs-bot fights; the loot phase still protects a human from bots that are
+  not within `lootPhaseEngageRange` or attacked. Numbers and trade-offs: `systems/combat.md` "Balance v10".
 
 **State priority** (decided every `bots.decisionIntervalMs`):
 1. **Drop**: steer toward a loot spawn under the drop point, avoiding other bots' picks.
@@ -345,8 +349,8 @@ Bots play smarter, not more accurately: aim error, reaction time, bursts and che
   target's last known chest.
 - **Evasion**: when hit while fighting, flip strafe direction with chance `hitJukeChance`.
 - **Investigate**: gunfire within `hearingRange` (rolled once per `investigateMemoryMs`, at eagerness >= `investigateMinEagerness`, with the
-  personality's `investigateChance`: aggressive 0.6, balanced 0.3, cautious 0) sends an armed bot with nothing to loot toward the shot. It
-  stops at `investigateStandoffFraction` x its best fire range, and only if the shot is inside the safe circle (third-partying).
+  personality's `investigateChance`: aggressive 0.9, balanced 0.6, cautious 0.2; v10 raised these from 0.6 / 0.3 / 0 and
+  `investigateMinEagerness` from 0.5 to 0.3) sends an armed bot with nothing to loot toward the shot. It stops at `investigateStandoffFraction` x its best fire range, and only if the shot is inside the safe circle (third-partying).
 - Information rule: bots use only what a player could know: the enemy's held weapon and reload/heal animations, their own hit markers,
   damage direction and heard shots.
 - Cost: at most `BOT_TACTICS_AI.coverSearchesPerTick` (2) cover searches per tick across all bots and one per bot per

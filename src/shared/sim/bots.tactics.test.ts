@@ -190,7 +190,7 @@ describe('cover in the World', () => {
     bot.yaw = 0;
     arm(bot, 0, 'rifle', 25);
     arm(hp, 0, 'rifle', 25);
-    bot.hp = 30;
+    bot.hp = BALANCE.bots.personalities!.balanced!.retreatBelowHp! - 10; // below the Retreat threshold
     bot.inv.heals.bandage = 3;
     let healedHidden = false;
     for (let i = 0; i < ticks(8000) && !healedHidden; i++) {

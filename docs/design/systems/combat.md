@@ -433,6 +433,37 @@ Verification before v9 can be locked: a full `matchReport` run with all v9 keys 
 DMR; frag kills > 0; no weapon above 35%). Tests that hard-code phase end times or the old DMR, paddle, frag or sniper-cap numbers need the
 new values or, better, values derived from balance.
 
+**Balance v10 (pending verification).** The user asked for more aggressive bots. Changes (all `bots`; note in `bots._aggressionNote`):
+- Personality shares aggressive / balanced / cautious 0.3 / 0.4 / 0.3 -> **0.5 / 0.35 / 0.15**.
+- `investigateChance` 0.6 / 0.3 / 0 -> **0.9 / 0.6 / 0.2**; `tactics.investigateMinEagerness` 0.5 -> **0.3**.
+- `retreatBelowHp` balanced 45 -> **30**, cautious 60 -> **45** (aggressive stays 0).
+
+Evidence (`matchReport`, 30 matches x 30 layout seeds, both maps, idle / looter scripted human, after the bot gun-swap fix in
+`src/shared/sim/bots.ts`; "v9" = the previous balance measured with that fix):
+
+| | v9 island | v10 island | v9 office | v10 office |
+|---|---|---|---|---|
+| median match s | 339 / 310 | 315 / 313 | 353 / 341 | 340 / 329 |
+| first kill median s | 114 / 106 | 25 / 24 | 18 / 16 | 14 / 13 |
+| alive at P4 start (median) | 4.0 / 3.0 | 3.0 / 3.0 | 4.0 / 3.0 | 4.0 / 3.0 |
+| matches reaching P4 (of 30) | 29 / 27 | 26 / 25 | 26 / 30 | 29 / 28 |
+| top weapon share | rifle 22.2 / smg 21.5 | smg 26.8 / 27.3 | smg 23.2 / rifle 19.8 | smg 20.9 / rifle 20.4 |
+| office fists | | | 8.2 / 7.0% | 8.2 / 9.3% |
+
+The personality mix alone moved the island first kill from about 110 s to about 25 s. The investigate and retreat changes make bots move
+toward gunfire and stay in fights, at little endgame cost (alive at P4 holds at 3-4).
+Tested and rejected: faster eagerness (`eagernessCurve` 1.3, `eagernessRampSeconds` 240) and a shorter bot loot phase
+(`lootPhaseSeconds` 60, `lootPhaseEngageRange` 8). Both dropped alive at the start of P4 to 2 and undid the v9 endgame fix.
+Known trade-offs (recorded, targets not changed):
+- Island medians 313-315 s are just under the 320-400 s target; the 300-480 s acceptance band is met. Office 329-340 s is inside target.
+- Office looter fists 9.3% is just over the < 9% watch line.
+- GDD 10's aim that a looting human gets 1-2 minutes before a real fight on the island no longer holds for bot-vs-bot fights (first
+  kill about 25 s). The loot-phase rule still limits who a bot fights in its first 72-117 s, so this needs a playtest by the user.
+- No weapon above 35% (max SMG 27.3%).
+Verification before v10 can be locked: together with v9, a full `matchReport` run on both maps with all v9 + v10 keys and a user playtest
+of the early game. Tests that hard-code the old shares, `investigateChance`, `retreatBelowHp` or `investigateMinEagerness` need the new
+values or, better, values derived from balance.
+
 ### Pacing (target median 320-400 s since balance v9, acceptance 300-480 s)
 The match length is set mostly by the zone schedule (v9: shrinks end at 7:30, collapse at 8:10; v8: 8:25 and 9:05) and bot eagerness.
 The rest of this section is the M2c reasoning (target then 360-420 s); v9 accepted shorter matches after the damage pass. M2c pushes both ways:

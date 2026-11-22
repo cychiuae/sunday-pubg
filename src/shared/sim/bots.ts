@@ -1018,6 +1018,23 @@ function worstGunSlot(self: SimPlayer, b: Balance): 0 | 1 | null {
   return gunBetter(instOf(a), instOf(c), 1, b) ? 1 : 0;
 }
 
+/**
+ * Gun slot a bot must HOLD before pressing E on this ground gun, or null when any held slot is fine. lootValue scores a
+ * gun pickup with both slots full (and no same-id upgrade slot) against the weaker carried gun (worstGunSlot), but
+ * applyPickup replaces the HELD gun (slot 0 when holding fists / the throwable). Pressing E while holding the better gun
+ * dropped it at the feet, where it scored as an upgrade over the weaker gun again: an endless swap ping-pong.
+ */
+function gunPickupSlot(self: SimPlayer, l: LootEntity, b: Balance): 0 | 1 | null {
+  if (!isGun(l.item)) return null;
+  const inv = self.inv;
+  if (!inv.slots[0] || !inv.slots[1]) return null; // fills the empty slot
+  if (upgradeSlotFor(inv, l.item, l.level ?? 1) !== null) return null; // levels.md "Upgrade swap": replaced in place
+  return worstGunSlot(self, b);
+}
+
+/** The gun slot a gun pickup with both slots full would replace right now (applyPickup: held slot, else slot 0). */
+const heldPickupSlot = (self: SimPlayer): 0 | 1 => (self.inv.activeSlot === 1 ? 1 : 0);
+
 /** Value of a pickup for this bot (0 = not wanted / would be refused). Scores come from botAi (balance.bots.ai). */
 function lootValue(self: SimPlayer, l: LootEntity, b: Balance, ai: BotAi): number {
   const inv = self.inv;
@@ -1967,10 +1984,11 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
     brain.goal = { x: l.pos.x, z: l.pos.z };
     brain.goalY = l.pos.y;
     brain.sprint = !self.heal;
-    // Replacing a held gun: hold the weaker one first.
-    if (isGun(l.item) && self.inv.slots[0] && self.inv.slots[1]) {
-      const worst = worstGunSlot(self, b);
-      if (worst !== null && self.inv.activeSlot !== worst && self.swapRemainingMs <= 0) brain.pendingSlot = worst;
+    // Replacing a held gun: hold the weaker one first (and stay on it: no idle reload / best-slot switch away).
+    const replace = gunPickupSlot(self, l, b);
+    if (replace !== null) {
+      if (heldPickupSlot(self) === replace) brain.pendingSlot = -1;
+      else if (self.swapRemainingMs <= 0) brain.pendingSlot = replace;
     }
     return;
   }
@@ -3157,17 +3175,10 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
   }
 
   // One-shot actions decided this period.
+  const canSelectSlot = !brain.throwPlan && !brain.rpgPlan && !brain.smokePlan && !self.cook && !self.smokeHeld;
   if (input.selectSlot !== -1) {
     brain.pendingSlot = -1;
-  } else if (
-    brain.pendingSlot !== -1 &&
-    brain.pendingSlot !== self.inv.activeSlot &&
-    !brain.throwPlan &&
-    !brain.rpgPlan &&
-    !brain.smokePlan &&
-    !self.cook &&
-    !self.smokeHeld
-  ) {
+  } else if (brain.pendingSlot !== -1 && brain.pendingSlot !== self.inv.activeSlot && canSelectSlot) {
     input.selectSlot = brain.pendingSlot;
     brain.pendingSlot = -1;
   } else {
@@ -3192,8 +3203,13 @@ export function botThink(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng
       if (d3 <= b.player.pickupRange * ai.interactFraction && brain.parity) {
         // E takes the NEAREST item in reach (World.tryPickup): press only when that is the wanted one, so a gun just
         // dropped at the feet by a swap is not picked straight back up (M2c fix for swap churn).
-        if (nearestPickable(env.loot, pos, b.player.pickupRange)?.id === l.id) input.interact = true;
-        brain.lootPresses++;
+        // Swap ping-pong fix: a gun replacing a carried one is only taken while holding the slot it was scored against
+        // (gunPickupSlot); until then select that slot. Waiting for a swap in progress does not count as a press.
+        const replace = gunPickupSlot(self, l, b);
+        const heldOk = replace === null || heldPickupSlot(self) === replace;
+        if (!heldOk && self.swapRemainingMs <= 0 && canSelectSlot && input.selectSlot === -1) input.selectSlot = replace;
+        if (heldOk && nearestPickable(env.loot, pos, b.player.pickupRange)?.id === l.id) input.interact = true;
+        if (heldOk || self.swapRemainingMs <= 0) brain.lootPresses++;
         if (brain.lootPresses > ai.lootGiveUpPresses) {
           brain.ignoredLoot.push(l.id);
           brain.lootId = null;
