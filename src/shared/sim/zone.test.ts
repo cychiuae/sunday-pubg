@@ -27,7 +27,7 @@ function runZone(seed: number, untilMs: number, stepMs = 1000 / 30) {
 }
 
 describe('zone (the tide)', () => {
-  it('phase 1 shrink begins at 60 s; radius at 82.5 s = 106.25 (zone.md AT1, balance v9)', () => {
+  it('phase 1 shrink begins at 60 s; radius at 82.5 s = 153 (zone.md AT1, balance v9, island v2 startRadius 180)', () => {
     const rng = createRng(1);
     const z = createZone(b, ISLAND, rng, 0);
     const p1 = b.zone.phases[0]!;
@@ -38,10 +38,10 @@ describe('zone (the tide)', () => {
     expect(z.state.radius).toBe(b.zone.startRadius);
     updateZone(z, b, ISLAND, rng, startMs);
     expect(z.state.shrinking).toBe(true);
-    // Halfway through the shrink: midpoint of 125 and 0.70 x 125 = 87.5.
+    // Halfway through the shrink: midpoint of 180 and 0.70 x 180 = 126.
     updateZone(z, b, ISLAND, rng, startMs + (p1.shrinkSeconds * 1000) / 2);
     expect(z.state.radius).toBeCloseTo((b.zone.startRadius * (1 + p1.radiusFraction)) / 2, 9);
-    expect(z.state.radius).toBeCloseTo(106.25, 9);
+    expect(z.state.radius).toBeCloseTo(153, 9);
   });
 
   it('timeline: each phase ends after its wait + shrink; the collapse waits, shrinks, then closes (AT6, from balance)', () => {
@@ -105,8 +105,8 @@ describe('zone (the tide)', () => {
 
   it('on the edge counts as inside', () => {
     const z = createZone(b, ISLAND, createRng(1), 0);
-    expect(isOutsideZone(z.state, 125, 0)).toBe(false);
-    expect(isOutsideZone(z.state, 125.01, 0)).toBe(true);
+    expect(isOutsideZone(z.state, 180, 0)).toBe(false);
+    expect(isOutsideZone(z.state, 180.01, 0)).toBe(true);
   });
 });
 

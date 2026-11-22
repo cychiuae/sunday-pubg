@@ -68,6 +68,7 @@ import { isIndoor } from '../shared/maps';
 import { vec3 } from '../shared/math';
 import { effectiveSpreadDeg } from '../shared/sim/combat';
 import { pointInSmoke, segmentBlockedBySmoke } from '../shared/smoke';
+import { concealedInGrass, type GrassSubject, grassHides, grassPatches } from '../shared/grass';
 import { prepareMap, stepMovement, toMovementInput, withBrokenGlass, type MapRuntime, type MovementContext } from '../shared/sim/movement';
 import { chestPoint, eyeHeightOf, eyePoint, isStanceSettled, pitchLimits, stanceProgress } from '../shared/sim/stance';
 import { surfaceAt } from '../shared/sim/terrain';
@@ -330,6 +331,8 @@ export class ClientGame implements IClientGame {
   private readonly spectateAds = new SpectateAdsClock();
   private readonly spectateAdsBlend = new AdsBlend();
   private readonly shots = new ShotCounter();
+  /** Island v2 (systems/grass.md): server ms of each player's last shot (shot / rocketFired events), for grassHides. */
+  private readonly lastShotAt = new Map<number, number>();
   /** Whose eye the camera used last frame (recoil applies to that player's shots). */
   private cameraSubject: PlayerId | null = null;
   private lastCamera: CameraView | null = null;
@@ -569,6 +572,17 @@ export class ClientGame implements IClientGame {
     this.lastCameraPos = camPos;
     const remoteT = now - this.balance.net.interpolationDelayMs;
     const localSwingNow = this.predictedNowMs();
+    // Island v2: tall grass (one rule: grassHides from the camera subject's feet; the bots use the same function).
+    const grass = grassPatches(this.map);
+    const grassCfg = this.balance.grass;
+    const grassViewer = players.find((p) => p.id === camera.subjectId)?.pos ?? camPos;
+    const grassOf = (s: PlayerState): GrassSubject => ({
+      x: s.pos.x,
+      z: s.pos.z,
+      stance: s.stance,
+      stanceFrom: s.stanceFrom,
+      lastShotAt: this.lastShotAt.get(s.id) ?? -Infinity,
+    });
     const frame: FrameView = {
       time: this.time,
       serverTime: now,
@@ -583,6 +597,9 @@ export class ClientGame implements IClientGame {
           isLocal,
           isSpectateTarget: state.id === this.spectate.targetId,
           smokeHidden: !isLocal && state.id !== camera.subjectId && this.playerHiddenBySmoke(state, clouds, camPos, now),
+          grassHidden:
+            grass.length > 0 && !isLocal && state.id !== camera.subjectId && state.alive &&
+            grassHides(grass, grassOf(state), grassViewer.x, grassViewer.z, now, grassCfg),
           swing,
         };
       }),
@@ -638,6 +655,7 @@ export class ClientGame implements IClientGame {
       adsBlocked: local.adsBlocked,
       layout: this.layoutRef,
       inSmoke: clouds.length > 0 && pointInSmoke(clouds, camPos, now, cloudCfg),
+      hiddenInGrass: grass.length > 0 && aliveLocal && !!localView && concealedInGrass(grass, grassOf(localView), now, grassCfg),
       predicted: this.hudPrediction(),
     });
 
@@ -988,6 +1006,7 @@ export class ClientGame implements IClientGame {
         return;
       case 'shot':
         this.shots.add(ev.shooterId);
+        this.lastShotAt.set(ev.shooterId, serverTime);
         if (ev.shooterId === this.cameraSubject && isM2cGunId(ev.weapon)) this.recoil.onShot(ev.weapon, this.time, this.tuning);
         return;
       case 'damage':
@@ -998,6 +1017,7 @@ export class ClientGame implements IClientGame {
         return;
       case 'rocketFired':
         this.rockets.onFired(ev);
+        this.lastShotAt.set(ev.ownerId, serverTime);
         // The launch is the rpg's shot (rocketFired replaces `shot`): arms recoil and camera kick.
         this.shots.add(ev.ownerId);
         if (ev.ownerId === this.cameraSubject) this.recoil.onShot('rpg', this.time, this.tuning);

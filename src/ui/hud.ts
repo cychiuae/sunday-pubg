@@ -656,7 +656,9 @@ export class Hud {
     this.stanceFlags = new Flags(this.stanceEl);
     this.stanceProgress = new StyleVar(this.stanceEl, '--p');
     this.stanceSr = new TextSlot(stanceSr);
-    const gearRow = h('div', 'ui-gearrow', null, vest.el, helmet.el, this.stanceEl);
+    // Island v2 (systems/grass.md): shown while the local player is hidden in tall grass (HudView.hiddenInGrass).
+    const grassBadge = h('div', 'ui-grass', { role: 'status' }, t('hud.grass.hidden'));
+    const gearRow = h('div', 'ui-gearrow', null, vest.el, helmet.el, this.stanceEl, grassBadge);
     const vitals = h('div', 'ui-hud__bl ui-panel ui-panel--hud', null, this.hp.root, gearRow);
 
     // --- bottom centre: slots (M2a: 1-2 guns, 3 fists, 4 grenades)
@@ -1049,6 +1051,7 @@ export class Hud {
     this.rootFlags.set('is-fp', hud.cameraView === 'firstPerson');
     // M2c: thicker crosshair outline inside smoke (UI M2c §6.1); the paused mouse can reach the sight chips (§16.4).
     this.rootFlags.set('is-in-smoke', alive && hud.inSmoke === true);
+    this.rootFlags.set('is-hidden-in-grass', alive && hud.hiddenInGrass === true);
     this.rootFlags.set('is-free', !hud.pointerLocked);
 
     // Top right

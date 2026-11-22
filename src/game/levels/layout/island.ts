@@ -10,6 +10,7 @@ import data from '../variety/island01.variety.json';
 import { degToStep, detCos, detSin, radToStep, roundMm } from '../../../shared/detmath';
 import { DECOR_VARIANTS, isDecorKind } from '../../../shared/kits/decor';
 import { ISLAND_VARIANTS } from '../../../shared/kits/island';
+import { GRASS_PATCH_RADIUS } from '../../../shared/grass';
 import type { DecorPlacement, IslandMapData, LayoutPick, LootSpawn, LootTier, PropKind, PropPlacement } from '../../../shared/types';
 import {
   BoundsGrid,
@@ -124,10 +125,19 @@ export interface Circle {
 }
 const FOOT_R: Record<PropKind, number> = {
   palm: 0.45, rock: 1.5, bush: 0.9, crate: 0.75, hut: 2.9, dock: 7.2, umbrella: 1.2, boat: 2.0, tikiTorch: 0.25, driftwood: 1.2,
+  grass: GRASS_PATCH_RADIUS,
 };
-/** Largest single footprint circle a layout can hold (hut at scale 1.2), for grid query padding. */
+/** Largest single footprint circle a layout can hold (hut at scale 1.2; grass at scale <= 1.4 is 3.5), for grid query padding. */
 const MAX_CIRCLE_R = 3.6;
-const WORLD_EDGE = 133; // docks: worldRadius - 2
+const WORLD_EDGE = 188; // docks: worldRadius - 2
+/** Beach ring (island.ts SPAWN_COUNT): 36 spawns at 5 + 10k deg, so gap k (between spawns k and k + 1) is at 10 + 10k deg. */
+const RING_GAPS = 36;
+const GAP_STEP_DEG = 360 / RING_GAPS;
+const gapDeg = (k: number): number => GAP_STEP_DEG * (k + 1);
+/** Radius of the beach-loot fallback point in each gap. */
+const GAP_LOOT_R = 152;
+/** Long Beach (north sand, 330-30 deg) starts at this radius. */
+const LONG_BEACH_R = 143;
 const HUT_HALF = 2.05;
 const HUT_APRON = 1.5;
 
@@ -573,8 +583,8 @@ function pickBeachLoot(b: IslandBuilder, seed: number): void {
   const g = D.lootGroups.find((q) => q.rule === 'ringGaps')!;
   const rng = rngFor(seed, `loot:${g.id}`);
   const phase = rng() < 0.5 ? 0 : 1;
-  for (let k = 0; k < 24; k++) {
-    const gap = 15 + 15 * k;
+  for (let k = 0; k < RING_GAPS; k++) {
+    const gap = gapDeg(k);
     const big = (k + phase) % 2 === 0;
     const group = `${g.id}.g${String(k).padStart(2, '0')}`;
     const cands = shuffle(rng, (g.candidatesPerGap ?? []).map(([off, r]) => polarDeg(gap + off, r)));
@@ -585,7 +595,7 @@ function pickBeachLoot(b: IslandBuilder, seed: number): void {
       if (b.addLootNear(c.x, c.z, 'common', group, R.lootNudgeMax, big && got === 0)) got++;
     }
     while (got < want) {
-      const c = polarDeg(gap, 97);
+      const c = polarDeg(gap, GAP_LOOT_R);
       if (!b.addLootNear(c.x, c.z, 'common', group, 8, big && got === 0)) break;
       got++;
       b.fallbacks++;
@@ -633,7 +643,7 @@ function areaPoint(rng: Rng, area: NonNullable<ScatterZone['area']>): { p: P2; d
 
 function minusHit(b: IslandBuilder, minus: readonly string[] | undefined, p: P2, deg: number, r: number): boolean {
   for (const m of minus ?? []) {
-    if (m === 'longBeach' && (deg >= 330 || deg <= 30) && r >= 88) return true;
+    if (m === 'longBeach' && (deg >= 330 || deg <= 30) && r >= LONG_BEACH_R) return true;
     if (m === 'poiDiscs' || m === 'poiDiscs+2') {
       const extra = m === 'poiDiscs+2' ? 2 : 0;
       for (const poi of b.base.pois) if (dist(p.x, p.z, poi.x, poi.z) < poi.radius + extra) return true;
@@ -648,7 +658,7 @@ function placeScatterZone(b: IslandBuilder, z: ScatterZone, seed: number): void 
     const c = z.clusters;
     const k0 = z.kinds[0]!;
     for (let k = 0; k < c.n; k++) {
-      const centre = polarDeg(15 * k + range(rng, -c.centreJitterDeg, c.centreJitterDeg), range(rng, c.r[0], c.r[1]));
+      const centre = polarDeg(GAP_STEP_DEG * k + range(rng, -c.centreJitterDeg, c.centreJitterDeg), range(rng, c.r[0], c.r[1]));
       const n = intRange(rng, c.perCluster[0], c.perCluster[1]);
       for (let i = 0; i < n; i++) {
         for (let t = 0; t < 15; t++) {
@@ -766,8 +776,8 @@ function buildBaseline(base: IslandMapData, opts: { decor: boolean }): IslandLay
   b.props.length = 0;
   b.props.push(...base.props.map((p) => ({ ...p })));
   const loot: LootSpawn[] = base.lootSpawns.map((l) => ({ ...l, group: 'baseline' }));
-  for (let k = 0; k < 24; k += 2) {
-    const target = polarDeg(15 + 15 * k, 97);
+  for (let k = 0; k < RING_GAPS; k += 2) {
+    const target = polarDeg(gapDeg(k), GAP_LOOT_R);
     let best = -1;
     let bestD = Infinity;
     loot.forEach((l, i) => {

@@ -675,25 +675,34 @@
   },
   "layout": {
     "_note": "M2c (systems/layout.md; level-designer owns candidates, groups and arrangements in levels/variety.md). lootUsedPerTier = loot points activated per match per tier (each then rolls loot.spawnChance, except guaranteed-weapon points); the sum of MapData loot-group use counts must equal it (data test). lootCandidateFactorMin: every loot group has at least ceil(use x factor) candidates and at least use + 1, except groups the level data marks fixed (with a fixedNote; e.g. the office SW perch epic, 1 of 1). minLootSpacing: minimum metres between any two activated loot points (level data may be stricter: island uses 2.5). minCoverFraction: every arrangement of a POI or desk zone keeps at least this fraction of the largest arrangement's blocking collider footprint.",
-    "lootUsedPerTier": { "common": 51, "rare": 19, "epic": 7 },
+    "lootUsedPerTier": { "common": 69, "rare": 19, "epic": 7 },
     "lootCandidateFactorMin": 1.5,
     "minLootSpacing": 2.0,
     "minCoverFraction": 0.8
   },
+  "grass": {
+    "_note": "Island v2 tall grass (user request 2026-11-22: grass on the island players can hide in; systems/grass.md). 'grass' props are soft (no collider: they never stop movement, bullets, grenades or blasts). Hidden = feet at least edgeInset m inside a patch AND crouched or prone (settled, or moving between crouch and prone; standing or a transition from/to stand is never hidden) AND the viewer is farther than revealRange m (horizontal) AND no shot in the last revealAfterShotMs. Hidden players are invisible to bots (target pick, retaliation) and their model and name tag fade out for other players. Patch size is level data (GRASS_PATCH_RADIUS 2.5 m x placement scale, src/shared/grass.ts).",
+    "revealRange": 7,
+    "revealAfterShotMs": 2000,
+    "edgeInset": 0.3,
+    "hidesCrouched": true,
+    "hidesProne": true
+  },
   "zone": {
     "damageTickMs": 1000,
-    "startRadius": 125,
+    "startRadius": 180,
+    "_islandGrowthNote": "Island v2 (2026-11-22, user request: island 50% bigger; levels/island.md): coast 110 -> 165 m, world edge 135 -> 190 m, so startRadius 125 -> 180 (covers the 164 m worst-case coast). Phase fractions retuned so the middle circles grow with the island (P1-P3 126 / 90 / 59 m, were 88 / 65 / 47.5) while the endgame circles keep about their old size (P4-P6 31 / 14 / 5 m, were 27.5 / 14 / 5). Pending a matchReport pacing run.",
     "ignoresArmor": true,
     "landCheckMinHeight": 0.3,
     "landCheckMaxTries": 20,
     "_phasesNote": "M1-fix pacing: long, roomy middle phases (P2/P3 hold 65 m and 47.5 m, about 30 m between survivors) so fights spread over the match; short, tight late phases (P5/P6) so the endgame resolves quickly. M2c v8: waits P2 60 -> 70, P3 55 -> 65, P4 40 -> 45 (+25 s), because the bot zone-entry fix made bots reach the circle and island medians fell to 341 / 353 s. Balance v9: waits P1 75 -> 60, P2 70 -> 50, P3 65 -> 45 (-55 s), because v8 matches ended mostly in phase 3, P4 started in only about half the island matches (median 2 alive) and P5/P6/collapse almost never played; island sim (30 matches x 30 layout seeds, idle / looter) median 329 / 327 s, P4 reached in 25 / 29 of 30, alive at P4 start 4.0 / 3.0. Pacing target is now median 320-400 s (acceptance 300-480). Every shrink ends at 1:45 / 3:20 / 4:45 / 6:00 / 6:50 / 7:30 (105 / 200 / 285 / 360 / 410 / 450 s), collapse starts at 7:50 (470 s) and closes at 8:10 (490 s). The office uses the same schedule (maps.office.zone.phases). Reasoning in systems/zone.md.",
     "phases": [
       { "waitSeconds": 60, "shrinkSeconds": 45, "radiusFraction": 0.70, "dps": 1 },
-      { "waitSeconds": 50, "shrinkSeconds": 45, "radiusFraction": 0.52, "dps": 2 },
-      { "waitSeconds": 45, "shrinkSeconds": 40, "radiusFraction": 0.38, "dps": 4 },
-      { "waitSeconds": 45, "shrinkSeconds": 30, "radiusFraction": 0.22, "dps": 6 },
-      { "waitSeconds": 25, "shrinkSeconds": 25, "radiusFraction": 0.11, "dps": 10 },
-      { "waitSeconds": 20, "shrinkSeconds": 20, "radiusFraction": 0.04, "dps": 15 }
+      { "waitSeconds": 50, "shrinkSeconds": 45, "radiusFraction": 0.50, "dps": 2 },
+      { "waitSeconds": 45, "shrinkSeconds": 40, "radiusFraction": 0.33, "dps": 4 },
+      { "waitSeconds": 45, "shrinkSeconds": 30, "radiusFraction": 0.17, "dps": 6 },
+      { "waitSeconds": 25, "shrinkSeconds": 25, "radiusFraction": 0.08, "dps": 10 },
+      { "waitSeconds": 20, "shrinkSeconds": 20, "radiusFraction": 0.03, "dps": 15 }
     ],
     "finalCollapseDelaySeconds": 20,
     "finalCollapseSeconds": 20,

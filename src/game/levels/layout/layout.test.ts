@@ -111,20 +111,21 @@ function islandCircles(map: IslandMapData): { x: number; z: number; r: number; p
   return map.props.flatMap((p, i) => propFootprint(p).map((c) => ({ ...c, prop: i, kind: p.kind })));
 }
 
-/** Free-cell flood over land (r <= 104) with every non-bush footprint inflated by `inflate`, from (0, 0). */
+/** Free-cell flood over land (r <= rules.lootMaxRadius) with every hard (not bush or grass) footprint inflated by `inflate`, from (0, 0). */
 function islandFlood(map: IslandMapData, inflate: number, cell = 0.5): { reached: (x: number, z: number, within: number) => boolean } {
-  const R = 106;
+  const LAND = ISLAND_VARIETY.rules.lootMaxRadius;
+  const R = LAND + 2;
   const n = Math.ceil((2 * R) / cell);
   const free = new Uint8Array(n * n);
   for (let j = 0; j < n; j++) {
     for (let i = 0; i < n; i++) {
       const x = -R + (i + 0.5) * cell;
       const z = -R + (j + 0.5) * cell;
-      if (Math.hypot(x, z) <= 104) free[j * n + i] = 1;
+      if (Math.hypot(x, z) <= LAND) free[j * n + i] = 1;
     }
   }
   for (const c of islandCircles(map)) {
-    if (c.kind === 'bush') continue;
+    if (c.kind === 'bush' || c.kind === 'grass') continue; // soft props
     const rr = c.r + inflate;
     const i0 = Math.max(0, Math.floor((c.x - rr + R) / cell));
     const i1 = Math.min(n - 1, Math.floor((c.x + rr + R) / cell));
@@ -467,7 +468,7 @@ describe('island01 layouts (202 seeds)', () => {
       rep.check(map.lootSpawns.filter((l) => l.guarantee === 'weapon').length === T.guaranteedWeapons, `${where} guaranteed weapons count`);
       const circles = islandCircles(map);
       map.lootSpawns.forEach((l, i) => {
-        rep.atMost(Math.hypot(l.x, l.z), 104 + 1e-6, `${where} loot ${i} (${l.group}) radius`);
+        rep.atMost(Math.hypot(l.x, l.z), ISLAND_VARIETY.rules.lootMaxRadius + 1e-6, `${where} loot ${i} (${l.group}) radius`);
         for (const c of circles) rep.atLeast(dist(l, c) - c.r, 0.75 - TOL, `${where} loot ${i} (${l.group}) vs ${c.kind}`);
         for (let j = i + 1; j < map.lootSpawns.length; j++) rep.atLeast(dist(l, map.lootSpawns[j]!), 2.5 - 1e-6, `${where} loot ${i}/${j} spacing`);
       });

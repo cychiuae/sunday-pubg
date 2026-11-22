@@ -216,6 +216,7 @@
   "hud.heal.cancel": "[Q] Cancel",
   "hud.heal.cancelled": "Healing cancelled",
   "hud.slot.empty": "Empty",
+  "hud.grass.hidden": "Hidden",
   "hud.tide.phase": "Tide {index}/{count}",
   "hud.tide.wait": "Tide rising in {time}",
   "hud.tide.shrinking": "The tide is rising!",

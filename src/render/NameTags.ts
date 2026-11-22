@@ -183,7 +183,7 @@ export class NameTags {
         if (p.isLocal || p.isSpectateTarget || !s.alive || !s.name || isAboard(s)) continue; // M2b: aboard = inside the carrier
         // M2c (UI M2c §6.2): no tag for a player whose line from the camera crosses a smoke cloud (ClientGame computes
         // PlayerView.smokeHidden with segmentBlockedBySmoke, the bots' own rule).
-        if (p.smokeHidden) continue;
+        if (p.smokeHidden || p.grassHidden) continue; // Island v2: no tag for a player hidden in tall grass
         const d = Math.hypot(s.pos.x - cam.x, s.pos.y - cam.y, s.pos.z - cam.z);
         if (d >= FADE_END) continue;
         const slot = this.slotFor(s.id, s.name);

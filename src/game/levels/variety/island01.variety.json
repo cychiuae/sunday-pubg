@@ -23,15 +23,15 @@
     }
   },
   "fixed": [
-    { "kind": "dock", "polar": [95, 111], "rot": "outward", "scale": 1, "note": "main dock" },
-    { "kind": "dock", "polar": [104, 109], "rot": "outward", "scale": 0.75, "note": "short dock" },
-    { "kind": "hut", "polar": [95, 83], "rot": "outward", "scale": 1.1, "note": "boathouse (harbour landmark)" },
-    { "kind": "hut", "polar": [107, 86], "rot": "outward", "scale": 0.9, "note": "fish shed" },
-    { "kind": "tikiTorch", "polar": [92.9, 104.5], "scale": 1, "note": "dock torches, at the dock's landward end: 2 m from the dock, 4 m from spawn 97.5 deg" },
-    { "kind": "tikiTorch", "polar": [97.1, 104.5], "scale": 1 },
-    { "kind": "boat", "polar": [315, 99], "rot": "outwardPlus", "rotOffsetRad": 1.1, "scale": 1.8, "note": "wreck hull (landmark)" },
+    { "kind": "dock", "polar": [95, 166.5], "rot": "outward", "scale": 1, "note": "main dock" },
+    { "kind": "dock", "polar": [101, 164.5], "rot": "outward", "scale": 0.75, "note": "short dock" },
+    { "kind": "hut", "polar": [95, 138], "rot": "outward", "scale": 1.1, "note": "boathouse (harbour landmark)" },
+    { "kind": "hut", "polar": [102.3, 140.3], "rot": "outward", "scale": 0.9, "note": "fish shed" },
+    { "kind": "tikiTorch", "polar": [93.6, 159.5], "scale": 1, "note": "dock torches, at the dock's landward end: about 2 m from the dock" },
+    { "kind": "tikiTorch", "polar": [96.4, 159.5], "scale": 1 },
+    { "kind": "boat", "polar": [310, 153], "rot": "outwardPlus", "rotOffsetRad": 1.1, "scale": 1.8, "note": "wreck hull (landmark)" },
     { "kind": "tikiTorch", "ring": { "anchor": "summit", "n": 4, "r": 3.5, "start": 45 }, "scale": 1, "note": "summit beacon (landmark)" },
-    { "kind": "hut", "polar": [195, 89], "rot": "outward", "scale": 1, "note": "tiki bar hut; the 'party' variant may turn it by +-30 deg in place" }
+    { "kind": "hut", "polar": [195, 144], "rot": "outward", "scale": 1, "note": "tiki bar hut; the 'party' variant may turn it by +-30 deg in place" }
   ],
   "zones": [
     {
@@ -98,7 +98,7 @@
     },
     {
       "id": "grove",
-      "anchor": { "polar": [145, 58] },
+      "anchor": { "polar": [145, 94.25] },
       "radius": 20,
       "frame": "any",
       "mirror": false,
@@ -158,7 +158,7 @@
     },
     {
       "id": "dock",
-      "anchor": { "polar": [95, 90] },
+      "anchor": { "polar": [95, 145] },
       "radius": 18,
       "frame": "outward",
       "mirror": false,
@@ -215,7 +215,7 @@
     },
     {
       "id": "village",
-      "anchor": { "polar": [245, 78] },
+      "anchor": { "polar": [245, 133] },
       "radius": 22,
       "frame": "outward",
       "mirror": true,
@@ -280,7 +280,7 @@
     },
     {
       "id": "wreck",
-      "anchor": { "polar": [310, 92] },
+      "anchor": { "polar": [310, 147] },
       "radius": 16,
       "frame": "outward",
       "mirror": false,
@@ -338,7 +338,7 @@
     },
     {
       "id": "rocks",
-      "anchor": { "polar": [35, 90] },
+      "anchor": { "polar": [35, 145] },
       "radius": 16,
       "frame": "outward",
       "mirror": true,
@@ -393,7 +393,7 @@
     },
     {
       "id": "tikibar",
-      "anchor": { "polar": [195, 94] },
+      "anchor": { "polar": [195, 149] },
       "radius": 14,
       "frame": "outward",
       "mirror": true,
@@ -453,9 +453,9 @@
     {
       "id": "beach",
       "rule": "ringGaps",
-      "note": "24 gaps between player spawns, gap g = 15 + 15k deg. Phase p (0/1) from stream 'loot:beach'. Gaps with (k + p) even pick 2: one flagged guarantee 'weapon', one plain; the others pick 1. Every spawn borders exactly one 2-gap, so every spawn has a guaranteed weapon about 13-16 m away and 3 loot points within 25 m.",
+      "note": "36 gaps between player spawns, gap g = 10 + 10k deg. Phase p (0/1) from stream 'loot:beach'. Gaps with (k + p) even pick 2: one flagged guarantee 'weapon', one plain; the others pick 1. Every spawn borders exactly one 2-gap, so every spawn has a guaranteed weapon about 14-17 m away and 3 loot points within 25 m.",
       "tier": "common",
-      "candidatesPerGap": [[0, 97], [0, 90], [-2.5, 93.5], [2.5, 93.5]],
+      "candidatesPerGap": [[0, 152], [0, 145], [-1.6, 148.5], [1.6, 148.5]],
       "candidateFormat": "[deg offset from the gap angle, radius]",
       "pickBig": 2,
       "pickSmall": 1,
@@ -466,29 +466,29 @@
       "lootPick": { "rare": 2, "common": 2 },
       "note": "Rewards rotating through the jungle. All outside every POI disc.",
       "candidates": [
-        { "tier": "rare", "polar": [60, 45] },
-        { "tier": "rare", "polar": [120, 70] },
-        { "tier": "rare", "polar": [200, 60] },
-        { "tier": "rare", "polar": [280, 40] },
-        { "tier": "rare", "polar": [330, 65] },
-        { "tier": "rare", "polar": [20, 60] },
-        { "tier": "common", "polar": [0, 55] },
-        { "tier": "common", "polar": [90, 50] },
-        { "tier": "common", "polar": [160, 35] },
-        { "tier": "common", "polar": [230, 45] },
-        { "tier": "common", "polar": [300, 70] },
-        { "tier": "common", "polar": [250, 30] }
+        { "tier": "rare", "polar": [60, 73.12] },
+        { "tier": "rare", "polar": [120, 113.75] },
+        { "tier": "rare", "polar": [200, 97.5] },
+        { "tier": "rare", "polar": [280, 65] },
+        { "tier": "rare", "polar": [330, 105.62] },
+        { "tier": "rare", "polar": [20, 97.5] },
+        { "tier": "common", "polar": [0, 89.38] },
+        { "tier": "common", "polar": [90, 81.25] },
+        { "tier": "common", "polar": [160, 56.88] },
+        { "tier": "common", "polar": [230, 73.12] },
+        { "tier": "common", "polar": [300, 113.75] },
+        { "tier": "common", "polar": [250, 48.75] }
       ]
     }
   ],
-  "lootTotals": { "common": 51, "rare": 19, "epic": 7, "guaranteedWeapons": 12 },
+  "lootTotals": { "common": 69, "rare": 19, "epic": 7, "guaranteedWeapons": 18 },
   "scatter": [
     {
       "id": "coastPalms",
       "layer": "sim",
       "order": 1,
       "rule": "clusters",
-      "clusters": { "n": 24, "centreDeg": "gap", "centreJitterDeg": 4, "r": [93, 101], "clusterRadius": 6, "perCluster": [2, 5] },
+      "clusters": { "n": 36, "centreDeg": "gap", "centreJitterDeg": 2.7, "r": [148, 156], "clusterRadius": 6, "perCluster": [2, 5] },
       "kinds": [{ "kind": "palm", "weight": 1, "scale": [0.85, 1.3] }],
       "intent": "Shade on both sides of every spawn; spawns themselves stay open sand."
     },
@@ -496,63 +496,81 @@
       "id": "beachClutter",
       "layer": "sim",
       "order": 2,
-      "area": { "annulus": [94, 103] },
+      "area": { "annulus": [149, 158] },
       "minus": ["longBeach", "poiDiscs"],
       "kinds": [
-        { "kind": "driftwood", "count": [8, 16], "scale": [0.8, 1.3] },
-        { "kind": "umbrella", "count": [5, 10], "scale": 1 },
-        { "kind": "rock", "count": [5, 10], "scale": [0.5, 0.9] }
+        { "kind": "driftwood", "count": [12, 24], "scale": [0.8, 1.3] },
+        { "kind": "umbrella", "count": [8, 15], "scale": 1 },
+        { "kind": "rock", "count": [8, 15], "scale": [0.5, 0.9] }
       ]
     },
     {
       "id": "longBeach",
       "layer": "sim",
       "order": 3,
-      "area": { "sectorDeg": [330, 30], "annulus": [88, 105] },
-      "kinds": [{ "kind": "driftwood", "count": [0, 3], "scale": [0.8, 1.2] }],
+      "area": { "sectorDeg": [330, 30], "annulus": [143, 160] },
+      "kinds": [{ "kind": "driftwood", "count": [0, 4], "scale": [0.8, 1.2] }],
       "intent": "The north beach stays the longest open sightline on the map: only low driftwood (0.35 m) as hard cover."
     },
     {
       "id": "jungle",
       "layer": "sim",
       "order": 4,
-      "area": { "annulus": [18, 88] },
+      "area": { "annulus": [29, 143] },
       "minus": ["poiDiscs+2", "hutAprons", "zoneCentreDiscs"],
       "kinds": [
-        { "kind": "palm", "count": [16, 24], "scale": [0.9, 1.3] },
-        { "kind": "bush", "count": [38, 52], "scale": [0.7, 1.3] },
-        { "kind": "rock", "count": [18, 26], "scale": [0.6, 1.4] }
+        { "kind": "palm", "count": [32, 48], "scale": [0.9, 1.3] },
+        { "kind": "bush", "count": [76, 104], "scale": [0.7, 1.3] },
+        { "kind": "rock", "count": [36, 52], "scale": [0.6, 1.4] }
       ],
       "intent": "Cover every 10-15 m between POIs, never a wall of it."
+    },
+    {
+      "id": "tallGrass",
+      "layer": "sim",
+      "order": 3.5,
+      "area": { "annulus": [26, 141] },
+      "minus": ["poiDiscs+2"],
+      "kinds": [{ "kind": "grass", "count": [50, 65], "scale": [0.8, 1.4] }],
+      "intent": "Island v2 (systems/grass.md): tall-grass patches between the POIs. Crouch or go prone inside one to hide from anyone more than 7 m away. Placed before the jungle so the patch count stays steady."
+    },
+    {
+      "id": "duneGrass",
+      "layer": "sim",
+      "order": 3.6,
+      "area": { "annulus": [139, 146] },
+      "minus": ["longBeach", "poiDiscs"],
+      "kinds": [{ "kind": "grass", "count": [8, 14], "scale": [0.7, 1.0] }],
+      "intent": "Island v2: a few dune-grass patches where the jungle meets the sand, a hiding spot near the beach loot. Long Beach stays open."
     }
   ],
   "decor": [
     {
       "id": "beachDecor",
       "layer": "decor",
-      "area": { "annulus": [92, 106] },
+      "area": { "annulus": [147, 161] },
       "kinds": [
-        { "kind": "shellCluster", "count": [18, 26] },
-        { "kind": "starfish", "count": [8, 14] },
-        { "kind": "sandcastle", "count": [0, 3] },
-        { "kind": "beachTowel", "count": [6, 12], "near": { "kind": "umbrella", "within": 3 } }
+        { "kind": "shellCluster", "count": [27, 39] },
+        { "kind": "starfish", "count": [12, 21] },
+        { "kind": "sandcastle", "count": [0, 4] },
+        { "kind": "beachTowel", "count": [9, 18], "near": { "kind": "umbrella", "within": 3 } }
       ]
     },
     {
       "id": "jungleDecor",
       "layer": "decor",
-      "area": { "annulus": [12, 92] },
+      "area": { "annulus": [19.5, 147] },
       "kinds": [
-        { "kind": "fernTuft", "count": [70, 110] },
-        { "kind": "flowerTuft", "count": [25, 45] },
-        { "kind": "coconutPile", "count": [15, 30], "near": { "kind": "palm", "within": 2.5 } }
+        { "kind": "fernTuft", "count": [140, 220] },
+        { "kind": "flowerTuft", "count": [50, 90] },
+        { "kind": "coconutPile", "count": [30, 60], "near": { "kind": "palm", "within": 2.5 } }
       ]
     },
     {
       "id": "shallowsDecor",
       "layer": "decor",
-      "area": { "annulus": [107, 126] },
-      "kinds": [{ "kind": "seaweed", "count": [20, 30] }]
+      "area": { "annulus": [162, 181] },
+      "kinds": [{ "kind": "seaweed", "count": [30, 45] }]
     }
   ],
   "rules": {
@@ -561,13 +579,13 @@
     "lootPropClearance": 0.75,
     "lootSpacing": 2.5,
     "lootNudgeMax": 3,
-    "lootMaxRadius": 104,
+    "lootMaxRadius": 159,
     "guaranteedWeaponWithin": 25,
     "spawnLootMin": { "count": 3, "within": 25 },
     "lootFallbackUsesMaxPerSeed": 0,
     "zoneCentreClear": 3,
     "hutDoorApron": [3, 3],
-    "landLimit": 105,
+    "landLimit": 160,
     "decorMaxHeight": 0.5,
     "decorPropClearance": 0.2,
     "decorLootSpawnClearance": 1,
@@ -576,10 +594,10 @@
     "scatterTriesPerItem": 40
   },
   "budgets": {
-    "simPlacementsMax": 400,
-    "perKindMax": { "palm": 140, "bush": 90, "rock": 75, "crate": 60, "driftwood": 32, "umbrella": 18, "tikiTorch": 20, "hut": 10, "boat": 3, "dock": 2 },
+    "simPlacementsMax": 800,
+    "perKindMax": { "palm": 300, "bush": 180, "rock": 150, "crate": 60, "driftwood": 45, "umbrella": 24, "tikiTorch": 20, "hut": 10, "boat": 3, "dock": 2, "grass": 90 },
     "decorPlacementsMax": 600,
-    "decorPerKindMax": 150,
+    "decorPerKindMax": 240,
     "propTrianglesMax": 300000,
     "decorTrianglesMax": 30000,
     "propDrawCallsMax": 31

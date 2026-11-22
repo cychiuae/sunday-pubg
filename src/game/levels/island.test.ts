@@ -31,25 +31,26 @@ describe('island01 map data', () => {
   });
 
   it('has counts within targets', () => {
-    expect(map.props.length).toBeGreaterThanOrEqual(250);
-    expect(map.props.length).toBeLessThanOrEqual(400);
+    expect(map.props.length).toBeGreaterThanOrEqual(400);
+    expect(map.props.length).toBeLessThanOrEqual(800);
     expect(map.playerSpawns.length).toBeGreaterThanOrEqual(20);
-    expect(map.lootSpawns.length).toBeGreaterThanOrEqual(60);
-    expect(map.lootSpawns.length).toBeLessThanOrEqual(80);
+    expect(map.lootSpawns.length).toBeGreaterThanOrEqual(85);
+    expect(map.lootSpawns.length).toBeLessThanOrEqual(100);
     expect(map.zoneCenters.length).toBeGreaterThanOrEqual(6);
     expect(map.zoneCenters.length).toBeLessThanOrEqual(10);
     const kinds = new Set(map.props.map((p) => p.kind));
-    expect(kinds.size).toBe(10);
+    expect(kinds.size).toBe(11);
+    expect(map.props.filter((p) => p.kind === 'grass').length).toBeGreaterThanOrEqual(40);
   });
 
-  it('splits loot tiers roughly 65 / 25 / 10', () => {
+  it('splits loot tiers roughly 72 / 20 / 8 (island v2: more beach commons on the longer coast)', () => {
     const n = map.lootSpawns.length;
     const frac = (t: string): number => map.lootSpawns.filter((l) => l.tier === t).length / n;
-    expect(frac('common')).toBeGreaterThan(0.58);
-    expect(frac('common')).toBeLessThan(0.72);
-    expect(frac('rare')).toBeGreaterThan(0.18);
+    expect(frac('common')).toBeGreaterThan(0.65);
+    expect(frac('common')).toBeLessThan(0.78);
+    expect(frac('rare')).toBeGreaterThan(0.15);
     expect(frac('rare')).toBeLessThan(0.32);
-    expect(frac('epic')).toBeGreaterThan(0.05);
+    expect(frac('epic')).toBeGreaterThan(0.04);
     expect(frac('epic')).toBeLessThan(0.15);
   });
 
@@ -119,7 +120,7 @@ describe('island01 map data', () => {
   });
 
   it('keeps zone centres and hills well inland', () => {
-    for (const z of map.zoneCenters) expect(len(z)).toBeLessThanOrEqual(50);
+    for (const z of map.zoneCenters) expect(len(z)).toBeLessThanOrEqual(75);
     for (const h of map.hills) {
       expect(h.height).toBeLessThanOrEqual(12);
       expect(len(h) + h.radius).toBeLessThanOrEqual(map.islandRadius - map.beachWidth - amp);

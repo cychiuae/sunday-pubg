@@ -17,17 +17,19 @@
  *   boat      1.5 x 4 m rowboat, 0.55 m tall, long axis local Z
  *   tikiTorch 2.4 m tall, flame at y ~2.2
  *   driftwood ~2.4 m log lying along local Z
+ *   grass     tall-grass patch, r 2.5 m (GRASS_PATCH_RADIUS), blades to ~1.15 m (GRASS_HEIGHT); soft, no outline
  */
 import * as THREE from 'three';
 import type { PropKind } from '../../shared/types';
 import { alongY, buildMerged, rng, xf, type Merged, type Piece, type V3 } from './builder';
 import { ensureOutlineNormals, OUTLINE, outlineMaterial, palette, vertexColorToon } from './materials';
 import { islandVariant, ISLAND_VARIANTS } from '../../shared/kits/island';
+import { GRASS_HEIGHT, GRASS_PATCH_RADIUS } from '../../shared/grass';
 
 export { ISLAND_VARIANTS };
 
 export const PROP_KINDS: readonly PropKind[] = [
-  'palm', 'rock', 'bush', 'crate', 'hut', 'dock', 'umbrella', 'boat', 'tikiTorch', 'driftwood',
+  'palm', 'rock', 'bush', 'crate', 'hut', 'dock', 'umbrella', 'boat', 'tikiTorch', 'driftwood', 'grass',
 ];
 
 /** World-space offset (scale 1) of the tiki flame centre, for a PointLight or flicker VFX. */
@@ -343,6 +345,57 @@ function driftwoodPieces(): Piece[] {
   return P;
 }
 
+/** One grass blade: a 3-sided pyramid (3 faces, no base) of base radius r and height h, apex leaning by (lx, lz). */
+function bladeGeo(r: number, h: number, lx: number, lz: number, turn: number): THREE.BufferGeometry {
+  const base: THREE.Vector3[] = [0, 1, 2].map((i) => {
+    const a = turn + (i * Math.PI * 2) / 3;
+    return v(Math.cos(a) * r, 0, Math.sin(a) * r);
+  });
+  const apex = v(lx, h, lz);
+  const pos: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    const a = base[(i + 1) % 3]!, b = base[i]!;
+    pos.push(a.x, a.y, a.z, b.x, b.y, b.z, apex.x, apex.y, apex.z);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.computeVertexNormals();
+  return g;
+}
+
+/**
+ * Island v2 tall grass (systems/grass.md): a disc of radius GRASS_PATCH_RADIUS filled with tufts of 3 leaning blades,
+ * tallest (GRASS_HEIGHT) in the middle and shorter toward the rim, so a crouched player (0.95 m) sinks in and a
+ * standing head (1.3 m) shows. Soft prop: no outline hull. v1 = sun-dried straw tips.
+ */
+function grassPieces(variant = 0): Piece[] {
+  const P: Piece[] = [];
+  const r = rng(4242 + variant * 101);
+  const R = GRASS_PATCH_RADIUS;
+  const cols = variant === 1
+    ? [palette.grassDark, palette.grass, palette.thatch, palette.bushLight]
+    : [palette.grassDark, palette.grass, palette.bush, palette.bushLight];
+  const TUFTS = 58;
+  for (let t = 0; t < TUFTS; t++) {
+    // Even-ish disc fill (sunflower spiral + jitter), so there are no bald spots to see through.
+    const d = R * 0.95 * Math.sqrt((t + 0.5) / TUFTS);
+    const a = t * 2.39996 + r() * 0.5;
+    const cx = Math.cos(a) * d, cz = Math.sin(a) * d;
+    const rim = d / R;
+    const tall = GRASS_HEIGHT * (1.05 - 0.4 * rim * rim) * lerp(0.85, 1.1, r());
+    for (let k = 0; k < 3; k++) {
+      const ba = r() * Math.PI * 2;
+      const h = tall * lerp(0.75, 1.0, r());
+      const lean = lerp(0.12, 0.35, r()) * h;
+      const ox = Math.cos(ba) * 0.12, oz = Math.sin(ba) * 0.12;
+      const geo = bladeGeo(lerp(0.07, 0.11, r()), h, Math.cos(ba) * lean, Math.sin(ba) * lean, r() * Math.PI);
+      const color = h > GRASS_HEIGHT * 0.95 ? cols[3]! : cols[Math.floor(r() * 3)]!;
+      P.push({ geo, color, matrix: xf([cx + ox, -0.05, cz + oz]), outline: false, flat: true });
+    }
+  }
+  return P;
+}
+
 const PIECES: Record<PropKind, (variant: number) => Piece[]> = {
   palm: palmPieces,
   rock: rockPieces,
@@ -354,6 +407,7 @@ const PIECES: Record<PropKind, (variant: number) => Piece[]> = {
   boat: boatPieces,
   tikiTorch: tikiTorchPieces,
   driftwood: driftwoodPieces,
+  grass: grassPieces,
 };
 
 /**
@@ -378,6 +432,7 @@ const OUTLINE_BY_KIND: Record<PropKind, number> = {
   boat: OUTLINE.prop,
   tikiTorch: 0.025,
   driftwood: OUTLINE.prop,
+  grass: 0, // no hull (every piece is outline: false)
 };
 
 // -------------------------------------------------------------------------------------------------

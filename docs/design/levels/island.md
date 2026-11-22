@@ -17,18 +17,27 @@ Name keys: `map.island01.name`, `poi.<id>` (narrative-designer owns the display 
 >   - client-only beach and jungle decor;
 >   - the look (`noon`, `morning`, `golden`, `overcast`).
 
+> **Island v2 (2026-11-22, user request: island 50% bigger, plus tall grass to hide in).** The coast moved from
+> 110 m to 165 m. Everything on the beach kept its distance to the sea (+55 m): spawns, docks, coastal POIs, beach
+> loot. The inland ring stretched x1.625 (hills, zone centres, grove, inland loot), and every POI kept its own size
+> and internal layout. The beach ring now has 36 spawns and gaps (every 10 deg), so beach loot is as dense per metre as
+> before (54 commons, 18 guaranteed weapons). Jungle scatter doubled, and 58-79 tall-grass patches were added
+> ([systems/grass.md](../systems/grass.md)). The numbers in this section are v2. The sketch, POI table and pacing text
+> below still describe v1 *geometry*: same layout and angles, smaller radii.
+
 ## At a glance
 | | |
 |---|---|
 | Players | 12 target, 16 max (`balance.json` `match`) |
-| Island radius | 110 m (sand meets sea), coastline wobble +-4 m |
-| World radius | 135 m hard boundary in shallow water |
+| Island radius | 165 m (sand meets sea), coastline wobble +-4 m (v1: 110 m) |
+| World radius | 190 m hard boundary in shallow water (v1: 135 m) |
 | Base height | 2.5 m, beach band 18 m wide |
-| Hills | 4, highest 10 m (summit) |
-| Props | ~350 placements, 10 kinds, all instancing-friendly |
-| Player spawns | 24, every 15 deg on the sand ring at r = 100 m (~26 m apart) |
-| Loot spawns | ~77: ~51 common / ~19 rare / 7 epic |
-| Zone centres | 8 candidates, all within 42 m of the centre |
+| Hills | 4, highest 12 m (summit r 55 m); NE ridge 8 m, W bluff 7 m, S knoll 5 m |
+| Props | ~500-650 placements, 11 kinds (v2 adds `grass`), all instancing-friendly |
+| Player spawns | 36, every 10 deg on the sand ring at r = 155 m (~27 m apart) |
+| Loot spawns | 95: 69 common (54 beach) / 19 rare / 7 epic |
+| POI centres (v2) | summit 0, grove 94.25, village 133, dock / rocks 145, wreck 147, tikibar 149 m |
+| Zone centres | 8 candidates, all within 68.25 m of the centre; tide starts at r 180 |
 
 Axes: north = -Z (yaw 0 looks north), east = +X. Compass angles below are clockwise from north.
 

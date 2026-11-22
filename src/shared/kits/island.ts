@@ -20,6 +20,7 @@ export const ISLAND_VARIANTS: Readonly<Record<PropKind, number>> = {
   boat: 1,
   tikiTorch: 1,
   driftwood: 1,
+  grass: 2, // v1 sun-dried tips (straw-gold) for the beach edge look
 };
 
 /** Clamp any variant index into range for a kind (0 for absent / invalid). */

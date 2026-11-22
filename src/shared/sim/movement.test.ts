@@ -157,7 +157,7 @@ describe('movement', () => {
   it('is slowed in water deeper than waterDepthThreshold', () => {
     const ctx = createMovementContext(ISLAND, b);
     const x = 0;
-    const z = -125; // sea north of the island
+    const z = -180; // sea north of the island (island v2: coast at ~165 m)
     const y = heightAt(x, z, ISLAND);
     const start = grounded(x, y, z);
     expect(isInWater(start, b)).toBe(true);

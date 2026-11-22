@@ -1,5 +1,7 @@
 /**
- * Map 1: "island01". A round tropical island (~110 m radius) for 12-16 players.
+ * Map 1: "island01". A round tropical island (~165 m radius) for 12-16 players.
+ * v2 (2026-11-22): the island grew 50% (coast 110 -> 165 m). Coastal things kept their distance to the sea (+55 m),
+ * the inland ring stretched x1.625, and every POI kept its own size and internal layout.
  * Layout doc: docs/design/levels/island.md
  *
  * Conventions (shared with src/shared/sim and src/render):
@@ -15,6 +17,7 @@
  * is fully deterministic. The exported ISLAND is plain IslandMapData (kind 'island', carrier 'seaplane').
  */
 import type { IslandMapData } from '../../shared/types';
+import { GRASS_PATCH_RADIUS } from '../../shared/grass';
 import { atan2Det, cosRad, hypot2, sinRad } from './detTrig';
 
 type Prop = IslandMapData['props'][number];
@@ -32,17 +35,17 @@ export interface Circle {
 // ---------------------------------------------------------------------------
 // Island shape
 // ---------------------------------------------------------------------------
-export const ISLAND_RADIUS = 110;
-export const WORLD_RADIUS = 135;
+export const ISLAND_RADIUS = 165;
+export const WORLD_RADIUS = 190;
 export const BASE_HEIGHT = 2.5;
 export const BEACH_WIDTH = 18;
 /** Coastline radius = islandRadius + amplitude * n(angle), n in [-1, 1]. */
 export const SHORE_NOISE = { amplitude: 4, frequency: 2.5, seed: 1107 };
 
 /** Furthest any on-land footprint may reach from the origin: worst-case coastline minus 1 m. */
-export const LAND_LIMIT = ISLAND_RADIUS - SHORE_NOISE.amplitude - 1; // 105
+export const LAND_LIMIT = ISLAND_RADIUS - SHORE_NOISE.amplitude - 1; // 160
 /** Worst-case inner edge of the sand band. Anything between this and LAND_LIMIT is always sand. */
-export const SAND_INNER = ISLAND_RADIUS - BEACH_WIDTH + SHORE_NOISE.amplitude; // 96
+export const SAND_INNER = ISLAND_RADIUS - BEACH_WIDTH + SHORE_NOISE.amplitude; // 151
 
 // ---------------------------------------------------------------------------
 // Layout rules
@@ -57,10 +60,10 @@ export const LOOT_PROP_CLEARANCE = 0.75;
 /** Minimum spacing between loot points. */
 export const LOOT_SPACING = 2.5;
 
-const SPAWN_COUNT = 24;
-const SPAWN_START_DEG = 7.5;
-const SPAWN_STEP_DEG = 360 / SPAWN_COUNT; // 15 deg, ~26 m apart along the ring
-const SPAWN_RING_R = 100;
+const SPAWN_COUNT = 36;
+const SPAWN_START_DEG = 5;
+const SPAWN_STEP_DEG = 360 / SPAWN_COUNT; // 10 deg, ~27 m apart along the ring
+const SPAWN_RING_R = 155;
 
 const INLAND_LOOT = 4;
 const INLAND_RARE = 2;
@@ -77,6 +80,7 @@ const FOOT_R: Record<PropKind, number> = {
   boat: 2.0, // 1.5x4 m rowboat (see propFootprint)
   tikiTorch: 0.25,
   driftwood: 1.2, // ~2.4 m log (see propFootprint)
+  grass: GRASS_PATCH_RADIUS, // soft tall-grass patch (systems/grass.md)
 };
 
 // ---------------------------------------------------------------------------
@@ -97,31 +101,31 @@ interface PoiDef {
  */
 const POI_DEFS: PoiDef[] = [
   { id: 'summit', deg: 0, r: 0, radius: 22, loot: { epic: 4, rare: 4, common: 1 } },
-  { id: 'rocks', deg: 35, r: 90, radius: 16, loot: { epic: 0, rare: 1, common: 3 } },
-  { id: 'dock', deg: 95, r: 90, radius: 18, loot: { epic: 0, rare: 4, common: 1 } },
-  { id: 'grove', deg: 145, r: 58, radius: 20, loot: { epic: 3, rare: 2, common: 1 } },
-  { id: 'tikibar', deg: 195, r: 94, radius: 14, loot: { epic: 0, rare: 1, common: 3 } },
-  { id: 'village', deg: 245, r: 78, radius: 22, loot: { epic: 0, rare: 3, common: 2 } },
-  { id: 'wreck', deg: 310, r: 92, radius: 16, loot: { epic: 0, rare: 2, common: 2 } },
+  { id: 'rocks', deg: 35, r: 145, radius: 16, loot: { epic: 0, rare: 1, common: 3 } },
+  { id: 'dock', deg: 95, r: 145, radius: 18, loot: { epic: 0, rare: 4, common: 1 } },
+  { id: 'grove', deg: 145, r: 94.25, radius: 20, loot: { epic: 3, rare: 2, common: 1 } },
+  { id: 'tikibar', deg: 195, r: 149, radius: 14, loot: { epic: 0, rare: 1, common: 3 } },
+  { id: 'village', deg: 245, r: 133, radius: 22, loot: { epic: 0, rare: 3, common: 2 } },
+  { id: 'wreck', deg: 310, r: 147, radius: 16, loot: { epic: 0, rare: 2, common: 2 } },
 ];
 
 const HILL_DEFS = [
-  { name: 'summit', deg: 0, r: 0, radius: 34, height: 10 },
-  { name: 'ne-ridge', deg: 50, r: 55, radius: 20, height: 7 },
-  { name: 'w-bluff', deg: 285, r: 52, radius: 22, height: 6 },
-  { name: 's-knoll', deg: 175, r: 48, radius: 14, height: 4 },
+  { name: 'summit', deg: 0, r: 0, radius: 55, height: 12 },
+  { name: 'ne-ridge', deg: 50, r: 89.4, radius: 32, height: 8 },
+  { name: 'w-bluff', deg: 285, r: 84.5, radius: 36, height: 7 },
+  { name: 's-knoll', deg: 175, r: 78, radius: 23, height: 5 },
 ];
 
 /** Candidate final-circle centres (compass deg, distance from origin). All well inland. */
 const ZONE_CENTER_DEFS: [number, number][] = [
   [0, 0],
-  [30, 40],
-  [90, 42],
-  [140, 40],
-  [200, 40],
-  [250, 42],
-  [310, 40],
-  [355, 36],
+  [30, 65],
+  [90, 68.25],
+  [140, 65],
+  [200, 65],
+  [250, 68.25],
+  [310, 65],
+  [355, 58.5],
 ];
 
 // ---------------------------------------------------------------------------
@@ -332,21 +336,21 @@ export function buildIsland(): IslandMapData {
   const b = new Builder(LAYOUT_SEED);
   const anyRot = (): number => b.range(0, Math.PI * 2);
 
-  // 1. Player spawns: 24 on the sand ring, evenly spaced (every 15 deg, ~26 m apart).
+  // 1. Player spawns: 36 on the sand ring, evenly spaced (every 10 deg, ~27 m apart).
   for (let k = 0; k < SPAWN_COUNT; k++) {
     b.addSpawn(polar(SPAWN_START_DEG + k * SPAWN_STEP_DEG, SPAWN_RING_R));
   }
 
   // 2. Anchor structures first so they always get their spot.
   // Dock (harbour) POI: landward end on the beach, seaward end over water.
-  const dock1 = polar(95, 111);
+  const dock1 = polar(95, 166.5);
   b.addProp({ kind: 'dock', pos: dock1, rotY: outward(dock1), scale: 1 });
-  const dock2 = polar(104, 109);
+  const dock2 = polar(101, 164.5);
   b.addProp({ kind: 'dock', pos: dock2, rotY: outward(dock2), scale: 0.75 });
 
-  const boathouse = polar(95, 83);
+  const boathouse = polar(95, 138);
   b.propNear({ kind: 'hut', pos: boathouse, rotY: outward(boathouse), scale: 1.1 });
-  const shed = polar(107, 86);
+  const shed = polar(102.3, 140.3);
   b.propNear({ kind: 'hut', pos: shed, rotY: outward(shed), scale: 0.9 });
 
   // Village: six huts in a ring facing a central plaza.
@@ -357,13 +361,13 @@ export function buildIsland(): IslandMapData {
   }
 
   // Tiki bar: one hut facing the sea.
-  const bar = polar(195, 89);
+  const bar = polar(195, 144);
   b.propNear({ kind: 'hut', pos: bar, rotY: outward(bar), scale: 1 }, 3);
 
   // Wreck cove: a big beached hull plus a small overturned rowboat.
-  const hull = polar(315, 99);
+  const hull = polar(310, 153);
   b.propNear({ kind: 'boat', pos: hull, rotY: outward(hull) + 1.1, scale: 1.8 }, 3);
-  b.propNear({ kind: 'boat', pos: polar(301, 96), rotY: anyRot(), scale: 1 }, 3);
+  b.propNear({ kind: 'boat', pos: polar(300, 150), rotY: anyRot(), scale: 1 }, 3);
 
   // 3. POI dressing.
   // Summit: exposed hilltop, a beacon of four torches, a sparse ring of low rocks and crates.
@@ -397,10 +401,10 @@ export function buildIsland(): IslandMapData {
   b.scatter(2, () => ({ kind: 'driftwood', pos: b.inDisc(rockpoint, 14), rotY: anyRot(), scale: b.range(0.8, 1.2) }));
 
   // Harbour: torches flank the main dock, cargo crates on the quay.
-  b.propNear({ kind: 'tikiTorch', pos: polar(92, 102.5), rotY: 0, scale: 1 }, 2);
-  b.propNear({ kind: 'tikiTorch', pos: polar(98, 102.5), rotY: 0, scale: 1 }, 2);
-  b.scatter(10, () => ({ kind: 'crate', pos: b.inDisc(polar(98, 92), 11), rotY: anyRot(), scale: b.range(0.9, 1.2) }));
-  b.scatter(2, () => ({ kind: 'driftwood', pos: b.inDisc(polar(86, 100), 6), rotY: anyRot(), scale: b.range(0.8, 1.2) }));
+  b.propNear({ kind: 'tikiTorch', pos: polar(93, 157.5), rotY: 0, scale: 1 }, 2);
+  b.propNear({ kind: 'tikiTorch', pos: polar(97, 157.5), rotY: 0, scale: 1 }, 2);
+  b.scatter(10, () => ({ kind: 'crate', pos: b.inDisc(polar(96.9, 147), 11), rotY: anyRot(), scale: b.range(0.9, 1.2) }));
+  b.scatter(2, () => ({ kind: 'driftwood', pos: b.inDisc(polar(89.2, 154.6), 6), rotY: anyRot(), scale: b.range(0.8, 1.2) }));
 
   // Palm grove: dense inland palms and bushes. Close-range jungle fights.
   const grove = poiCentre('grove');
@@ -411,9 +415,9 @@ export function buildIsland(): IslandMapData {
 
   // Tiki bar: umbrellas on the sand, torches, a few crates by the bar.
   const tiki = poiCentre('tikibar');
-  b.scatter(6, () => ({ kind: 'umbrella', pos: polar(b.range(186, 204), b.range(97, 103)), rotY: anyRot(), scale: 1 }));
-  b.scatter(6, () => ({ kind: 'tikiTorch', pos: polar(b.range(187, 203), b.range(91, 99)), rotY: 0, scale: 1 }));
-  b.scatter(3, () => ({ kind: 'crate', pos: b.inDisc(polar(195, 87), 8), rotY: anyRot(), scale: 1 }));
+  b.scatter(6, () => ({ kind: 'umbrella', pos: polar(b.range(189.3, 200.9), b.range(151.6, 157.6)), rotY: anyRot(), scale: 1 }));
+  b.scatter(6, () => ({ kind: 'tikiTorch', pos: polar(b.range(190, 200.1), b.range(145.7, 153.7)), rotY: 0, scale: 1 }));
+  b.scatter(3, () => ({ kind: 'crate', pos: b.inDisc(polar(195, 142), 8), rotY: anyRot(), scale: 1 }));
   b.scatter(3, () => ({ kind: 'bush', pos: b.inDisc(tiki, 14), rotY: anyRot(), scale: b.range(0.8, 1.2) }));
 
   // Village plaza: torches, crates as plaza cover, some greenery around the huts.
@@ -431,34 +435,42 @@ export function buildIsland(): IslandMapData {
 
   // Wreck cove: washed-up cargo and driftwood, rocks framing the cove.
   const wreck = poiCentre('wreck');
-  b.scatter(8, () => ({ kind: 'driftwood', pos: b.inDisc(polar(310, 97), 14), rotY: anyRot(), scale: b.range(0.8, 1.3) }));
+  b.scatter(8, () => ({ kind: 'driftwood', pos: b.inDisc(polar(310, 152), 14), rotY: anyRot(), scale: b.range(0.8, 1.3) }));
   b.scatter(8, () => ({ kind: 'crate', pos: b.inDisc(wreck, 14), rotY: anyRot(), scale: b.range(0.9, 1.2) }));
   b.scatter(5, () => ({ kind: 'rock', pos: b.inDisc(wreck, 18), rotY: anyRot(), scale: b.range(0.9, 1.6) }));
 
   // 4. Global dressing.
   // Coastal palm clusters, centred between spawns so each spawn lands on open sand.
-  const clusters = 24;
+  const clusters = SPAWN_COUNT;
   for (let k = 0; k < clusters; k++) {
-    const c = polar(k * (360 / clusters) + b.range(-4, 4), b.range(93, 101));
+    const c = polar(k * (360 / clusters) + b.range(-2.7, 2.7), b.range(148, 156));
     const n = b.rng() < 0.5 ? 3 : 4;
     b.scatter(n, () => ({ kind: 'palm', pos: b.inDisc(c, 6), rotY: anyRot(), scale: b.range(0.85, 1.3) }), n * 15);
   }
   // Inland jungle: palms, bushes and rocks between POIs.
-  b.scatter(20, () => ({ kind: 'palm', pos: b.inRing(18, 88), rotY: anyRot(), scale: b.range(0.9, 1.3) }));
-  b.scatter(45, () => ({ kind: 'bush', pos: b.inRing(8, 92), rotY: anyRot(), scale: b.range(0.7, 1.3) }));
-  b.scatter(22, () => ({ kind: 'rock', pos: b.inRing(14, 90), rotY: anyRot(), scale: b.range(0.6, 1.4) }));
+  b.scatter(40, () => ({ kind: 'palm', pos: b.inRing(29, 143), rotY: anyRot(), scale: b.range(0.9, 1.3) }));
+  b.scatter(90, () => ({ kind: 'bush', pos: b.inRing(13, 147), rotY: anyRot(), scale: b.range(0.7, 1.3) }));
+  b.scatter(44, () => ({ kind: 'rock', pos: b.inRing(23, 145), rotY: anyRot(), scale: b.range(0.6, 1.4) }));
+  // Island v2 tall grass (systems/grass.md): soft patches to hide in, inland and a few at the dune line.
+  b.scatter(55, () => ({ kind: 'grass', pos: b.inRing(26, 141), rotY: anyRot(), scale: b.range(0.8, 1.4) }));
+  b.scatter(10, () => {
+    const pos = b.inRing(139, 146);
+    const deg = (atan2Det(pos.x, -pos.z) / DEG + 360) % 360;
+    // Long Beach (330-30 deg) stays open sand: an off-map point makes the try fail.
+    return { kind: 'grass', pos: deg >= 330 || deg <= 30 ? { x: 1e4, z: 0 } : pos, rotY: anyRot(), scale: b.range(0.7, 1.0) };
+  });
   // Beach clutter: driftwood, umbrellas, small rocks.
-  b.scatter(12, () => ({ kind: 'driftwood', pos: b.inRing(96, 103), rotY: anyRot(), scale: b.range(0.8, 1.3) }));
-  b.scatter(8, () => ({ kind: 'umbrella', pos: b.inRing(94, 102), rotY: anyRot(), scale: 1 }));
-  b.scatter(8, () => ({ kind: 'rock', pos: b.inRing(94, 102), rotY: anyRot(), scale: b.range(0.5, 0.9) }));
+  b.scatter(18, () => ({ kind: 'driftwood', pos: b.inRing(151, 158), rotY: anyRot(), scale: b.range(0.8, 1.3) }));
+  b.scatter(12, () => ({ kind: 'umbrella', pos: b.inRing(149, 157), rotY: anyRot(), scale: 1 }));
+  b.scatter(12, () => ({ kind: 'rock', pos: b.inRing(149, 157), rotY: anyRot(), scale: b.range(0.5, 0.9) }));
 
-  // 5. Loot (target ~77: ~51 common / ~19 rare / 7 epic).
+  // 5. Loot (target ~95: ~69 common / ~19 rare / 7 epic).
   // Beach ring commons in the gaps between spawns. Gaps alternate 2 points / 1 point, so every
   // spawn borders one of each = 3 loot points 13-16 m away (<= ~21 m after nudges and 3 m spawn jitter).
   for (let k = 0; k < SPAWN_COUNT; k++) {
     const gapDeg = SPAWN_START_DEG + (k + 0.5) * SPAWN_STEP_DEG;
-    b.lootNear(polar(gapDeg, 97), 'common');
-    if (k % 2 === 0) b.lootNear(polar(gapDeg, 90), 'common');
+    b.lootNear(polar(gapDeg, 152), 'common');
+    if (k % 2 === 0) b.lootNear(polar(gapDeg, 145), 'common');
   }
   // POI caches: all epic loot lives here (summit + grove only).
   for (const d of POI_DEFS) {
@@ -467,7 +479,7 @@ export function buildIsland(): IslandMapData {
   // A few inland pickups between POIs to reward rotating through the jungle.
   let inland = 0;
   for (let t = 0; t < 4000 && inland < INLAND_LOOT; t++) {
-    const p = b.inRing(15, 86);
+    const p = b.inRing(24, 140);
     if (POI_DEFS.some((d) => dist(p, poiCentre(d.id)) < d.radius)) continue;
     if (b.addLoot(p, inland < INLAND_RARE ? 'rare' : 'common')) inland++;
   }

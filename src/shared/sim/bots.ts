@@ -20,6 +20,7 @@ import type { Balance } from '../balance';
 import type { BotDropBalance } from '../balance';
 import { ammoFor, effectiveSight, isScopeSight } from '../balance';
 import { segmentBlockedBySmoke } from '../smoke';
+import { grassHides, grassPatches } from '../grass';
 import { isIndoor } from '../maps';
 import { DEG2RAD, type Rng, wrapAngle } from '../math';
 import type {
@@ -918,6 +919,20 @@ function botSees(env: BotEnv, a: Vec3, c: Vec3): boolean {
   return !clouds || clouds.length === 0 || !segmentBlockedBySmoke(clouds, a, c, env.now, env.balance.items.smoke.cloud);
 }
 
+/**
+ * Island v2 (systems/grass.md): a bot sees another player when the line to the chest is clear (botSees) and the player
+ * is not hidden in tall grass from the bot's position (src/shared/grass.ts, the same rule the client's renderer uses).
+ */
+function botSeesPlayer(env: BotEnv, eye: Vec3, o: SimPlayer): boolean {
+  const patches = grassPatches(env.map);
+  if (patches.length > 0) {
+    const m = o.move;
+    const s = { x: m.pos.x, z: m.pos.z, stance: m.stance, stanceFrom: m.stanceFrom, lastShotAt: o.lastShotAt };
+    if (grassHides(patches, s, eye.x, eye.z, env.now, env.balance.grass)) return false;
+  }
+  return botSees(env, eye, chestOf(o, env.balance));
+}
+
 /** M2c: the melee value of a melee weapon (or fists) at a level (bots.melee.lootValue x levels.botValueMultiplier). */
 const meleeValue = (m: MeleeSlotState | null, b: Balance): number =>
   m ? b.bots.melee.lootValue[m.weapon] * levelValue(b, m.level) : b.bots.melee.lootValue.fists;
@@ -1576,7 +1591,7 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
       if (retaliate) score *= 0.5;
     }
     if (score >= bestScore && (engageable || d >= avoidD)) continue;
-    if (!botSees(env, eye, chestOf(o, b))) continue;
+    if (!botSeesPlayer(env, eye, o)) continue;
     if (engageable && score < bestScore) {
       bestTarget = o;
       bestScore = score;
@@ -1873,7 +1888,7 @@ function decide(brain: BotBrain, self: SimPlayer, env: BotEnv, rng: Rng): void {
     const att = env.players.find((o) => o.id === hitBy.id);
     if (att && att.alive && !att.dying && !att.aboard) {
       const inReach = distXZ(p2, att.move.pos) <= bestFireRange(self, b);
-      const seen = att.id === brain.targetId ? brain.targetVisible : inReach && botSees(env, eye, chestOf(att, b));
+      const seen = att.id === brain.targetId ? brain.targetVisible : inReach && botSeesPlayer(env, eye, att);
       if (!inReach || !seen) startCover(brain, self, env, att, 'underFire', tac.coverSearchRadius);
     }
   }

@@ -1967,6 +1967,19 @@
 /* M2c (P2): loot peek = the prompt chip dimmed, no key (UI M2c §3.1); spectate weapon + badge. */
 .ui-prompt.is-peek { opacity: 0.72; border-style: dotted; }
 .ui-hud.is-in-smoke .ui-prompt.is-peek { display: none; }
+/* ---- Island v2 tall grass: 'Hidden' badge beside the stance glyph while concealed (systems/grass.md). */
+.ui-grass {
+  display: none;
+  align-items: center;
+  padding: 0 0.55em;
+  background: #5aa844;
+  color: var(--cream);
+  border: 0.14em solid var(--ink);
+  border-radius: 0.6em;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+.ui-hud.is-hidden-in-grass .ui-grass { display: inline-flex; }
 .ui-spectate__weapon { display: inline-flex; align-items: center; gap: 0.15em; }
 .ui-spectate__weapon[hidden] { display: none; }
 .ui-lobby__look:empty, .ui-lobby__look[hidden] { display: none; }

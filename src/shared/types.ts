@@ -15,7 +15,7 @@
 // MapData is never sent on the wire (clients and server look it up by id with getMap), so it may hold larger tables.
 // ---------------------------------------------------------------------------------------------
 export type Vec2 = { x: number; z: number };
-export type PropKind = 'palm' | 'rock' | 'bush' | 'crate' | 'hut' | 'dock' | 'umbrella' | 'boat' | 'tikiTorch' | 'driftwood';
+export type PropKind = 'palm' | 'rock' | 'bush' | 'crate' | 'hut' | 'dock' | 'umbrella' | 'boat' | 'tikiTorch' | 'driftwood' | 'grass';
 export interface PropPlacement {
   kind: PropKind;
   x: number;

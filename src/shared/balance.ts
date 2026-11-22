@@ -156,6 +156,19 @@ export interface GrenadeBalance extends ThrowableBalance, BlastBalance {
   dangerMargin?: number;
 }
 
+/**
+ * Island v2 (systems/grass.md): tall-grass concealment. Rule: src/shared/grass.ts `grassHides`. A player whose feet are
+ * at least `edgeInset` m inside a 'grass' patch, in a hiding stance (settled, or moving between two hiding stances),
+ * is hidden from every viewer farther than `revealRange` m (horizontal), until `revealAfterShotMs` after their last shot.
+ */
+export interface GrassBalance {
+  revealRange: number;
+  revealAfterShotMs: number;
+  edgeInset: number;
+  hidesCrouched: boolean;
+  hidesProne: boolean;
+}
+
 /** M2c (smoke.md): `items.smoke.cloud`. Shape over time: src/shared/smoke.ts. */
 export interface SmokeCloudBalance {
   /** Opaque radius at full size, m. */
@@ -820,6 +833,8 @@ export interface Balance {
     extraAmmoScatter: number;
     pickupBobHeight: number;
   };
+  /** Island v2: tall-grass concealment (GrassBalance). */
+  grass: GrassBalance;
   zone: {
     damageTickMs: number;
     /**
@@ -920,6 +935,7 @@ const SECTION_SPEC: Record<string, Record<string, Kind>> = {
   // M2a: absorbFraction moved per piece.
   armor: { dropOnDeath: B },
   loot: { extraAmmoWithWeapon: N, spawnChance: N, weaponSpawnsWithFullMag: B, extraAmmoScatter: N, pickupBobHeight: N },
+  grass: { revealRange: N, revealAfterShotMs: N, edgeInset: N, hidesCrouched: B, hidesProne: B },
   zone: {
     damageTickMs: N, startRadius: N, indoorCenterInset: N, ignoresArmor: B, landCheckMinHeight: N, landCheckMaxTries: N,
     finalCollapseDelaySeconds: N, finalCollapseSeconds: N, finalCollapseDps: N, warningSecondsBeforeShrink: N,

@@ -26,6 +26,8 @@ const STRIDE_PRONE_M = 0.62;
 const RECOIL_DECAY = 12; // 1/s
 const HIT_DECAY = 7;
 const HIT_FLASH_S = 0.09;
+/** Island v2: tall-grass fade speed (full fade in about 0.3 s). */
+const GRASS_FADE_RATE = 3.5;
 /** Stance weight smoothing (1/s): hides snapshot steps and interrupted transitions without visible lag. */
 const STANCE_SMOOTH = 22;
 /** Remote ADS pose smoothing (1/s); anim.ads is a boolean. */
@@ -121,6 +123,8 @@ interface View {
   recoil: number;
   hit: number;
   hitFlash: number;
+  /** Island v2 (systems/grass.md): 1 = drawn, 0 = hidden in tall grass (eases with GRASS_FADE_RATE). */
+  grassFade: number;
   flashing: boolean;
   /** Client time of death, or -1. */
   diedAt: number;
@@ -262,7 +266,7 @@ export class PlayerViews {
       v = {
         id: p.state.id, model, skin, outlines, colourMeshes, held: new Map(), heldKey: '', heldObj: null, heldHandle: null, heldBatchKey: '', baseKey,
         wear: { vest: wear.vest, helmet: wear.helmet }, walkPhase: 0, lastX: 0, lastZ: 0, speed: 0, recoil: 0, hit: 0,
-        hitFlash: 0, flashing: false, diedAt: -1, poofed: false, seed: 0, seen: 0, pose: makePose(),
+        hitFlash: 0, grassFade: 1, flashing: false, diedAt: -1, poofed: false, seed: 0, seen: 0, pose: makePose(),
         blend: { crouch: 0, prone: 0 }, blendInit: false, ads: 0, cookExplodesAt: 0, sparkT: 0,
         chute: null, dropPhase: null, chuteAt: -1, landAt: -1, velX: 0, velZ: 0,
       };
@@ -275,6 +279,7 @@ export class PlayerViews {
     v.recoil = 0;
     v.hit = 0;
     v.hitFlash = 0;
+    v.grassFade = p.grassHidden ? 0 : 1;
     v.blendInit = false;
     v.ads = 0;
     v.cookExplodesAt = 0;
@@ -509,6 +514,9 @@ export class PlayerViews {
       v.recoil *= Math.exp(-dt * RECOIL_DECAY);
       v.hit *= Math.exp(-dt * HIT_DECAY);
       v.hitFlash -= dt;
+      // Island v2: players hidden in tall grass (PlayerView.grassHidden, src/shared/grass.ts) fade out, shadow and all.
+      const grassTarget = p.grassHidden ? 0 : 1;
+      v.grassFade += Math.sign(grassTarget - v.grassFade) * Math.min(Math.abs(grassTarget - v.grassFade), dt * GRASS_FADE_RATE);
 
       // M2b drop phase timers (pose blend and parachute), tracked even while hidden so FP -> 3P stays continuous.
       const phase = dropPhaseOf(s);
@@ -527,7 +535,7 @@ export class PlayerViews {
         continue;
       }
       const flash = v.hitFlash > 0 && s.alive;
-      const fade = f.follow && (p.isLocal || p.isSpectateTarget) ? bodyFade(s.pos, this.stanceHeight(v), cam) : 1;
+      const fade = (f.follow && (p.isLocal || p.isSpectateTarget) ? bodyFade(s.pos, this.stanceHeight(v), cam) : 1) * v.grassFade;
       this.setMaterialState(v, flash, fade);
 
       if (v.poofed) {
@@ -594,7 +602,7 @@ export class PlayerViews {
         if (cooking && s.weapon === 'grenade' && v.heldObj?.visible) this.fuseSpark(v, f);
         const sight = s.sight as SightType;
         // M2c: no glint through smoke (same rule as the name tags).
-        if (!p.smokeHidden && scopeGlintVisible(p.isLocal, s.alive, s.anim, sight)) this.glint(v, s.weapon, heldScope(s.weapon, s.sight), cam, time);
+        if (!p.smokeHidden && !p.grassHidden && scopeGlintVisible(p.isLocal, s.alive, s.anim, sight)) this.glint(v, s.weapon, heldScope(s.weapon, s.sight), cam, time);
       }
     }
 

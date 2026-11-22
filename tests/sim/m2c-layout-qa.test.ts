@@ -68,7 +68,7 @@ const used = (mapId: string): Record<string, number> | undefined => {
   return b.maps?.[mapId]?.layout?.lootUsedPerTier ?? b.layout?.lootUsedPerTier;
 };
 
-for (const [mapId, guaranteed] of [['island01', 12], ['office', 16]] as const) {
+for (const [mapId, guaranteed] of [['island01', 18], ['office', 16]] as const) {
   describe(`layout.md 2-3 on ${mapId} (202 seeds)`, () => {
     it('AC 2 (tiers): activated loot per tier is exactly layout.lootUsedPerTier and the guaranteed-weapon count is fixed, on every seed', () => {
       const { tiers } = stats(mapId);
@@ -87,7 +87,7 @@ for (const [mapId, guaranteed] of [['island01', 12], ['office', 16]] as const) {
 }
 
 describe('layout.md AC 2 per-group rules', () => {
-  it('island: POI and inland groups exact per seed; the beach ring has 36 commons, 12 gaps of 2 and 12 of 1, alternating', () => {
+  it('island: POI and inland groups exact per seed; the beach ring has 54 commons, 18 gaps of 2 and 18 of 1, alternating (island v2: 36 gaps)', () => {
     const { perSeed, layouts } = stats('island01');
     const varying = [...perSeed].filter(([g, n]) => !g.startsWith('beach.') && n.size !== 1).map(([g, n]) => `${g}: ${[...n].join('/')}`);
     expect(varying).toEqual([]);
@@ -95,9 +95,9 @@ describe('layout.md AC 2 per-group rules', () => {
       const gaps = new Map<string, number>();
       for (const s of spawns) if (s.group?.startsWith('beach.')) gaps.set(s.group, (gaps.get(s.group) ?? 0) + 1);
       const counts = [...gaps.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, n]) => n);
-      expect(counts.reduce((a, n) => a + n, 0)).toBe(36);
-      expect(counts.filter((n) => n === 2)).toHaveLength(12);
-      expect(counts.filter((n) => n === 1)).toHaveLength(12);
+      expect(counts.reduce((a, n) => a + n, 0)).toBe(54);
+      expect(counts.filter((n) => n === 2)).toHaveLength(18);
+      expect(counts.filter((n) => n === 1)).toHaveLength(18);
       for (let k = 0; k < counts.length; k++) expect(counts[k]! + counts[(k + 1) % counts.length]!, `gap ${k}`).toBe(3);
     }
   }, 120_000);

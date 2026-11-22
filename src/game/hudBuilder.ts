@@ -97,6 +97,8 @@ export interface HudBuildInput {
   layout?: MatchLayoutRef | null;
   /** The camera is inside an opaque smoke cloud (HudView.inSmoke). Absent = false. */
   inSmoke?: boolean;
+  /** Island v2: the local player is hidden in tall grass (HudView.hiddenInGrass). Absent = false. */
+  hiddenInGrass?: boolean;
   /** Predicted M2c local fields (throwable selection, T switch, melee recovery). Absent = from snapshot.local. */
   predicted?: HudLocalPrediction | null;
 }
@@ -342,6 +344,7 @@ export function buildHudView(input: HudBuildInput): HudView {
     zoneTheme: input.zoneTheme ?? zoneThemeOf(input.balance, input.map.id, isIndoor(input.map) ? 'indoor' : 'island'),
     cameraView: input.cameraView ?? 'orbit',
     inSmoke: input.inSmoke ?? false,
+    hiddenInGrass: input.hiddenInGrass ?? false,
     layout: input.layout ? { seed: input.layout.seed, look: input.layout.look } : null,
   };
 }

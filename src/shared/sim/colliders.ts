@@ -136,6 +136,8 @@ export const PROP_SHAPES: Readonly<Record<PropKind, readonly PartSpec[]>> = {
   tikiTorch: [{ shape: 'circle', r: 0.1, top: 2.07 }],
   // Model: ~2.6 m log along local Z (slightly bent toward -X), 0.35 m high. Needs a hop (stepHeight 0.3).
   driftwood: [{ shape: 'box', hx: 0.32, hz: 1.3, ox: -0.08, oz: -0.07, top: 0.35 }],
+  // Island v2 tall grass (systems/grass.md): concealment only (src/shared/grass.ts), never cover.
+  grass: [],
 };
 
 /** Dock deck height above sea level (y = 0) at scale 1. Docks stand over water, so this is absolute, not terrain-relative. */

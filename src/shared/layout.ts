@@ -11,9 +11,10 @@ import type { IndoorPropPlacement, LayoutPick, LootSpawn, PropPlacement } from '
 /**
  * Bump when a generator or variety-data change alters ANY output for an existing seed (the LV1 golden hashes catch an
  * unintended change). Server and client must build with the same version (WelcomeInfo.layout.version).
- * History: 1 = M2c launch; 2 = BUG-015 (second `ep.perchSW` candidate; office seed 0x00000001 moved, baseline unchanged).
+ * History: 1 = M2c launch; 2 = BUG-015 (second `ep.perchSW` candidate; office seed 0x00000001 moved, baseline unchanged);
+ * 3 = island v2 (island 50% bigger, 36 beach gaps, tall grass; every island seed moved, office unchanged).
  */
-export const LAYOUT_FORMAT_VERSION = 2;
+export const LAYOUT_FORMAT_VERSION = 3;
 /** "LAYO". layoutSeed = mixSeed(worldSeed, LAYOUT_SALT + attempt) (variety.md §2.1). */
 export const LAYOUT_SALT = 0x4c41594f;
 /** Seed 0 = the baseline layout (every zone's baseline variant, baseline look). */

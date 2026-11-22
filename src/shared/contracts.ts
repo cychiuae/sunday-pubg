@@ -348,6 +348,11 @@ export interface PlayerView {
    * player's head AND chest both cross an opaque cloud. Renderer hides the name tag and the spectate outline. Absent = false.
    */
   smokeHidden?: boolean;
+  /**
+   * Island v2 (systems/grass.md; producer ClientGame with the shared grassHides from the camera subject's feet): this
+   * player is hidden in tall grass. Renderer fades the body (and its shadow) out and hides the name tag. Absent = false.
+   */
+  grassHidden?: boolean;
   /** M2c: the player's melee swing, else null/absent (ClientGame: meleeSwing events for remotes, prediction for local). */
   swing?: MeleeSwingView | null;
 }
@@ -780,6 +785,11 @@ export interface HudView {
   zoneTheme: ZoneTheme;
   /** M2c (gate: required): the camera is inside an opaque smoke cloud (pointInSmoke). Ui thickens the crosshair outline. */
   inSmoke: boolean;
+  /**
+   * Island v2 (systems/grass.md): the local player is hidden in tall grass (concealedInGrass: crouched or prone inside a
+   * patch, no recent shot). Ui shows the 'hidden' badge. Absent = false.
+   */
+  hiddenInGrass?: boolean;
   /** M2c (gate: required): this match's layout seed and look (pause/results "Layout #..."); null without a layout. */
   layout: { seed: number; look: LookId } | null;
   /** M2c (P2): the ground item the screen-centre ray hits beyond pickup reach (dimmed prompt), else null. */

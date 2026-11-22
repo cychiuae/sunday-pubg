@@ -59,8 +59,8 @@ describe('terrain', () => {
 
   it('surfaces: summit grass, beach ring sand, sea water; spawns on sand, loot on land', () => {
     expect(surfaceAt(0, 0, map)).toBe('grass');
-    expect(surfaceAt(0, -100, map)).toBe('sand');
-    expect(surfaceAt(0, -125, map)).toBe('water');
+    expect(surfaceAt(0, -155, map)).toBe('sand');
+    expect(surfaceAt(0, -180, map)).toBe('water');
     for (const s of map.playerSpawns) expect(surfaceAt(s.x, s.z, map)).toBe('sand');
     for (const l of map.lootSpawns) expect(heightAt(l.x, l.z, map)).toBeGreaterThan(0);
   });
