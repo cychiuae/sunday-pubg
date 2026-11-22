@@ -172,12 +172,23 @@ describe('validateBalance', () => {
     expect(s.damage * s.headshotMultiplier).toBeGreaterThanOrEqual(b.player.maxHp);
     expect(b.combat.helmetHeadshotCap.weapons).toContain('sniper');
     expect(b.combat.helmetHeadshotCap.maxHpLoss).toBeLessThan(b.player.maxHp);
+    expect(b.combat.helmetHeadshotCap.minHelmetTier).toBe(2);
   });
 
   it('combat.helmetHeadshotCap is required and checked', () => {
     const raw = cloneBase() as Record<string, Record<string, unknown>>;
-    raw['combat']!['helmetHeadshotCap'] = { weapons: ['laser'], maxHpLoss: -1 };
+    raw['combat']!['helmetHeadshotCap'] = { weapons: ['laser'], maxHpLoss: -1, minHelmetTier: 2 };
     expect(() => validateBalance(raw)).toThrow(/helmetHeadshotCap\.weapons[\s\S]*helmetHeadshotCap\.maxHpLoss/);
+    for (const bad of [0, 5, 1.5, '2', undefined]) {
+      const r = cloneBase() as Record<string, Record<string, Record<string, unknown>>>;
+      r['combat']!['helmetHeadshotCap']!['minHelmetTier'] = bad;
+      expect(() => validateBalance(r)).toThrow(/combat\.helmetHeadshotCap\.minHelmetTier must be an integer 1-4/);
+    }
+    for (const ok of [1, 4]) {
+      const r = cloneBase() as Record<string, Record<string, Record<string, unknown>>>;
+      r['combat']!['helmetHeadshotCap']!['minHelmetTier'] = ok;
+      expect(validateBalance(r).combat.helmetHeadshotCap.minHelmetTier).toBe(ok);
+    }
     const gone = cloneBase() as Record<string, Record<string, unknown>>;
     delete gone['combat']!['helmetHeadshotCap'];
     expect(() => validateBalance(gone)).toThrow(/combat\.helmetHeadshotCap/);

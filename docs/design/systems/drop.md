@@ -104,7 +104,8 @@ above the deploy height). Disconnect in any of these -> eliminated.
   slightly longer matches.
 - Expected median: measured M2a 357-365 s, plus at most about 13 s, about **370-380 s**, inside 330-480. Phase 1 still leaves at least
   50 s between the latest landing and the first shrink. **Decision: no zone change.** Lever if `matchReport` shows a median above 450 s:
-  phase 1 `waitSeconds` 75 -> 65. If it shows bots fighting during the flight window: impossible by rule; if early fights cluster at the
+  phase 1 `waitSeconds` 75 -> 65. (Balance v9 later cut phase 1 to 60 s for pacing, `zone.md`: the latest lander now has about 30 s
+  before the first shrink and the 75 m phase 1 rotation takes about 15 s. Acceptance is now 300-480 s, target 320-400 s.) If it shows bots fighting during the flight window: impossible by rule; if early fights cluster at the
   route's hot POI, raise `bots.drop.maxBotsPerTarget` spread first.
 - Office: about +6 s (mean jump about 5 s, 2.25 s fall). No change.
 - **Office tuning (Phase C, matchReport):** the median landing was 10.9-11.6 s against the AT13 target of <= 10 s. Decision: keep the
@@ -188,5 +189,5 @@ a napkin or cocktail-umbrella style parachute indoors fits the toy scale), the c
 11. Dropping players (freefall and parachute) cannot be hit and cannot fire, pick up or heal (M1 rules still pass).
 12. Bots: over 30 seeded matches, no two bots share a target within 15 m beyond `maxBotsPerTarget`; > 80% of bots land within 10 m of their
     chosen target; cautious bots jump on average later than aggressive bots.
-13. Pacing (`matchReport.ts --matches 30 --variant both`, island and office): median match 330-480 s; median landing time <= 20 s (island),
+13. Pacing (`matchReport.ts --matches 30 --variant both`, island and office): median match 300-480 s (balance v9); median landing time <= 20 s (island),
     <= 10 s (office); no weapon above 35% of kills.

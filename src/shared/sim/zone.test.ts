@@ -27,15 +27,20 @@ function runZone(seed: number, untilMs: number, stepMs = 1000 / 30) {
 }
 
 describe('zone (the tide)', () => {
-  it('phase 1 shrink begins at 75 s; radius at 97.5 s = 106.25 (zone.md AT1)', () => {
+  it('phase 1 shrink begins at 60 s; radius at 82.5 s = 106.25 (zone.md AT1, balance v9)', () => {
     const rng = createRng(1);
     const z = createZone(b, ISLAND, rng, 0);
-    updateZone(z, b, ISLAND, rng, 74_999);
+    const p1 = b.zone.phases[0]!;
+    const startMs = p1.waitSeconds * 1000;
+    expect(startMs).toBe(60_000);
+    updateZone(z, b, ISLAND, rng, startMs - 1);
     expect(z.state.shrinking).toBe(false);
-    expect(z.state.radius).toBe(125);
-    updateZone(z, b, ISLAND, rng, 75_000);
+    expect(z.state.radius).toBe(b.zone.startRadius);
+    updateZone(z, b, ISLAND, rng, startMs);
     expect(z.state.shrinking).toBe(true);
-    updateZone(z, b, ISLAND, rng, 97_500);
+    // Halfway through the shrink: midpoint of 125 and 0.70 x 125 = 87.5.
+    updateZone(z, b, ISLAND, rng, startMs + (p1.shrinkSeconds * 1000) / 2);
+    expect(z.state.radius).toBeCloseTo((b.zone.startRadius * (1 + p1.radiusFraction)) / 2, 9);
     expect(z.state.radius).toBeCloseTo(106.25, 9);
   });
 

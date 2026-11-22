@@ -102,15 +102,18 @@ short throw sits for ~3 s. Cooking 1-2 s removes the escape window, at the risk 
 - Several victims of one explosion die on the same tick: the GDD same-tick placement tie-break applies.
 - Several grenades exploding on one tick resolve in grenade id order. Grenades never trigger each other and never move or destroy loot.
 
-Damage by distance (`maxDamage` 120, `innerRadius` 1.2, `radius` 6, `minDamageFactor` 0.1; factor = 1 - 0.1875 x (d - 1.2)):
+Damage by distance (`maxDamage` 140 since balance v9, was 120; `innerRadius` 1.2, `radius` 6, `minDamageFactor` 0.1;
+factor = 1 - 0.1875 x (d - 1.2)):
 
 | d (m) | <= 1.2 | 2 | 3 | 4 | 5 | 6 | > 6 |
 |---|---|---|---|---|---|---|---|
-| Raw damage | 120 | 102 | 79.5 | 57 | 34.5 | 12 | 0 |
-| HP loss, vest_2 (55) | 72 | 61.2 | 47.7 | 34.2 | 20.7 | 7.2 | 0 |
+| Raw damage | 140 | 119 | 92.75 | 66.5 | 40.25 | 14 | 0 |
+| HP loss, vest_2 (55) | 85 | 71.4 | 55.65 | 39.9 | 24.15 | 8.4 | 0 |
 
-Kills a full-HP **unarmored** player within 2.09 m (factor >= 100/120). Never kills a full-HP player wearing any vest (max 120 < 135).
-A grenade is a flush-and-finish tool, not a guaranteed kill.
+Kills a full-HP **unarmored** player within 2.72 m (factor >= 100/140; 2.09 m at 120). Kills a full-HP player in a fresh **vest_1**
+within 1.39 m (needs 135 raw: 100 + 35 durability). Never kills a full-HP player in vest_2 or better (max HP loss 140 - 55 = 85 for
+vest_2, 70 for vest_3, 63 for vest_4). A grenade is a flush-and-finish tool, not a guaranteed kill.
+Why 140 (v9): after the damage pass raised guns about 20%, frags at 120 got 0 kills from 52 explosions on the island.
 
 ## States and transitions (grenade slot)
 `NotHeld` -> select slot 3 (count > 0) -> `Swapping (swapMs)` -> `Ready`
@@ -122,7 +125,7 @@ Entity: `Flying` -> contact -> `Flying` (bounce) or `Resting` -> fuse 0 -> `Expl
 with no explosion.
 
 ## Tunable values
-All in `items.grenade` (see its `_note`) plus `bots.grenade.*`. **Expected to need playtest tuning**: `fuseMs` (3500), `maxDamage` (120),
+All in `items.grenade` (see its `_note`) plus `bots.grenade.*`. **Expected to need playtest tuning**: `fuseMs` (3500), `maxDamage` (140),
 `radius` / `innerRadius` (6 / 1.2), `throwSpeedMax` (22, sets max range ~33 m), `restitution` / `friction` (feel of bounces), loot weights.
 
 ## Edge cases
@@ -177,12 +180,15 @@ All in `items.grenade` (see its `_note`) plus `bots.grenade.*`. **Expected to ne
    contact at 8.0 m +- 0.5 m. Pitch 35: speed 22.0; pitch 60: speed 22.0 with launch angle 68 deg. Pitch -40: speed 7.0.
 2. Prone (settled) throw at pitch 35: speed 13.2.
 3. Cook-out: pin pull at tick 0 with LMB held: the explosion happens at the thrower's eye on the tick where 3500 ms have elapsed. An
-   unarmored 100 HP thrower dies; with vest_2 at 55 the thrower ends at 28 HP and vest 7.
+   unarmored 100 HP thrower dies; with vest_2 at 55 the thrower ends at 15 HP and the vest is destroyed (absorbs min(55, 56) = 55).
 4. Release after a 1000 ms cook: the entity has 2500 ms fuse; the explosion is 3500 ms after the pin pull (+- 1 tick).
-5. Falloff: unarmored targets with clear LOS, chest distances 1.0 / 2 / 3 / 4 / 5 / 6 / 6.1 m take 120 / 102 / 79.5 / 57 / 34.5 / 12 / 0.
+5. Falloff: unarmored targets with clear LOS, chest distances 1.0 / 2 / 3 / 4 / 5 / 6 / 6.1 m take 140 / 119 / 92.75 / 66.5 / 40.25 /
+   14 / 0.
 6. LOS: a crate between the blast and the chest blocks all damage; a bush does not; another player does not.
-7. Vest yes, helmet no: target with vest_2 (55) and helmet_3 (75) at 3 m: vest absorbs 31.8, hp 52.3, helmet stays 75.
-8. Self-damage: the thrower 2 m from their own grenade takes 102 and dies unarmored. Kill credit: the last enemy who hit them within 10 s,
+7. Vest yes, helmet no: target with vest_2 (55) and helmet_3 (75) at 3 m: vest absorbs 37.1, hp 44.35, helmet stays 75.
+7b. Vest tiers (v9): fresh vest_1 at 1.0 m: dead (140 - 35 = 105). Fresh vest_1 at 1.5 m (132.125 raw): survives at 2.875 HP. Fresh vest_2
+   at 1.0 m: 15 HP, vest destroyed.
+8. Self-damage: the thrower 2 m from their own grenade takes 119 and dies unarmored. Kill credit: the last enemy who hit them within 10 s,
    else `killerId` null; weapon `grenade`.
 9. A's grenade kills B after A died: the kill event has `killerId` A, weapon `grenade`, and A's kill count increases.
 10. Switching to slot 1 after a 1000 ms cook: an entity appears at the eye with horizontal speed 2.0 m/s and 2500 ms fuse; the swap completes
@@ -191,7 +197,7 @@ All in `items.grenade` (see its `_note`) plus `bots.grenade.*`. **Expected to ne
 12. Bounce: dropped from rest 3 m above flat ground: at least one `grenadeBounce` event (first impact ~9.5 m/s >= 2), rebound speed ~35% of
     impact, and the grenade rests (vel 0) within 4 contacts; no bounce event for impacts below 2 m/s.
 13. Water: thrown into flat 0.6 m deep water: one `grenadeBounce` with surface `water` when it crosses y = 0, it then rests on the seabed and
-    explodes at fuse end; a standing unarmored player 3 m from it with clear LOS takes 79.5 (+- 1 for the seabed offset).
+    explodes at fuse end; a standing unarmored player 3 m from it with clear LOS takes 92.75 (+- 1 for the seabed offset).
 14. Determinism: the same seed and inputs give identical grenade paths, explosion ticks and damage across runs.
 15. Slot 4 with 0 grenades: refused `noGrenades`. Throwing the last grenade auto-switches to the last gun slot.
 16. Carry: holding 3, a stack of 2 is refused `inventoryFull`; holding 2, a stack of 2 gives 1 and leaves 1.

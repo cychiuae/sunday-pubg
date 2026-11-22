@@ -1450,9 +1450,11 @@ class SimWorld implements World {
     const vr = body > 0 && vb ? applyArmorPiece(vb, body, armorBalance(b, 'vest', vb.tier).absorbFraction) : null;
     if (hr) v.helmet = hr.piece;
     if (vr) v.vest = vr.piece;
-    // combat.md "Sniper rules": a helmet turns a capped weapon's headshot into a heavy hit instead of a one-shot.
+    // combat.md "Sniper rules": a helmet of tier >= cap.minHelmetTier (tier before this hit) turns a capped weapon's
+    // headshot into a heavy hit instead of a one-shot. Lower-tier helmets only absorb as usual (v9).
     const cap = b.combat.helmetHeadshotCap;
-    const headLoss = hr ? (cap.weapons.includes(weapon) ? Math.min(hr.hpLoss, cap.maxHpLoss) : hr.hpLoss) : head;
+    const capped = hr !== null && hb !== null && hb.tier >= cap.minHelmetTier && cap.weapons.includes(weapon);
+    const headLoss = hr ? (capped ? Math.min(hr.hpLoss, cap.maxHpLoss) : hr.hpLoss) : head;
     v.hp -= headLoss + (vr ? vr.hpLoss : body);
     const headshot = head > 0;
     if (attacker.id !== v.id) v.lastDamagedBy = { id: attacker.id, at: this._timeMs };

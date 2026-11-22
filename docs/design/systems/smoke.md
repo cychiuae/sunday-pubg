@@ -113,7 +113,7 @@ counts and the selected type (local). Input: no new field (LMB, slot 3, the 4/G 
 5. Bot LOS: a bot and a target 20 m apart on flat ground, cloud at the midpoint during hold: the bot cannot see the target. Cloud 7 m off
    the line: it can. Both inside the same cloud 1.5 m apart: it can (closeSightRange 2). 3 m apart: it cannot.
 6. Bullets: a rifle shot through a holding cloud hits a target behind it for full damage.
-7. Grenade: a frag exploding inside the cloud damages a player 3 m away (79.5 unarmored).
+7. Grenade: a frag exploding inside the cloud damages a player 3 m away (92.75 unarmored; 79.5 before balance v9).
 8. `maxActive`: deploying 13 clouds makes the oldest enter its fade at once (gone 3 s later).
 9. Water: a smoke thrown into 0.6 m deep water deploys with `pos.y` = 0.
 10. Late join: a client joining 10 s after a deploy receives the cloud and draws it at full radius.

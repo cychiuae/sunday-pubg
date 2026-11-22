@@ -7,6 +7,7 @@ import { BALANCE } from '../balance';
 import { SIM_DT } from '../constants';
 import type { GunId, MapData, PropPlacement, SimEvent, Vec3 } from '../types';
 import { bestSlotFor, createBotBrain } from './bots';
+import { explosionDamage } from './grenade';
 import { flatMap, land, noSpreadBalance, playingWorld, run } from './testkit';
 import { createDebugWorld, type DebugWorld } from './World';
 
@@ -65,9 +66,12 @@ describe('combat (combat.md M2a acceptance)', () => {
       const v2 = shoot((t) => (t.vest = { tier: 2, durability: 55 }), false);
       expect(v2.hp).toBeCloseTo(47.2, 9);
       expect(v2.vest!.durability).toBeCloseTo(19.8, 9);
-      // A bare head dies; any helmet caps the head loss at combat.helmetHeadshotCap.maxHpLoss (70).
+      // A bare head dies; so does a fresh helmet_1 (below minHelmetTier, 176 - 30 = 146 HP loss, v9). helmet_2+ caps the head
+      // loss at combat.helmetHeadshotCap.maxHpLoss (70).
       expect(shoot(() => {}, true).alive).toBe(false);
-      for (const [tier, dur] of [[1, 30], [2, 45], [3, 75], [3, 1]] as const) {
+      const h1 = shoot((p) => (p.helmet = { tier: 1, durability: BALANCE.items.helmet_1.durability }), true);
+      expect(h1.alive).toBe(false);
+      for (const [tier, dur] of [[2, 45], [3, 75], [3, 1]] as const) {
         const t = shoot((p) => (p.helmet = { tier, durability: dur }), true);
         expect(t.hp, `helmet_${tier}@${dur}`).toBeCloseTo(30, 9);
         expect(t.helmet, `helmet_${tier}@${dur}`).toBeNull();
@@ -78,6 +82,45 @@ describe('combat (combat.md M2a acceptance)', () => {
     }
   });
 
+  it('helmet cap minHelmetTier (balance v9): sniper head kills a full-HP helmet_1 wearer at every level; helmet_2 caps the loss', () => {
+    const cap = BALANCE.combat.helmetHeadshotCap;
+    expect(cap.minHelmetTier).toBe(2);
+    for (const level of [1, 2, 3, 4] as const) {
+      const shoot = (helmet: 'helmet_1' | 'helmet_2') => {
+        const d = duel(30, 'sniper');
+        d.sp.inv.slots[0] = { weapon: 'sniper', mag: BALANCE.weapons.sniper.magSize, level, scope: null };
+        const it = BALANCE.items[helmet];
+        d.tp.helmet = { tier: it.tier, durability: it.durability };
+        const dmg = ofType(click(d.w, d.s, d.head), 'damage');
+        expect(dmg.length, `${helmet} L${level}`).toBe(1);
+        expect(dmg[0]!.headshot).toBe(true);
+        return { tp: d.tp, ev: dmg[0]! };
+      };
+      // helmet_1 (tier 1 < minHelmetTier): normal armor rule only. L1: 176 - min(30, 52.8) = 146 HP loss -> dead.
+      const h1 = shoot('helmet_1');
+      expect(h1.tp.alive, `helmet_1 L${level}`).toBe(false);
+      expect(h1.ev.hpAfter).toBe(0);
+      expect(h1.ev.helmet).toMatchObject({ tier: 1, broken: true });
+      // helmet_2 (tier 2 >= minHelmetTier): HP loss capped at maxHpLoss (70), helmet destroyed.
+      const h2 = shoot('helmet_2');
+      expect(h2.tp.alive, `helmet_2 L${level}`).toBe(true);
+      expect(BALANCE.player.maxHp - h2.tp.hp, `helmet_2 L${level}`).toBeCloseTo(cap.maxHpLoss, 9);
+      expect(h2.tp.helmet).toBeNull();
+    }
+  });
+
+  it('helmet cap reads minHelmetTier from balance: at 1 a helmet_1 head is capped too, at 3 helmet_2 is not', () => {
+    const shoot = (minHelmetTier: number, tier: 1 | 2) => {
+      const balance = noSpreadBalance((b) => (b.combat.helmetHeadshotCap.minHelmetTier = minHelmetTier));
+      const d = duel(30, 'sniper', { balance });
+      d.tp.helmet = { tier, durability: BALANCE.items[`helmet_${tier}`].durability };
+      click(d.w, d.s, d.head);
+      return d.tp;
+    };
+    expect(shoot(1, 1).hp).toBeCloseTo(BALANCE.player.maxHp - BALANCE.combat.helmetHeadshotCap.maxHpLoss, 9);
+    expect(shoot(3, 2).alive).toBe(false); // 176 - 45 = 131 HP loss, uncapped
+  });
+
   it('AT19: shots-to-kill table (forced 0 spread, 5 m)', () => {
     // [gun, no armor body, no armor head, vest_2 body, helmet_2 head, vest_3 body, helmet_3 head]
     const table: [GunId, number, number, number, number, number, number][] = [
@@ -86,7 +129,7 @@ describe('combat (combat.md M2a acceptance)', () => {
       ['shotgun', 1, 1, 2, 1, 2, 1],
       ['rifle', 5, 3, 7, 4, 8, 5],
       ['lmg', 5, 4, 8, 5, 9, 6],
-      ['dmr', 2, 2, 4, 2, 4, 2],
+      ['dmr', 3, 2, 4, 2, 4, 3],
       ['sniper', 2, 1, 2, 2, 2, 2],
     ];
     const columns: { head: boolean; armor: 'vest' | 'helmet' | null; tier: 2 | 3 }[] = [
@@ -135,14 +178,18 @@ describe('combat (combat.md M2a acceptance)', () => {
     expect(found).toBe(true);
   });
 
-  it('AT20: DMR body 50 / head 87.5 at 40 m; body 40 at 180 m+', () => {
+  it('AT20: DMR body 44 / head 77 at 40 m; body 35.2 at 180 m+ (balance v9)', () => {
+    const dmr = BALANCE.weapons.dmr;
     const at = (dist: number, head: boolean) => {
       const d = duel(dist + BALANCE.player.radius, 'dmr');
       return ofType(click(d.w, d.s, head ? pitchTo(EYE_Y, GROUND + 1.0, dist) : pitchTo(EYE_Y, GROUND + 0.5, dist)), 'damage')[0]!.amount;
     };
-    expect(at(40, false)).toBeCloseTo(50, 6);
-    expect(at(40, true)).toBeCloseTo(87.5, 6);
-    expect(at(185, false)).toBeCloseTo(40, 6);
+    expect(dmr.damage).toBe(44);
+    expect(at(40, false)).toBeCloseTo(dmr.damage, 6);
+    expect(at(40, true)).toBeCloseTo(dmr.damage * dmr.headshotMultiplier, 6);
+    expect(at(40, true)).toBeCloseTo(77, 6);
+    expect(at(185, false)).toBeCloseTo(dmr.damage * dmr.minDamageFactor, 6);
+    expect(at(185, false)).toBeCloseTo(35.2, 6);
   });
 
   it('AT17: LMG firing slows to 2.75 m/s; 300 ms after the last shot it returns to 5.0', () => {
@@ -302,7 +349,7 @@ describe('grenades in the World (grenades.md)', () => {
     return { x: feet.x + Math.sqrt(d * d - dy * dy), y: pos.y, z: feet.z };
   };
 
-  it('AT3: cook-out at the eye after 3500 ms kills an unarmored thrower; vest_2 leaves 28 HP and vest 7', () => {
+  it('AT3: cook-out at the eye after 3500 ms kills an unarmored thrower; vest_2 leaves 15 HP and is destroyed', () => {
     for (const vest of [null, { tier: 2 as const, durability: 55 }]) {
       const t = thrower();
       t.p.vest = vest;
@@ -320,8 +367,12 @@ describe('grenades in the World (grenades.md)', () => {
       expect(ofType(ev, 'explosion')[0]).toMatchObject({ inHand: true, ownerId: t.id });
       if (!vest) expect(t.p.alive).toBe(false);
       else {
-        expect(t.p.hp).toBeCloseTo(28, 6);
-        expect(t.p.vest!.durability).toBeCloseTo(7, 6);
+        // Inside innerRadius: raw = maxDamage (140); vest_2 absorbs min(55, 140 x 0.4 = 56) = 55 and breaks; HP 100 - 85 = 15.
+        const raw = BALANCE.items.grenade.maxDamage;
+        const a = Math.min(55, raw * BALANCE.items.vest_2.absorbFraction);
+        expect(t.p.hp).toBeCloseTo(BALANCE.player.maxHp - (raw - a), 6);
+        expect(t.p.hp).toBeCloseTo(15, 6);
+        expect(t.p.vest).toBeNull();
       }
     }
   });
@@ -360,11 +411,17 @@ describe('grenades in the World (grenades.md)', () => {
     expect(ofType(ev, 'explosion').length).toBe(3);
     const dmg = ofType(ev, 'damage');
     expect(dmg.find((e) => e.victimId === b1)).toBeUndefined();
-    expect(dmg.find((e) => e.victimId === b2)!.amount).toBeCloseTo(79.5, 6);
+    // grenades.md AT5-7 (v9): 92.75 raw at 3 m; vest_2 absorbs 92.75 x 0.4 = 37.1, HP 100 - 55.65 = 44.35.
+    const raw3 = explosionDamage(3, BALANCE);
+    expect(raw3).toBeCloseTo(92.75, 6);
+    expect(dmg.find((e) => e.victimId === b2)!.amount).toBeCloseTo(raw3, 6);
     const e3 = dmg.find((e) => e.victimId === b3)!;
     expect(e3).toMatchObject({ cause: 'explosion', attackerId: t.id, headshot: false, helmet: null });
-    expect(e3.vest!.absorbed).toBeCloseTo(31.8, 6);
-    expect(v3.hp).toBeCloseTo(52.3, 6);
+    const a3 = raw3 * BALANCE.items.vest_2.absorbFraction;
+    expect(e3.vest!.absorbed).toBeCloseTo(a3, 6);
+    expect(e3.vest!.absorbed).toBeCloseTo(37.1, 6);
+    expect(v3.hp).toBeCloseTo(BALANCE.player.maxHp - (raw3 - a3), 6);
+    expect(v3.hp).toBeCloseTo(44.35, 6);
     expect(v3.helmet).toEqual({ tier: 3, durability: 75 });
     // Events order: explosion before its damage.
     expect(ev.findIndex((e) => e.type === 'explosion')).toBeLessThan(ev.findIndex((e) => e.type === 'damage'));

@@ -76,16 +76,26 @@ describe('melee (melee.md acceptance)', () => {
     expect(d.tp.alive).toBe(false);
   });
 
-  it('3: paddle centre ray on the head: 141 kills unarmored; helmet_2 leaves 4', () => {
-    for (const helmet of [false, true]) {
+  it('3: paddle centre ray on the head: 117 kills unarmored; helmet_1 leaves 13, helmet_2 leaves 28 (balance v9)', () => {
+    const head = B.weapons.paddle.damage * B.weapons.paddle.headshotMultiplier;
+    expect(head).toBe(117);
+    // armor.md: a = min(D, H x f). helmet_1: min(30, 35.1) = 30 -> 87 loss, hp 13. helmet_2: min(45, 46.8) = 45 -> 72 loss, hp 28.
+    for (const [helmet, hpLeft] of [[null, 0], ['helmet_1', 13], ['helmet_2', 28]] as const) {
       const d = duel('paddle', 1.5);
-      if (helmet) d.tp.helmet = { tier: 2, durability: 45 };
+      if (helmet) d.tp.helmet = { tier: B.items[helmet].tier, durability: B.items[helmet].durability };
       const headPitch = Math.atan2(B.movement.stances.stand.height * 0.93 - EYE, 1.5);
       const r = hold(d.w, d.a, 12, headPitch);
       const hit = damages(r.ev)[0]!;
-      expect(hit).toMatchObject({ headshot: true, amount: 141 });
-      if (helmet) expect(d.tp.hp).toBeCloseTo(4, 6);
-      else expect(d.tp.alive).toBe(false);
+      expect(hit).toMatchObject({ headshot: true, amount: head });
+      if (!helmet) {
+        expect(d.tp.alive).toBe(false);
+        continue;
+      }
+      const it = B.items[helmet];
+      const a = Math.min(it.durability, head * it.absorbFraction);
+      expect(d.tp.hp, helmet).toBeCloseTo(B.player.maxHp - (head - a), 6);
+      expect(d.tp.hp, helmet).toBeCloseTo(hpLeft, 6);
+      expect(d.tp.helmet, helmet).toBeNull();
     }
   });
 

@@ -17,6 +17,9 @@ const ofType = <T extends SimEvent['type']>(ev: SimEvent[], t: T): Ev<T>[] => ev
 const ticks = (ms: number): number => Math.ceil(ms / (SIM_DT * 1000) - 1e-9);
 const GROUND = 2; // flatMap baseHeight
 const EYE_Y = GROUND + BALANCE.player.eyeHeight;
+/** grenades.md falloff, written independently of src (test oracle): expected frag damage at 3D distance d. */
+const fragDamageAt = (d: number, g: Balance['items']['grenade'] = BALANCE.items.grenade): number =>
+  d <= g.innerRadius ? g.maxDamage : d > g.radius ? 0 : g.maxDamage * (1 + (g.minDamageFactor - 1) * ((d - g.innerRadius) / (g.radius - g.innerRadius)));
 const pitchTo = (fromY: number, toY: number, dist: number): number => Math.atan2(toY - fromY, dist);
 const BIG = (over: Partial<IslandMapData> = {}): IslandMapData => flatMap({ islandRadius: 300, worldRadius: 330, ...over });
 
@@ -281,7 +284,7 @@ describe('grenades.md gaps', () => {
     expect(ofType(run(q.w, ticks(1000)), 'grenadeBounce').length).toBe(0);
   });
 
-  it('AT13 (world): into 0.6 m water: one water contact, rests on the seabed, explodes; a standing player 3 m away takes 79.5 +- 1', () => {
+  it('AT13 (world): into 0.6 m water: one water contact, rests on the seabed, explodes; a standing player 3 m away takes the 3 m falloff damage +- 1 (v9: 92.75)', () => {
     const SEABED = -0.6;
     const map = flatMap({ islandRadius: 300, worldRadius: 330, baseHeight: SEABED });
     const { w, ids } = playingWorld(2, { map });
@@ -300,8 +303,9 @@ describe('grenades.md gaps', () => {
     expect(water.length).toBe(1);
     expect(ofType(ev, 'explosion').length).toBe(1);
     const dmg = ofType(ev, 'damage').find((e) => e.victimId === b)!;
-    expect(dmg.amount).toBeGreaterThan(79.5 - 1);
-    expect(dmg.amount).toBeLessThan(79.5 + 1);
+    const expected = fragDamageAt(3);
+    expect(dmg.amount).toBeGreaterThan(expected - 1);
+    expect(dmg.amount).toBeLessThan(expected + 1);
     expect(v.hp).toBeCloseTo(100 - dmg.amount, 6);
   });
 

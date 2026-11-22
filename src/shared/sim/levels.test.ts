@@ -24,14 +24,15 @@ describe('levels (levels.md)', () => {
     expect(effWeapon(B, 'rifle', 4).reloadMs).toBeCloseTo(2040, 6);
   });
 
-  it('3/4/5/6: pistol L4 30; shotgun L4 pellet 13, pump 765; sniper L1-L3 above 88, L4 96 and bolt 1120; dmr L4 57.5 and 320 ms', () => {
+  it('3/4/5/6: pistol L4 30; shotgun L4 pellet 13, pump 765; sniper L1-L3 above 88, L4 96 and bolt 1120; dmr L4 50.6 and 320 ms', () => {
     expect(effWeapon(B, 'pistol', 4).damage).toBeCloseTo(30, 9);
     expect(effWeapon(B, 'shotgun', 4).damage).toBe(13);
     expect(effWeapon(B, 'shotgun', 4).fireIntervalMs).toBeCloseTo(765, 6);
     // Damage pass 2026-11: L1-L3 rose, L4 stays at the pre-pass 96.
     [88, 90.64, 93.28, 96].forEach((v, i) => expect(effWeapon(B, 'sniper', (i + 1) as 1).damage).toBeCloseTo(v, 6));
     expect(effWeapon(B, 'sniper', 4).fireIntervalMs).toBeCloseTo(1120, 6);
-    expect(effWeapon(B, 'dmr', 4).damage).toBeCloseTo(57.5, 6);
+    expect(effWeapon(B, 'dmr', 4).damage).toBeCloseTo(B.weapons.dmr.damage * 1.15, 6); // 44 x 1.15 (dmr damage override)
+    expect(effWeapon(B, 'dmr', 4).damage).toBeCloseTo(50.6, 6);
     expect(effWeapon(B, 'dmr', 4).fireIntervalMs).toBeCloseTo(320, 6);
   });
 

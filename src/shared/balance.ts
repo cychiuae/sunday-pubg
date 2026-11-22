@@ -795,7 +795,7 @@ export interface Balance {
      * Damage pass 2026-11 (combat.md "Sniper rules"): a headshot from one of `weapons` on a player wearing a helmet loses
      * at most `maxHpLoss` HP from the head part of the shot (the helmet still absorbs as usual). Gate: required.
      */
-    helmetHeadshotCap: { weapons: WeaponId[]; maxHpLoss: number };
+    helmetHeadshotCap: { weapons: WeaponId[]; maxHpLoss: number; minHelmetTier: number };
   };
   /**
    * M2c: the new weapons are optional until the C-gate (the merged balance.json has them; WEAPONS lookups for them go
@@ -1509,6 +1509,10 @@ function m2cErrors(raw: Record<string, unknown>, errors: string[], check: CheckF
       }
       const cap = hhc['maxHpLoss'];
       if (!(isNum(cap) && cap >= 0)) errors.push('combat.helmetHeadshotCap.maxHpLoss must be a number >= 0');
+      const mt = hhc['minHelmetTier'];
+      if (!(isNum(mt) && Number.isInteger(mt) && mt >= 1 && mt <= 4)) {
+        errors.push('combat.helmetHeadshotCap.minHelmetTier must be an integer 1-4');
+      }
     }
   }
 

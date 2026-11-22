@@ -18,6 +18,9 @@ import type { GunId, ItemId, ItemLevel, LootTier, MapData, PropPlacement, ScopeI
 type Ev<T extends SimEvent['type']> = Extract<SimEvent, { type: T }>;
 const ofType = <T extends SimEvent['type']>(ev: SimEvent[], t: T): Ev<T>[] => ev.filter((e): e is Ev<T> => e.type === t);
 const B = BALANCE;
+/** grenades.md falloff, written independently of src (test oracle): expected frag damage at 3D distance d. */
+const fragDamageAt = (d: number, g: Balance['items']['grenade'] = BALANCE.items.grenade): number =>
+  d <= g.innerRadius ? g.maxDamage : d > g.radius ? 0 : g.maxDamage * (1 + (g.minDamageFactor - 1) * ((d - g.innerRadius) / (g.radius - g.innerRadius)));
 const GROUND = 2;
 const EYE_Y = GROUND + B.player.eyeHeight;
 const TICK = SIM_DT * 1000;
@@ -367,7 +370,7 @@ describe('smoke.md gaps', () => {
     expect(dmg!.amount).toBeCloseTo(B.weapons.rifle.damage, 6);
   });
 
-  it('7: a frag exploding inside a cloud damages a player 3 m away (79.5 unarmored)', () => {
+  it('7: a frag exploding inside a cloud damages a player 3 m away (3 m falloff damage, unarmored; v9: 92.75)', () => {
     const { w, ids } = playingWorld(2, { map: BIG() });
     const [a, t] = ids as [number, number];
     land(w, a, 50, 50);
@@ -378,7 +381,7 @@ describe('smoke.md gaps', () => {
     w.debugSpawnGrenade(a, { x: 0, y: chest, z: 0 }, { x: 0, y: 0, z: 0 }, 1);
     const ev = run(w, 2);
     const dmg = ofType(ev, 'damage').find((e) => e.victimId === t)!;
-    expect(dmg.amount).toBeCloseTo(79.5, 1);
+    expect(dmg.amount).toBeCloseTo(fragDamageAt(3), 1);
   });
 
   it('10: late join: a viewer joining 10 s after a deploy receives the cloud in its first snapshot and it is at full radius', () => {

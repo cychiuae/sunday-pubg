@@ -95,7 +95,7 @@ Ambient audio may follow the look preset (morning birds, evening crickets, offic
 6. Over 200 seeds the island and office satisfy the brief's hard guarantees (spawns and landing areas clear, doors and climb ends clear,
    office stuck rate < 2%, final-circle centres reachable, render budgets).
 7. `LAYOUT_SEED=4821` gives the same layout on two runs; the Esc panel and results show 4821.
-8. Pacing: `matchReport.ts` over 30 matches with random layouts keeps the median match length within 330-480 s and bot zone deaths no
+8. Pacing: `matchReport.ts` over 30 matches with random layouts keeps the median match length within 300-480 s (balance v9) and bot zone deaths no
    higher than with the fixed layout + 0.5 per match.
 
 ## Affected agents

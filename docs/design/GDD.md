@@ -14,7 +14,7 @@ Scope tags: **MVP** = in M1. **M2a** / **M2b** / **M2c** = added in that milesto
 ## 1. Pitch
 Twelve cute chibi castaways wash up on a bright tropical island. They grab whatever is lying on the sand,
 the tide rises and squeezes everyone together, and the last one standing wins. The game looks like a holiday
-postcard and plays like a tense duel. Matches take 6 to 9 minutes in a browser tab, and you are holding a gun within 30 seconds.
+postcard and plays like a tense duel. Matches take 5 to 8 minutes in a browser tab, and you are holding a gun within 30 seconds.
 
 ## 2. Pillars
 1. **Cute outside, tense inside.** Toon-shaded chibis, beach umbrellas and tiki torches. The stakes are still real:
@@ -37,9 +37,9 @@ postcard and plays like a tense duel. Matches take 6 to 9 minutes in a browser t
 | Flight + drop | ~10-25 s (M2b) | When to jump off the carrier and where to land: a busy POI under the route or a quiet edge; open the parachute early to glide far |
 | Loot | 0:00-1:30 | What to keep (2 weapon slots), when to leave. Bots mostly loot here too (section 10) |
 | Rotate | each phase | Which path into the next circle: open beach (fast, exposed) or treeline (slow, cover) |
-| Mid-game | 1:30-5:40 | Roomy circles (65 m, then 47.5 m). Pick your fights, third-party others, or hold and heal |
+| Mid-game | 1:30-4:45 | Roomy circles (65 m, then 47.5 m). Pick your fights, third-party others, or hold and heal |
 | Fight | anytime | Engage, disengage, or heal behind cover |
-| Endgame | ~6:00+ | The circle drops to 27.5 m, then 14 m, then 5 m. Hold position or force the last fights |
+| Endgame | ~5:30+ | The circle drops to 27.5 m, then 14 m, then 5 m. Hold position or force the last fights |
 
 ## 4. Session flow (MVP)
 1. **Title**: enter a name (1-16 chars). M2b: then the **room browser** (public rooms, Create room, Join by code; `?room=CODE` deep link).
@@ -67,18 +67,19 @@ postcard and plays like a tense duel. Matches take 6 to 9 minutes in a browser t
    resolves. Remaining bots are ranked by current HP + vest durability + helmet durability, then kills, then entity id. The top bot wins. Nobody waits minutes for a bot-only match.
 7. **Disconnect mid-match**: the player is eliminated on the spot (counted as "left"). Their loot drops. Kill credit follows the rule in section 8.
 
-Expected length (M2c v8 schedule): the tide schedule ends at 8:25 (505 s), and the final collapse guarantees an end by 9:05 (545 s). Target:
-median 6-7 min, nearly all matches between 5:30 and 9:05. Timeline (detail in `systems/zone.md`):
+Expected length (balance v9 schedule): the tide schedule ends at 7:30 (450 s), and the final collapse guarantees an end by 8:10 (490 s).
+Target: median 320-400 s (about 5.5-6.5 min; acceptance 300-480 s), nearly all matches between 5:00 and 8:10. Timeline (detail in
+`systems/zone.md`):
 
 | Time | Tide | Bots |
 |---|---|---|
-| 0:00-1:15 | Phase 1 wait, circle 125 m (whole island) | Loot phase: fight only at point blank or when shot |
-| 1:15-2:00 | Shrink to 87.5 m | Loot phase ends at about 1:15-2:00 (depends on personality) |
-| 2:00-3:55 | Phase 2: wait 70 s, then shrink to 65 m | Eagerness ramping; mostly local fights |
-| 3:55-5:40 | Phase 3: wait 65 s, then shrink to 47.5 m | Mid-range fights, third parties |
-| 5:40-6:55 | Phase 4: wait 45 s, then shrink to 27.5 m | Full eagerness at about 6:30 |
-| 6:55-8:25 | Phases 5-6: 13.75 m, then 5 m | Everyone in range |
-| 8:25-9:05 | Final hold 20 s, collapse to 0 | Match always ends |
+| 0:00-1:00 | Phase 1 wait, circle 125 m (whole island) | Loot phase: fight only at point blank or when shot |
+| 1:00-1:45 | Shrink to 87.5 m | Loot phase ends at about 1:15-2:00 (depends on personality) |
+| 1:45-3:20 | Phase 2: wait 50 s, then shrink to 65 m | Eagerness ramping; mostly local fights |
+| 3:20-4:45 | Phase 3: wait 45 s, then shrink to 47.5 m | Mid-range fights, third parties |
+| 4:45-6:00 | Phase 4: wait 45 s, then shrink to 27.5 m | Eagerness near full; the ramp completes at about 6:30 |
+| 6:00-7:30 | Phases 5-6: 13.75 m, then 5 m | Everyone in range |
+| 7:30-8:10 | Final hold 20 s, collapse to 0 | Match always ends |
 
 ## 5. Controls (mouse + keyboard, MVP)
 | Input | Action |
@@ -174,11 +175,11 @@ Body shots to kill / time to kill at full damage range (full table with headshot
 | Shotgun (pump) | iron | Point-blank burst, 117 max | 1 / 0 s | 2 / 0.9 s | 2 / 0.9 s |
 | Rifle (auto) | red dot | All-rounder 10-45 m, needs ADS at range | 5 / 0.6 s | 7 / 0.9 s | 8 / 1.05 s |
 | LMG (auto, M2a) | red dot | Planted suppression, 60 rounds | 5 / 0.48 s | 8 / 0.84 s | 9 / 0.96 s |
-| DMR (semi, M2a) | 4x | Long-range picks | 2 / 0.4 s | 4 / 1.2 s | 4 / 1.2 s |
-| Sniper (bolt, M2a) | 8x | One-shot headshot on a bare head; any helmet caps it at 70 HP | 2 / 1.4 s | 2 / 1.4 s | 2 / 1.4 s |
+| DMR (semi, M2a) | 4x | Long-range picks; head + body kills | 3 / 0.8 s | 4 / 1.2 s | 4 / 1.2 s |
+| Sniper (bolt, M2a) | 8x | One-shot headshot on a bare head or through helmet_1; helmet_2+ caps it at 70 HP | 2 / 1.4 s | 2 / 1.4 s | 2 / 1.4 s |
 
 Counterplay: the SMG falls off past 12 m; the rifle and LMG are inaccurate on the move; the shotgun is useless past ~15 m; the DMR and
-sniper are clumsy up close, slow to aim and show a **scope glint** while aimed. A sniper body shot never kills a full-HP player, and a sniper headshot never kills a full-HP player who wears a helmet (the helmet breaks or is badly damaged instead; `combat.helmetHeadshotCap`). Damage pass 2026-11: every weapon does about 20% more damage than at M2c lock, except the L4 sniper, which keeps 96 / 192.
+sniper are clumsy up close, slow to aim and show a **scope glint** while aimed. A sniper body shot never kills a full-HP player, and a sniper headshot never kills a full-HP player who wears helmet_2 or better (the helmet breaks or is badly damaged instead; `combat.helmetHeadshotCap`, `minHelmetTier` 2 since balance v9). A helmet_1 does not save you from a sniper headshot (176 - 30 = 146 HP loss). Damage pass 2026-11: every weapon does about 20% more damage than at M2c lock, except the L4 sniper, which keeps 96 / 192. Balance v9 took some of it back: DMR 50 -> 44 (3 body shots unarmored), paddle 94 -> 78; frags went up 120 -> 140.
 Every shot has a tracer, so the target always knows where fire is coming from.
 
 ### 7.3b Aim down sights (M2a, `systems/combat.md` "ADS")
@@ -205,7 +206,8 @@ and zooms by `adsZoom`. No ADS while reloading, healing, swapping, dropping or c
 - It bounces off terrain and props and explodes when the fuse ends: `maxDamage` within `innerRadius`, falling to `minDamageFactor` at
   `radius` (6 m). It needs line of sight from the blast to your chest. Vests absorb it, helmets do not. It hurts the thrower too.
 - If the fuse runs out in your hand, it explodes in your hand. Switching weapons while cooking drops it at your feet.
-- It can kill an unarmored player within about 2 m but never a full-HP player in any vest: it flushes campers out of cover.
+- It can kill an unarmored player within about 2.7 m and a vest_1 wearer within about 1.4 m, but never a full-HP player in vest_2 or
+  better (`maxDamage` 140 since balance v9): it flushes campers out of cover.
   Live grenades near you show an on-screen warning and blink faster as they are about to explode.
 
 ### 7.7 Bigger arsenal (M2c)
@@ -214,7 +216,7 @@ and zooms by `adsZoom`. No ADS while reloading, healing, swapping, dropping or c
   DMR, sniper and RPG have overrides (since the damage pass the sniper's L4 stays at the pre-pass 96 and L1-L3 sit between 88 and 93.3). Result: about 25-35% faster TTK at L4 on the same gun. Loot spot tier rolls the
   level (common spots never give L4). One colour + numeral/pips scale shared by every HUD element, the ground glow and the weapon models.
   Picking up a higher level of a gun you carry swaps that copy.
-- **New guns**: revolver (heavy, 6 rounds, 3 body / 2 head) and double barrel (2 shells, 120 per barrel at point blank, useless past 8 m).
+- **New guns**: revolver (heavy, 6 rounds, 3 body / 2 head) and double barrel (2 shells, 140 per barrel at point blank, useless past 8 m).
 - **Melee** (`systems/melee.md`): knife, machete, paddle in slot 3 (replacing fists, never a gun slot). One hit check at the swing's hit frame
   (centre ray for headshots, plus a short sweep for body hits); the paddle knocks back. Melee and rockets **break office glass**; bullets and
   grenades still do not.
@@ -233,7 +235,7 @@ M2c TTK at L1 and L4, kill-share expectations and pacing: `systems/combat.md` "M
   then shrink linearly (radius and centre) over `shrinkSeconds` to `radiusFraction * startRadius`.
 - The next circle lies fully inside the current one and is centred on land. The final circle is biased to `MapData.zoneCenters`.
 - Outside the circle you take the current phase's `dps` every `zone.damageTickMs`, ignoring armor.
-- 6 phases end at radius 5 m at 8:25 (M2c v8; 8:00 before). The middle phases are long and roomy and the late phases are short and tight (see the timeline in section 4). After `zone.finalCollapseDelaySeconds` the tide closes to 0 over `zone.finalCollapseSeconds` at `zone.finalCollapseDps`. This safety net guarantees the match ends.
+- 6 phases end at radius 5 m at 7:30 (balance v9; 8:25 in v8, 8:00 before that). The middle phases are long and roomy and the late phases are short and tight (see the timeline in section 4). After `zone.finalCollapseDelaySeconds` the tide closes to 0 over `zone.finalCollapseSeconds` at `zone.finalCollapseDps`. This safety net guarantees the match ends.
 - The tide is a translucent animated water wall at the circle edge. A warning plays `zone.warningSecondsBeforeShrink` before each shrink.
 
 ## 8b. Maps (M2b; full rules in `systems/maps.md`, layout in `levels/office.md`)
@@ -394,4 +396,4 @@ turn-rate limit, water muffling grenade damage.
 5. Smoke shares the throwable slot (4/G cycles), deploys a cloud whose radius is a pure function of time, and blocks bot sight, name tags
    and hit markers, but not bullets (`systems/smoke.md`, `systems/grenades.md`).
 6. Scopes mount by the auto-mount rule, travel with their gun, and switch with T; default sights are unchanged (`systems/scopes.md`).
-7. `matchReport.ts` (30 matches per map): median match 330-480 s (target 360-420 s), no weapon above 35% of weapon kills.
+7. `matchReport.ts` (30 matches per map): median match 300-480 s (target 320-400 s since balance v9), no weapon above 35% of weapon kills.

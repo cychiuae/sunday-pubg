@@ -74,7 +74,7 @@ describe('combat math', () => {
     expect(adsProgressOf({ adsMs: 100 }, 'fists', b)).toBe(0);
   });
 
-  it('sniper constraint: body never kills a full-HP player; a bare head kills; any helmet caps the head loss (combat.md)', () => {
+  it('sniper constraint: body never kills a full-HP player; a bare head and helmet_1 head kill; helmet_2+ caps the head loss (combat.md)', () => {
     const sn = b.weapons.sniper;
     const H = sn.damage * sn.headshotMultiplier;
     expect(sn.damage).toBeLessThan(100);
@@ -82,11 +82,17 @@ describe('combat math', () => {
     const cap = b.combat.helmetHeadshotCap;
     expect(cap.weapons).toContain('sniper');
     expect(cap.maxHpLoss).toBeLessThan(100);
-    // Without the cap every helmet below tier 4 would still let the head shot kill.
+    // Without the cap every helmet below tier 4 would still let the head shot kill. v9: helmet_1 is below minHelmetTier, so it
+    // gets no cap and dies (146); helmet_2 and helmet_3 are capped to maxHpLoss.
     const loss = (id: 'helmet_1' | 'helmet_2' | 'helmet_3') =>
       applyArmorPiece({ tier: b.items[id].tier, durability: b.items[id].durability }, H, b.items[id].absorbFraction).hpLoss;
-    expect(loss('helmet_1')).toBeGreaterThanOrEqual(100);
-    expect(Math.min(loss('helmet_1'), cap.maxHpLoss)).toBe(cap.maxHpLoss);
+    expect(b.items.helmet_1.tier).toBeLessThan(cap.minHelmetTier);
+    expect(loss('helmet_1')).toBeCloseTo(146, 9);
+    for (const id of ['helmet_2', 'helmet_3'] as const) {
+      expect(b.items[id].tier).toBeGreaterThanOrEqual(cap.minHelmetTier);
+      expect(loss(id)).toBeGreaterThanOrEqual(100);
+      expect(Math.min(loss(id), cap.maxHpLoss)).toBe(cap.maxHpLoss);
+    }
   });
 
   it('shotgun point-blank all pellets = 117 (AT4)', () => {

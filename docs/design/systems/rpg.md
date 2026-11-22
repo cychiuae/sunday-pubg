@@ -65,7 +65,7 @@ Rockets to kill a full-HP player (thresholds: none 100, vest_1 135, vest_2 155, 
 
 Time between rockets = `reloadMs` (L1 3.8 s, L4 3.04 s), so a second rocket is a long wait. In practice the RPG softens or flushes, and a
 gun finishes: L1 direct on vest_2 leaves 5 HP and no vest, which any gun finishes in one hit. An unarmored player dies within 1.43 m of
-an L1 blast (1.99 m at L4). The frag (120 inner, 6 m radius) is still the bigger blast; the rocket's strengths are speed, range and the
+an L1 blast (1.99 m at L4). The frag (140 inner since balance v9, 6 m radius) is still the bigger blast; the rocket's strengths are speed, range and the
 direct hit.
 
 ### Self-damage and point blank

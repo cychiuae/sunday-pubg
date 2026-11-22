@@ -176,17 +176,21 @@ describe('arc preview', () => {
 });
 
 describe('explosion falloff (grenades.md AT5)', () => {
-  it('120 / 102 / 79.5 / 57 / 34.5 / 12 / 0 at 1 / 2 / 3 / 4 / 5 / 6 / 6.1 m', () => {
+  it('140 / 119 / 92.75 / 66.5 / 40.25 / 14 / 0 at 1 / 2 / 3 / 4 / 5 / 6 / 6.1 m (balance v9)', () => {
+    const max = b.items.grenade.maxDamage;
+    expect(max).toBe(140);
+    // Fraction of maxDamage: 1 inside innerRadius (1.2), linear to minDamageFactor (0.1) at radius (6), 0 beyond.
     const cases: [number, number][] = [
-      [1, 120],
-      [1.2, 120],
-      [2, 102],
-      [3, 79.5],
-      [4, 57],
-      [5, 34.5],
-      [6, 12],
+      [1, 1],
+      [1.2, 1],
+      [2, 0.85],
+      [3, 0.6625],
+      [4, 0.475],
+      [5, 0.2875],
+      [6, 0.1],
       [6.1, 0],
     ];
-    for (const [d, dmg] of cases) expect(explosionDamage(d, b)).toBeCloseTo(dmg, 9);
+    for (const [d, f] of cases) expect(explosionDamage(d, b), `${d} m`).toBeCloseTo(max * f, 9);
+    expect(explosionDamage(3, b)).toBeCloseTo(92.75, 9);
   });
 });

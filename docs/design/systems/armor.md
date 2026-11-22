@@ -30,13 +30,14 @@ Each player wears at most one vest and one helmet. Armor is worn on pickup, neve
   in 5; `loot.md`).
 - Invariant check: 100 < 100 x 0.55 / 0.45 = 122.2. A fresh tier-4 piece adds exactly 100 effective HP.
 - What tier 4 buys:
-  - **Any helmet survives one sniper headshot** (damage pass 2026-11, `combat.helmetHeadshotCap`): the head HP loss is capped at 70, so
-    a full-HP wearer keeps 30 HP. helmet_1-3 are destroyed by the hit; a fresh helmet_4 keeps 3.2 durability after an L1 shot (176 x 0.55
-    = 96.8 absorbed) and breaks on an L4 shot. See `combat.md` "Sniper rules".
-  - **vest_4 survives any frag** (120 - 66 = 54 loss). Since the damage pass an L4 rocket direct hit plus blast (55.2 + 151.8) kills
-    through a fresh vest_4.
-  - Body TTK at L1 vs vest_4 (threshold 200, damage pass numbers): rifle 9 shots 1.20 s, SMG 12 shots 0.88 s, pistol 9 shots 2.00 s,
-    revolver 5 shots 1.80 s, DMR 4 shots 1.20 s, sniper 3 shots 2.80 s, pump 2 shots 0.90 s, double barrel 2 shells 0.25 s at point
+  - **helmet_2 and better survive one sniper headshot** (damage pass 2026-11, `combat.helmetHeadshotCap`, `minHelmetTier` 2 since
+    balance v9): the head HP loss is capped at 70, so a full-HP wearer keeps 30 HP. helmet_2 and helmet_3 are destroyed by the hit; a
+    fresh helmet_4 keeps 3.2 durability after an L1 shot (176 x 0.55 = 96.8 absorbed) and breaks on an L4 shot. helmet_1 gets no cap
+    (v9): a sniper headshot through it kills (176 - 30 = 146). See `combat.md` "Sniper rules".
+  - **vest_4 survives any frag** (140 - 77 = 63 loss at balance v9's `maxDamage` 140). Since the damage pass an L4 rocket direct hit plus
+    blast (55.2 + 151.8) kills through a fresh vest_4.
+  - Body TTK at L1 vs vest_4 (threshold 200, damage pass numbers; DMR at v9's 44): rifle 9 shots 1.20 s, SMG 12 shots 0.88 s, pistol 9
+    shots 2.00 s, revolver 5 shots 1.80 s, DMR 5 shots 1.60 s, sniper 3 shots 2.80 s, pump 2 shots 0.90 s, double barrel 2 shells 0.25 s at point
     blank. Every mag still covers the worst case (revolver 6 >= 5, pistol 12 >= 9, rifle 25 >= 9).
 - Tier 4 is visibly distinct on the chibi (shape and the L4 colour), so a fight against one is a choice.
 - Rockets: the impact and the blast are body damage through the vest (`rpg.md`); helmets never absorb rocket damage.

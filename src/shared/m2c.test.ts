@@ -145,12 +145,13 @@ describe('M2c effective stats (spec acceptance numbers)', () => {
       expect(e.sight).toBe(w['sight']);
     }
   });
-  it('levels: rifle reload L4 2040; pistol L4 30; shotgun L4 pellet 13, pump 765; DMR L4 57.5; knife L4 51.25 / 280 / 80', () => {
+  it('levels: rifle reload L4 2040; pistol L4 30; shotgun L4 pellet 13, pump 765; DMR L4 50.6; knife L4 51.25 / 280 / 80', () => {
     close(effectiveWeapon(b, 'rifle', 4).reloadMs, 2040);
     close(effectiveWeapon(b, 'pistol', 4).damage, 30);
     close(effectiveWeapon(b, 'shotgun', 4).damage, 13);
     close(effectiveWeapon(b, 'shotgun', 4).fireIntervalMs, 765);
-    close(effectiveWeapon(b, 'dmr', 4).damage, 57.5);
+    close(effectiveWeapon(b, 'dmr', 4).damage, b.weapons.dmr.damage * 1.15); // 44 x 1.15 = 50.6 (v9)
+    close(effectiveWeapon(b, 'dmr', 4).damage, 50.6);
     const k = effectiveWeapon(b, 'knife', 4);
     close(k.damage, 51.25);
     close(k.fireIntervalMs, 280);

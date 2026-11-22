@@ -1,7 +1,7 @@
 {
   "_meta": {
-    "version": 8,
-    "milestone": "M2c (fully merged). v8: zone waits +25 s (P2 70, P3 65, P4 45) after the bot zone-entry fix shortened matches. LOCKED for M2c QA after pacing run 4 (systems/combat.md).",
+    "version": 9,
+    "milestone": "M2c (fully merged). v9, pending verification: zone waits P1 75 -> 60, P2 70 -> 50, P3 65 -> 45 (both maps), sniper helmet cap only for helmet tier >= 2, DMR 50 -> 44, frag maxDamage 120 -> 140, paddle 94 -> 78 (systems/combat.md 'Balance v9'). v8 (zone waits +25 s after the bot zone-entry fix) was the M2c QA baseline before it.",
     "units": "Distances in metres, speeds in m/s, accelerations in m/s^2, angles in degrees, times in ms unless the key ends in Seconds. Damage and health are HP points. Keys that start with an underscore are documentation and code should ignore them.",
     "spec": "docs/design/GDD.md, docs/design/systems/*.md (M2a: combat.md, armor.md, stance.md, grenades.md, loot.md; M2b: maps.md, drop.md, rooms.md, camera.md; M2c: levels.md, melee.md, rpg.md, smoke.md, layout.md)",
     "_m2cPendingNote": "M2c (ADR 0007 section 11). v5 = merge step 1: every new M2c key and block is live (combat.throwableCycleMs, levels, scopes, layout, loot.guaranteedWeapon, weapons.revolver/dbshotgun/rpg/knife/machete/paddle, items.ammo_rocket/vest_4/helmet_4/smoke, bots.melee/rpg/smoke/scopes, bots.weaponPrefs.revolver/dbshotgun, bots.personalities.*.smokeChanceMultiplier, clientFeel.fpRecoil.revolver/dbshotgun/rpg, maps.office.layout, maps.office.loot.guaranteedWeapon). v6 = merge step 2 (loot.tiers.*, maps.office.loot.tiers.*, bots.eagernessCurve) plus tuning round 1 from the first pacing run (see the _tuning / _eagernessNote / _lootTiersTuning keys); _m2cPending is gone. L1 level multipliers are exactly 1, so every pre-M2c weapon number is its L1 value.",
@@ -99,8 +99,8 @@
     "fireMoveWindowMs": 300,
     "_throwableNote": "M2c (grenades.md 'Throwable slot'): pressing 4/G while the throwable slot is already held and ready cycles to the next carried type; the cycle takes throwableCycleMs (no fire, no throw). Selecting the slot from another slot still costs combat.swapMs.",
     "throwableCycleMs": 250,
-    "_helmetHeadshotCapNote": "Damage pass 2026-11: a headshot from a weapon in helmetHeadshotCap.weapons on a player wearing a helmet (any durability > 0) takes HP loss min(normal HP loss after the helmet, maxHpLoss). The helmet absorbs as usual (armor.md) and usually breaks or is badly damaged, so the next headshot kills. A full-HP helmeted player survives a sniper headshot at every level. systems/combat.md 'Sniper rules'.",
-    "helmetHeadshotCap": { "weapons": ["sniper"], "maxHpLoss": 70 },
+    "_helmetHeadshotCapNote": "Damage pass 2026-11, narrowed in v9: a headshot from a weapon in helmetHeadshotCap.weapons on a player wearing a helmet with durability > 0 AND tier >= minHelmetTier takes HP loss min(normal HP loss after the helmet, maxHpLoss). The helmet absorbs as usual (armor.md) and usually breaks or is badly damaged, so the next headshot kills. A full-HP player in helmet_2 or better survives a sniper headshot at every level. helmet_1 is below minHelmetTier and gets no cap: an L1 sniper headshot (176) through a fresh helmet_1 (absorbs 30) is 146 HP loss and kills. systems/combat.md 'Sniper rules'.",
+    "helmetHeadshotCap": { "weapons": ["sniper"], "maxHpLoss": 70, "minHelmetTier": 2 },
     "hitbox": {
       "_note": "Stand: vertical cylinder radius player.radius, height stances.stand.height, head = top player.headZoneFraction. Crouch: same cylinder with height stances.crouch.height, head = top crouchHeadZoneFraction. Prone: level box centred on the feet (x, z), long axis along the look yaw, proneLength x proneWidth x stances.prone.height; head = the front proneHeadLength metres (toward the look direction). During a transition: the cylinder of the taller stance.",
       "crouchHeadZoneFraction": 0.55,
@@ -200,7 +200,7 @@
       "fireMoveMultiplier": 1
     },
     "rifle": {
-      "_m2aNote": "Nerfed (M1 rifle took most kills): damage 22 -> 19, headshotMultiplier 1.75 -> 1.8 (keeps 3 headshots = 102.6), hip spreadDeg 1.0 -> 1.6 (needs ADS for range), falloff 40/110/0.7 -> 30/90/0.65. Loot weights cut too.",
+      "_m2aNote": "History: M2a nerf (the M1 rifle took most kills): damage 22 -> 19, headshotMultiplier 1.75 -> 1.8 (kept 3 headshots lethal), hip spreadDeg 1.0 -> 1.6 (needs ADS for range), falloff 40/110/0.7 -> 30/90/0.65, loot weights cut. The damage pass 2026-11 then raised damage 19 -> 23 (current value; 3 headshots = 124.2).",
       "damage": 23,
       "headshotMultiplier": 1.8,
       "fireIntervalMs": 150,
@@ -246,8 +246,8 @@
       "fireMoveMultiplier": 0.55
     },
     "dmr": {
-      "_note": "Semi-auto marksman rifle. Poor hip fire (3.0 deg), pin-point scoped (0.3 deg). Damage pass 2026-11: 42 -> 50, so 2 body / 2 head unarmored (was 3 body).",
-      "damage": 50,
+      "_note": "Semi-auto marksman rifle. Poor hip fire (3.0 deg), pin-point scoped (0.3 deg). Damage pass 2026-11: 42 -> 50 (2 body shots in 0.4 s out to 80 m, which out-performed the sniper). v9: 50 -> 44, so 3 body (0.8 s) / 2 head unarmored, and head 77 + body 44 kills. L4 (x1.15 = 50.6) still 2-taps an unarmored body.",
+      "damage": 44,
       "headshotMultiplier": 1.75,
       "fireIntervalMs": 400,
       "magSize": 10,
@@ -269,7 +269,7 @@
       "fireMoveMultiplier": 1
     },
     "sniper": {
-      "_note": "Bolt-action: fireIntervalMs (1400) IS the bolt cycle; the scope stays up while the bolt cycles. No falloff (falloffStart = falloffEnd = range, minDamageFactor 1) so the one-shot rules hold at every range. Damage pass 2026-11: base 80 -> 88; L1-L3 go up, L4 stays at 96 body / 192 head (levels.overrides.sniper). Body never kills a full-HP player at any level; an unhelmeted head kills; a helmeted head is capped by combat.helmetHeadshotCap. Arithmetic in combat.md.",
+      "_note": "Bolt-action: fireIntervalMs (1400) IS the bolt cycle; the scope stays up while the bolt cycles. No falloff (falloffStart = falloffEnd = range, minDamageFactor 1) so the one-shot rules hold at every range. Damage pass 2026-11: base 80 -> 88; L1-L3 go up, L4 stays at 96 body / 192 head (levels.overrides.sniper). Body never kills a full-HP player at any level; a head with no helmet or helmet_1 kills (v9); a head in helmet_2+ is capped by combat.helmetHeadshotCap. Arithmetic in combat.md.",
       "damage": 88,
       "headshotMultiplier": 2.0,
       "fireIntervalMs": 1400,
@@ -429,7 +429,8 @@
       "knockbackLift": 0
     },
     "paddle": {
-      "damage": 94,
+      "_note": "v9: damage 94 -> 78, its value before the damage pass 2026-11. An L4 body hit (97.5) no longer one-shots an unarmored player, and an L1 headshot (117) through a fresh helmet_1 is 87 HP loss, not a kill. systems/melee.md.",
+      "damage": 78,
       "headshotMultiplier": 1.5,
       "fireIntervalMs": 1000,
       "magSize": 0,
@@ -473,7 +474,7 @@
     "ammo_sniper": { "pickupQty": 5, "maxCarry": 20 },
     "ammo_rocket": { "pickupQty": 1, "maxCarry": 3 },
     "grenade": {
-      "_note": "systems/grenades.md. Throw speed = lerp(throwSpeedMin, throwSpeedMax, t), t = clamp((pitchDeg - throwPitchMinDeg) / (throwPitchMaxDeg - throwPitchMinDeg), 0, 1), x throwSpeedProneMultiplier when settled prone. Launch pitch = aim pitch + throwLiftDeg (max 89). radius is the BLAST radius; collisionRadius is the physics radius. dangerMargin: the HUD danger indicator shows live grenades within radius + dangerMargin metres of the local player (client only). Damage at 3D distance d from the blast to the target's chest: maxDamage if d <= innerRadius, else lerp(1, minDamageFactor, (d - innerRadius) / (radius - innerRadius)) x maxDamage, 0 beyond radius. No armTime: frags only explode on fuse.",
+      "_note": "systems/grenades.md. Throw speed = lerp(throwSpeedMin, throwSpeedMax, t), t = clamp((pitchDeg - throwPitchMinDeg) / (throwPitchMaxDeg - throwPitchMinDeg), 0, 1), x throwSpeedProneMultiplier when settled prone. Launch pitch = aim pitch + throwLiftDeg (max 89). radius is the BLAST radius; collisionRadius is the physics radius. dangerMargin: the HUD danger indicator shows live grenades within radius + dangerMargin metres of the local player (client only). Damage at 3D distance d from the blast to the target's chest: maxDamage if d <= innerRadius, else lerp(1, minDamageFactor, (d - innerRadius) / (radius - innerRadius)) x maxDamage, 0 beyond radius. No armTime: frags only explode on fuse. v9: maxDamage 120 -> 140 to keep pace with the damage pass (at 120, 52 island explosions gave 0 kills); it now also kills a fresh vest_1 within 1.39 m (grenades.md).",
       "maxCarry": 3,
       "spawnQty": 2,
       "cookable": true,
@@ -496,7 +497,7 @@
       "bounceEventMinSpeed": 2.0,
       "radius": 6.0,
       "innerRadius": 1.2,
-      "maxDamage": 120,
+      "maxDamage": 140,
       "minDamageFactor": 0.1,
       "selfDamage": true,
       "losHeightOffset": 0.2,
@@ -685,11 +686,11 @@
     "ignoresArmor": true,
     "landCheckMinHeight": 0.3,
     "landCheckMaxTries": 20,
-    "_phasesNote": "M1-fix pacing: long, roomy middle phases (P2/P3 hold 65 m and 47.5 m, about 30 m between survivors) so fights spread over the match; short, tight late phases (P5/P6) so the endgame resolves quickly. M2c v8: waits P2 60 -> 70, P3 55 -> 65, P4 40 -> 45 (+25 s), because the bot zone-entry fix made bots reach the circle and island medians fell to 341 / 353 s. Every shrink ends at 2:00 / 3:55 / 5:40 / 6:55 / 7:45 / 8:25, collapse closes at 9:05. The office uses the same schedule (maps.office.zone.phases). Reasoning in systems/zone.md.",
+    "_phasesNote": "M1-fix pacing: long, roomy middle phases (P2/P3 hold 65 m and 47.5 m, about 30 m between survivors) so fights spread over the match; short, tight late phases (P5/P6) so the endgame resolves quickly. M2c v8: waits P2 60 -> 70, P3 55 -> 65, P4 40 -> 45 (+25 s), because the bot zone-entry fix made bots reach the circle and island medians fell to 341 / 353 s. Balance v9: waits P1 75 -> 60, P2 70 -> 50, P3 65 -> 45 (-55 s), because v8 matches ended mostly in phase 3, P4 started in only about half the island matches (median 2 alive) and P5/P6/collapse almost never played; island sim (30 matches x 30 layout seeds, idle / looter) median 329 / 327 s, P4 reached in 25 / 29 of 30, alive at P4 start 4.0 / 3.0. Pacing target is now median 320-400 s (acceptance 300-480). Every shrink ends at 1:45 / 3:20 / 4:45 / 6:00 / 6:50 / 7:30 (105 / 200 / 285 / 360 / 410 / 450 s), collapse starts at 7:50 (470 s) and closes at 8:10 (490 s). The office uses the same schedule (maps.office.zone.phases). Reasoning in systems/zone.md.",
     "phases": [
-      { "waitSeconds": 75, "shrinkSeconds": 45, "radiusFraction": 0.70, "dps": 1 },
-      { "waitSeconds": 70, "shrinkSeconds": 45, "radiusFraction": 0.52, "dps": 2 },
-      { "waitSeconds": 65, "shrinkSeconds": 40, "radiusFraction": 0.38, "dps": 4 },
+      { "waitSeconds": 60, "shrinkSeconds": 45, "radiusFraction": 0.70, "dps": 1 },
+      { "waitSeconds": 50, "shrinkSeconds": 45, "radiusFraction": 0.52, "dps": 2 },
+      { "waitSeconds": 45, "shrinkSeconds": 40, "radiusFraction": 0.38, "dps": 4 },
       { "waitSeconds": 45, "shrinkSeconds": 30, "radiusFraction": 0.22, "dps": 6 },
       { "waitSeconds": 25, "shrinkSeconds": 25, "radiusFraction": 0.11, "dps": 10 },
       { "waitSeconds": 20, "shrinkSeconds": 20, "radiusFraction": 0.04, "dps": 15 }
@@ -970,9 +971,9 @@
       "zone": {
         "startRadius": 140,
         "phases": [
-          { "waitSeconds": 75, "shrinkSeconds": 45, "radiusFraction": 0.6786, "dps": 1 },
-          { "waitSeconds": 70, "shrinkSeconds": 45, "radiusFraction": 0.5, "dps": 2 },
-          { "waitSeconds": 65, "shrinkSeconds": 40, "radiusFraction": 0.3571, "dps": 4 },
+          { "waitSeconds": 60, "shrinkSeconds": 45, "radiusFraction": 0.6786, "dps": 1 },
+          { "waitSeconds": 50, "shrinkSeconds": 45, "radiusFraction": 0.5, "dps": 2 },
+          { "waitSeconds": 45, "shrinkSeconds": 40, "radiusFraction": 0.3571, "dps": 4 },
           { "waitSeconds": 45, "shrinkSeconds": 30, "radiusFraction": 0.2143, "dps": 6 },
           { "waitSeconds": 25, "shrinkSeconds": 25, "radiusFraction": 0.1071, "dps": 10 },
           { "waitSeconds": 20, "shrinkSeconds": 20, "radiusFraction": 0.0357, "dps": 15 }

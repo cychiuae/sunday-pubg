@@ -20,6 +20,11 @@ or pull the machete when someone is on top of you?
 | Paddle (beach oar) | Slow, heavy, long, pushes | 78 / 117 | 1000 ms | 350 ms | 2.8 m | 0.55 m | 7 m/s + 2.5 m/s lift | rare, epic |
 | Fists (unchanged) | Desperation | 15 / 15 | 450 ms | instant | 2.0 m (ray only) | - | - | always |
 
+**Balance v9 (paddle):** `weapons.paddle.damage` is back to 78. The damage pass 2026-11 had raised it to 94, which made an L4 body hit
+(117.5) a one-shot on an unarmored player and let an L1 headshot (141) kill through a fresh helmet_1. At 78: L4 body 97.5 never one-shots,
+and an L1 headshot through helmet_1 is 117 - 30 = 87 HP loss (survives on 13). The paddle numbers in this spec are current. The knife and
+machete rows predate the damage pass (balance now has knife 41, machete 62); their current TTK is in `combat.md` "Time to kill at L1 and L4".
+
 (`fireIntervalMs` = the swing cycle = the swing duration the art poses use, `range` = the reach, `hitFrameMs` = the hit frame; the
 art's hit-frame fraction is `hitFrameMs / fireIntervalMs`: knife 0.29, machete 0.31, paddle 0.35. `levels.md` scales the cycle and the
 hit frame by the same factor, so the fraction never changes with level.)
@@ -85,7 +90,8 @@ Thresholds: no armor 100, vest_2 155 (body), helmet_2 145 (head). Hits = ceil(th
 | Fists | - | 15 | 450 | 7, 2.70 s | 11, 4.50 s | 10, 4.05 s |
 
 Click-to-kill, unarmored body, L1: knife 0.80 s, machete 0.85 s, paddle 1.35 s (the paddle's 350 ms wind-up is its telegraph). A paddle
-headshot one-shots an unarmored player (117) at L1, and an L4 paddle headshot kills through a fresh helmet_2 (146.25 - 45 = 101.25).
+headshot one-shots an unarmored player (117) at L1 but not one in helmet_1 (87 HP loss), and an L4 paddle headshot kills through a fresh
+helmet_2 (146.25 - 45 = 101.25). No paddle body hit one-shots at any level (L4 97.5).
 Reading the table: the machete is the best melee against unarmored players, the paddle against armor (2 hits through vest_2 vs 3), and
 the knife lands first. Against guns at 2 m: the SMG still wins (0.56 s), the pump is slower than the machete (0.9 s), and any gun wins
 beyond 3 m. Melee is a close-quarters option, not a replacement for a gun.

@@ -59,8 +59,8 @@ can be switched in data alone. Outside the safe circle the ceiling sprinklers ra
 - Centre of the first circle = the floor centre (0, 0). `startRadius` 140 covers the whole floor (half-diagonal sqrt(117^2 + 72^2) = 137.4 m),
   so nobody takes damage at match start.
 - Schedule (waits, shrinks, dps, final collapse) is **identical to the island**, so the pacing model and bot eagerness ramp still line up.
-  Phases end at 2:00 / 3:45 / 5:20 / 6:30 / 7:20 / 8:00; the collapse closes at 8:40. (M2c v8: both maps now end phases at 2:00 / 3:55 /
-  5:40 / 6:55 / 7:45 / 8:25, collapse closed at 9:05; `zone.md`.)
+  Phases end at 2:00 / 3:45 / 5:20 / 6:30 / 7:20 / 8:00; the collapse closes at 8:40. (M2c v8: 2:00 / 3:55 / 5:40 / 6:55 / 7:45 / 8:25,
+  collapse closed at 9:05. Balance v9, current, both maps: 1:45 / 3:20 / 4:45 / 6:00 / 6:50 / 7:30, collapse closed at 8:10; `zone.md`.)
 - Radii are slightly larger than the island's in the middle phases, because walls and desks lengthen rotations and shorten sightlines:
 
 | Phase | Radius after | radiusFraction (of 140) | Island radius | Note |
@@ -76,7 +76,7 @@ can be switched in data alone. Outside the safe circle the ceiling sprinklers ra
   previous centre), and accept only points inside the floor rectangle inset by `zone.indoorCenterInset` (proposed 15 m). Up to
   `landCheckMaxTries`; fallback = 50% of the way from the previous centre to (0, 0). Last phase: try `MapData.zoneCenters` first (island rule).
 - Worst-case phase 1 rotation: a far corner is 137 m from the centre; the new centre can be up to 45 m away, so the walk to the new edge
-  is at most about 87 m, about 25 s with wall detours (x1.4), inside the 75 s wait.
+  is at most about 87 m, about 25 s with wall detours (x1.4), inside the 60 s phase 1 wait (75 s before balance v9).
 
 ### 2.3 Drop
 - **Superseded by the carrier drop (`drop.md`)**: everyone starts aboard a toy delivery drone flying a random straight route under the
@@ -210,6 +210,8 @@ pools (`layout.md`). Glass panes break to melee and rockets (`melee.md`).
 **Delivered (Phase C, balance.json):** as above with three differences: `office.drop.carrierSpeed` is 15 (landing-time tuning,
 drop.md "Pacing check"); `zone.indoorCenterInset` is a base key only (15, the office would
 repeat it), and `office.clientFeel.carrierCameraDistance` 10 is added (base 26; the 3P orbit around the small drone under the ceiling).
+The office `zone.phases` waits above are the M2b values; since then they follow the island schedule (balance v9: 60 / 50 / 45 / 45 / 25 /
+20 s). `balance.json` is authoritative.
 
 Bot overrides: shorter vision and scoped vision so bots do not snipe down the 234 m main aisle; shorter hearing as an approximation of
 walls muffling sound; shorter `avoidRange` because rooms are small and bots must still loot them.
@@ -274,8 +276,8 @@ Office rules (sim tests on the merged balance and a test indoor map):
 11. Walking off a 6.7 m plateau: 0 damage. Jumping off it: 0 damage. Falling 9 m: 5.8 HP (+- 0.3). On the island, falling 6.7 m still deals
     20.2 HP (+- 0.5).
 12. At t = 0 every floor corner is inside the circle (radius 140 >= 137.4). Phase end radii are 95 / 70 / 50 / 30 / 15 / 5 (+- 0.1) and the
-    phase end times match the island (M2c v8: 120 / 235 / 340 / 415 / 465 / 505 s, closed at 545 s; was 120 / 225 / 320 / 390 / 440 /
-    480, 520).
+    phase end times match the island (balance v9: 105 / 200 / 285 / 360 / 410 / 450 s, closed at 490 s; v8 was 120 / 235 / 340 / 415 /
+    465 / 505, 545; before that 120 / 225 / 320 / 390 / 440 / 480, 520).
 13. Over 1000 seeds every office zone centre lies inside the floor rectangle inset 15 m, and every circle lies inside the previous one.
 14. Outside the circle on the office: HP loss per phase dps, no speed change, and prone is allowed (no water depth).
 15. Glass: a shot at a player behind glass stops at the glass (impact surface `glass`, no damage); players cannot walk through it; a grenade
@@ -295,7 +297,7 @@ Bots (headless, `matchReport.ts` with the office map, 30 matches):
     other, including plateau loot via climb routes.
 20. Bots are stuck (no progress toward their goal for > 3 s) less than 2% of bot-alive time; bots climb to plateau loot in at least half of
     the matches; bot zone deaths per match are no higher than on the island + 0.5.
-21. Pacing: median match 330-480 s on the office too; no weapon above 35% of weapon kills.
+21. Pacing: median match 300-480 s on the office too (target 320-400 s, balance v9); no weapon above 35% of weapon kills.
 
 ## Expected to need playtest tuning
 Office phase radii (95/70/50), `fallDamageMinSpeed` 18, bot `visionRange` 40 / `scopedVisionRange` 60, the office loot tweaks,
