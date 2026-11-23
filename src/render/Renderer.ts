@@ -209,6 +209,7 @@ export class Renderer implements IRenderer {
     this.players = new PlayerViews(this.balance, {
       onPoof: (x, y, z) => this.vfx.poof(x, y, z),
       onFuseSpark: (x, y, z) => this.vfx.fuseSpark(x, y, z),
+      onHelmetGone: (x, y, z) => this.vfx.helmetPoof(x, y, z),
     }, this.items);
     this.scene.add(this.players.group);
     this.baseFov = this.balance.clientFeel?.cameraFovDeg ?? DEFAULT_FOV;
@@ -232,6 +233,7 @@ export class Renderer implements IRenderer {
         heightAt: (x, z) => this.world.heightAt(x, z),
         onThrow: (id) => this.players.onThrow(id),
         onCooked: (id, at) => this.players.onCooked(id, at),
+        onHelmetBroken: (id, tier, source) => this.players.onHelmetBroken(id, tier, source),
         onExploded: (id) => this.grenades.onExploded(id),
         shake: (amount) => {
           this.shakeAmount = Math.max(this.shakeAmount, Math.min(1, amount));

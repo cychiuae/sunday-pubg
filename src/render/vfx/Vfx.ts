@@ -6,7 +6,7 @@
  * M2a: explosion -> cartoon boom (flash star, smoke balls, shock ring, sand chunks or water spray, fading sand disc,
  * camera shake by localDistance); grenadeBounced on water and forced stance changes (water stand-up) -> splash;
  * grenadeThrown / grenadeCooked -> throw pose and fuse clock; armor break (playerDamaged vest/helmet.broken) ->
- * shard burst at the chest or head.
+ * shard burst at the chest or head; a broken helmet is also knocked off the head (host.onHelmetBroken, HelmetPops).
  */
 import type * as THREE from 'three';
 import type { EventBus, GameEvents } from '../../shared/events';
@@ -39,6 +39,8 @@ export interface VfxHost {
   onExploded?(grenadeId: number): void;
   /** M2a: camera shake, amount 0..1. */
   shake?(amount: number): void;
+  /** A head hit broke the victim's helmet: knock it off the head, away from `source`. */
+  onHelmetBroken?(playerId: number, tier: number, source: Vec3): void;
 }
 
 /**
@@ -286,6 +288,7 @@ export class Vfx {
 
   private onDamaged(e: GameEvents['playerDamaged']): void {
     this.host.onDamaged(e.victimId);
+    if (e.helmet?.broken) this.host.onHelmetBroken?.(e.victimId, e.helmet.tier, e.sourcePos);
     const v = e.victimPos;
     if (this.far(v.x, v.y, v.z)) return;
     if (e.cause === 'zone') {
@@ -471,6 +474,17 @@ export class Vfx {
     for (let i = 0; i < 4; i++) {
       this.p(x, y + 0.3, z, (r() - 0.5) * 2, 2 + r() * 1.5, (r() - 0.5) * 2, 0.8, 0.2, 0.1, this.C.star, PARTICLE_SHAPE.star, 3, 1);
     }
+  }
+
+  /** A knocked-off helmet vanishing where it came to rest: a small cream puff and two stars. */
+  helmetPoof(x: number, y: number, z: number): void {
+    if (this.far(x, y, z)) return;
+    const r = Math.random;
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * Math.PI * 2;
+      this.p(x, y, z, Math.cos(a) * 0.8, 0.4 + r() * 0.5, Math.sin(a) * 0.8, 0.45, 0.14, 0.3, this.C.white, PARTICLE_SHAPE.puff, -0.3, 2.5);
+    }
+    for (let i = 0; i < 2; i++) this.p(x, y + 0.1, z, (r() - 0.5) * 1.2, 1.2 + r(), (r() - 0.5) * 1.2, 0.5, 0.12, 0.05, this.C.star, PARTICLE_SHAPE.star, 3, 1);
   }
 
   private sparkle(x: number, y: number, z: number): void {

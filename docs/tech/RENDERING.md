@@ -242,6 +242,7 @@ and nearby loot it would have up close. The narrow frustum keeps the cost down (
 | `grenadeBounced` (M2a) | Small splash on `'water'`. |
 | `stanceChanged` (M2a) | Splash when `forced` (water stand-up). |
 | `playerDamaged` armor break (M2a) | `vest?.broken` / `helmet?.broken`: 10 tier-coloured shards and a ring at the chest or head. |
+| `playerDamaged` helmet knock-off | `helmet?.broken`: a copy of the helmet model leaves the head away from `sourcePos` (3.2 m/s out, 4.6 m/s up, tumbling), bounces at the victim's feet height, rests, and shrinks into a small puff after 2.2 s (`vfx/HelmetPops.ts`, max 8, pooled per tier). The head is drawn bare at once, even while the interpolated snapshot still reports the helmet (up to 1 s). Not launched from a body that is not drawn (first-person subject, hidden in grass). |
 | `shotFired` new guns (M2a) | Flash scale and tracer width per weapon: dmr 1.15 / 0.065 m, sniper 1.35 / 0.08 m, lmg 1.05 / 0.055 m. |
 
 **Per-frame (FrameView) M2a effects**

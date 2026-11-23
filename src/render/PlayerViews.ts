@@ -18,6 +18,7 @@ import {
 } from './procedural';
 import { PARTICLE_SHAPE } from './shaders/particles';
 import type { Markers } from './vfx/Markers';
+import { HelmetPops } from './vfx/HelmetPops';
 
 /** Metres per full walk cycle (visual) by stance: crouch steps and the prone frog-kick are shorter. */
 const STRIDE_M = 1.15;
@@ -49,6 +50,11 @@ export const CHUTE_COLLAPSE_S = 0.4;
 /** Steering estimate smoothing (1/s). */
 const STEER_SMOOTH = 6;
 const DEG = Math.PI / 180;
+/**
+ * After a helmet is knocked off, keep it off the head until the snapshot stops reporting that tier (remotes are
+ * interpolated ~100 ms behind the damage event), for at most this long (s).
+ */
+const HELMET_GONE_MAX_S = 1;
 
 /** PlayerState with the C-gate drop fields (present on the wire from the M2b server; optional until the gate). */
 type DropAware = PlayerState & Partial<PlayerDropFields>;
@@ -146,6 +152,9 @@ interface View {
   landAt: number;
   velX: number;
   velZ: number;
+  /** Tier of a helmet just knocked off (hidden from the head while the snapshot still shows it), or 0. */
+  helmetGoneTier: number;
+  helmetGoneAt: number;
 }
 
 export interface PlayerViewsEvents {
@@ -153,6 +162,8 @@ export interface PlayerViewsEvents {
   onPoof(x: number, y: number, z: number): void;
   /** Cooking grenade fuse spark at the fuse (world). */
   onFuseSpark?(x: number, y: number, z: number): void;
+  /** A knocked-off helmet finished its tumble and vanished here (small puff). */
+  onHelmetGone?(x: number, y: number, z: number): void;
 }
 
 /** Per-frame options for PlayerViews.update. */
@@ -179,6 +190,8 @@ const GLINT_RGB: [number, number, number] = [1, 0.97, 0.82];
 
 export class PlayerViews {
   readonly group = new THREE.Group();
+  /** Knocked-off helmets in flight (child of group). */
+  private readonly helmetPops: HelmetPops;
   private readonly views = new Map<PlayerId, View>();
   private readonly pool: View[] = [];
   private readonly flashMaterial: THREE.MeshBasicMaterial;
@@ -217,6 +230,8 @@ export class PlayerViews {
     this.group.name = 'players';
     this.flashMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
     this.flashMaterial.name = 'chibi:hitFlash';
+    this.helmetPops = new HelmetPops((x, y, z) => this.events.onHelmetGone?.(x, y, z));
+    this.group.add(this.helmetPops.group);
     this.setBalance(balance);
   }
 
@@ -247,6 +262,16 @@ export class PlayerViews {
     return out;
   }
 
+  /** wearOf, minus a helmet that was just knocked off but the (interpolated) snapshot still shows. */
+  private wearFor(v: View, p: PlayerView, out: ChibiWear): ChibiWear {
+    PlayerViews.wearOf(p, out);
+    if (v.helmetGoneTier > 0) {
+      if (out.helmet === v.helmetGoneTier && this.time - v.helmetGoneAt < HELMET_GONE_MAX_S) out.helmet = 0;
+      else v.helmetGoneTier = 0;
+    }
+    return out;
+  }
+
   private acquire(p: PlayerView): View {
     const ap = p.state.appearance;
     const baseKey = `${ap.skin}|${ap.outfit}|${ap.hair}`;
@@ -268,7 +293,7 @@ export class PlayerViews {
         wear: { vest: wear.vest, helmet: wear.helmet }, walkPhase: 0, lastX: 0, lastZ: 0, speed: 0, recoil: 0, hit: 0,
         hitFlash: 0, grassFade: 1, flashing: false, diedAt: -1, poofed: false, seed: 0, seen: 0, pose: makePose(),
         blend: { crouch: 0, prone: 0 }, blendInit: false, ads: 0, cookExplodesAt: 0, sparkT: 0,
-        chute: null, dropPhase: null, chuteAt: -1, landAt: -1, velX: 0, velZ: 0,
+        chute: null, dropPhase: null, chuteAt: -1, landAt: -1, velX: 0, velZ: 0, helmetGoneTier: 0, helmetGoneAt: 0,
       };
     }
     v.id = p.state.id;
@@ -289,6 +314,7 @@ export class PlayerViews {
     v.landAt = -1;
     v.velX = 0;
     v.velZ = 0;
+    v.helmetGoneTier = 0;
     if (v.chute) v.chute.visible = false;
     this.setMaterialState(v, false, 1);
     // Joined mid-match / first seen already dead: no topple, just absent.
@@ -423,6 +449,23 @@ export class PlayerViews {
     v.hitFlash = HIT_FLASH_S;
   }
 
+  /**
+   * A head hit broke this player's tier-`tier` helmet: launch a copy off the head, away from `source`, and take it off
+   * the drawn character now. Skipped when the body is not drawn (first-person subject, hidden in grass, poofed).
+   */
+  onHelmetBroken(id: PlayerId, tier: number, source: Vec3): void {
+    const v = this.views.get(id);
+    if (!v || tier <= 0) return;
+    v.helmetGoneTier = tier;
+    v.helmetGoneAt = this.time;
+    const root = v.model.root;
+    if (!root.visible || !root.parent || v.poofed) return;
+    root.updateMatrixWorld(true);
+    const showOutline = v.outlines.length > 0 && v.outlines[0].visible;
+    // Fallback direction (no usable source): off the back of the head. The next update() draws the bare head.
+    this.helmetPops.spawn(tier, v.model.head.matrixWorld, source, root.position.y, root.rotation.y, showOutline);
+  }
+
   onKilled(id: PlayerId): boolean {
     const v = this.views.get(id);
     if (!v || v.poofed) return false;
@@ -466,7 +509,7 @@ export class PlayerViews {
       v.seen = this.frame;
       // Hidden unless this frame draws the body (first-person subject, aboard, poofed paths `continue` early).
       if (v.heldHandle && this.items) this.items.setVisible(v.heldHandle, false);
-      this.setLook(v, `${s.appearance.skin}|${s.appearance.outfit}|${s.appearance.hair}`, PlayerViews.wearOf(p, _wear), p);
+      this.setLook(v, `${s.appearance.skin}|${s.appearance.outfit}|${s.appearance.hair}`, this.wearFor(v, p, _wear), p);
 
       // Revived (new match reusing an id): clear death state. The kill event arrives ~INTERP_DELAY before the
       // interpolated state says alive = false, so a recent death is never undone by a stale alive flag.
@@ -606,6 +649,8 @@ export class PlayerViews {
       }
     }
 
+    this.helmetPops.update(dt);
+
     // Players no longer in the view list (left / new match): return to the pool.
     this.removeList.length = 0;
     for (const v of this.views.values()) if (v.seen !== this.frame) this.removeList.push(v.id);
@@ -698,6 +743,7 @@ export class PlayerViews {
 
   clear(): void {
     for (const v of [...this.views.values()]) this.release(v);
+    this.helmetPops.clear();
   }
 
   dispose(): void {
@@ -707,6 +753,7 @@ export class PlayerViews {
       if (v.heldHandle && this.items) this.items.release(v.heldHandle);
     }
     this.pool.length = 0;
+    this.helmetPops.dispose();
     this.flashMaterial.dispose();
     this.fadeMaterial?.dispose();
     this.group.clear();
